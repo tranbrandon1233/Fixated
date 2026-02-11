@@ -1,3 +1,4 @@
+import { useMemo, useState } from 'react'
 import {
   Area,
   AreaChart,
@@ -9,10 +10,24 @@ import {
 } from 'recharts'
 import { MetricCard } from '../components/ui/MetricCard'
 import { SectionHeader } from '../components/ui/SectionHeader'
-import { portfolioKpis, portfolioSeries, topChannels } from '../data/mock'
+import {
+  portfolioKpis,
+  portfolioSeriesDaily,
+  portfolioSeriesMonthly,
+  portfolioSeriesWeekly,
+  topChannels,
+} from '../data/mock'
 import { formatNumber, formatPercent, formatThousands } from '../utils/format'
 
 export const Portfolio = () => {
+  const [range, setRange] = useState<'daily' | 'weekly' | 'monthly'>('daily')
+
+  const series = useMemo(() => {
+    if (range === 'weekly') return portfolioSeriesWeekly
+    if (range === 'monthly') return portfolioSeriesMonthly
+    return portfolioSeriesDaily
+  }, [range])
+
   return (
     <>
       <SectionHeader
@@ -31,17 +46,41 @@ export const Portfolio = () => {
         <div className="section-header">
           <div>
             <div className="section-title">Combined Views Over Time</div>
-            <div className="section-subtitle">Daily performance with engagement overlay.</div>
+            <div className="section-subtitle">
+              {range === 'daily'
+                ? 'Daily performance with engagement overlay.'
+                : range === 'weekly'
+                  ? 'Weekly rollup with engagement overlay.'
+                  : 'Monthly rollup with engagement overlay.'}
+            </div>
           </div>
           <div className="filter-bar">
-            <span className="filter-chip">Daily</span>
-            <span className="filter-chip">Weekly</span>
-            <span className="filter-chip">Monthly</span>
+            <button
+              type="button"
+              className={`filter-chip ${range === 'daily' ? 'active' : ''}`}
+              onClick={() => setRange('daily')}
+            >
+              Daily
+            </button>
+            <button
+              type="button"
+              className={`filter-chip ${range === 'weekly' ? 'active' : ''}`}
+              onClick={() => setRange('weekly')}
+            >
+              Weekly
+            </button>
+            <button
+              type="button"
+              className={`filter-chip ${range === 'monthly' ? 'active' : ''}`}
+              onClick={() => setRange('monthly')}
+            >
+              Monthly
+            </button>
           </div>
         </div>
         <div style={{ height: '280px', marginTop: '16px' }}>
           <ResponsiveContainer width="100%" height="100%">
-            <AreaChart data={portfolioSeries}>
+            <AreaChart data={series}>
               <defs>
                 <linearGradient id="viewsFill" x1="0" y1="0" x2="0" y2="1">
                   <stop offset="0%" stopColor="var(--primary)" stopOpacity={0.45} />
@@ -52,7 +91,7 @@ export const Portfolio = () => {
               <XAxis dataKey="date" tick={{ fill: 'var(--muted)', fontSize: 12 }} />
               <YAxis tick={{ fill: 'var(--muted)', fontSize: 12 }} />
               <Tooltip
-                formatter={(value: number) => [`${value}M`, 'Views']}
+                formatter={(value: number | undefined) => [`${value ?? 0}M`, 'Views']}
                 labelStyle={{ color: 'var(--muted)' }}
                 contentStyle={{
                   background: 'var(--surface)',

@@ -10,6 +10,7 @@ import { ReportViewer } from './pages/ReportViewer'
 import { Settings } from './pages/Settings'
 import type { Role } from './types/dashboard'
 import { useTheme } from './theme/useTheme'
+import { logout } from './utils/auth'
 
 const roleOptions: Role[] = ['admin', 'internal', 'brand']
 
@@ -26,9 +27,15 @@ const App = () => {
     return 'Internal'
   }, [role])
 
-  const handleLogin = () => {
-    localStorage.setItem('auth_provider', 'google')
+  const handleLogin = (provider: 'google') => {
+    localStorage.setItem('auth_provider', provider)
     setIsAuthed(true)
+  }
+
+  const handleLogout = () => {
+    void logout()
+    localStorage.removeItem('auth_provider')
+    setIsAuthed(false)
   }
 
   return (
@@ -49,6 +56,7 @@ const App = () => {
               onRoleChange={setRole}
               themeMode={mode}
               onToggleTheme={toggle}
+              onLogout={handleLogout}
             />
           ) : (
             <Navigate to="/login" replace />

@@ -5,13 +5,19 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:auth": "node server/index.js",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview"
   },
   "dependencies": {
     "clsx": "^2.1.1",
+    "cookie-parser": "^1.4.7",
+    "dotenv": "^17.2.4",
+    "express": "^5.2.1",
+    "jspdf": "^4.1.0",
     "lucide-react": "^0.563.0",
+    "next-auth": "^5.0.0-beta.30",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "react-router-dom": "^7.13.0",

@@ -15,12 +15,33 @@ export const portfolioKpis: KPI[] = [
   { label: 'Watch Time', value: '9.4M hrs', trend: '+9.8% vs prior' },
 ]
 
-export const portfolioSeries: TimeSeriesPoint[] = [
+export const portfolioSeriesDaily: TimeSeriesPoint[] = [
   { date: 'Jan 5', views: 18.2, engagements: 0.9, posts: 74 },
+  { date: 'Jan 7', views: 19.6, engagements: 0.95, posts: 76 },
+  { date: 'Jan 9', views: 20.1, engagements: 1.0, posts: 78 },
   { date: 'Jan 12', views: 21.4, engagements: 1.1, posts: 81 },
+  { date: 'Jan 15', views: 20.6, engagements: 1.02, posts: 80 },
   { date: 'Jan 19', views: 19.8, engagements: 1.0, posts: 77 },
+  { date: 'Jan 22', views: 22.2, engagements: 1.15, posts: 84 },
   { date: 'Jan 26', views: 23.6, engagements: 1.2, posts: 88 },
+  { date: 'Jan 29', views: 25.1, engagements: 1.28, posts: 92 },
   { date: 'Feb 2', views: 27.4, engagements: 1.4, posts: 96 },
+]
+
+export const portfolioSeriesWeekly: TimeSeriesPoint[] = [
+  { date: 'Wk 1', views: 72.4, engagements: 3.6, posts: 310 },
+  { date: 'Wk 2', views: 78.8, engagements: 3.9, posts: 326 },
+  { date: 'Wk 3', views: 75.6, engagements: 3.7, posts: 318 },
+  { date: 'Wk 4', views: 83.2, engagements: 4.1, posts: 344 },
+  { date: 'Wk 5', views: 88.4, engagements: 4.5, posts: 366 },
+]
+
+export const portfolioSeriesMonthly: TimeSeriesPoint[] = [
+  { date: 'Oct', views: 256.4, engagements: 12.4, posts: 1120 },
+  { date: 'Nov', views: 271.8, engagements: 13.1, posts: 1186 },
+  { date: 'Dec', views: 298.6, engagements: 14.2, posts: 1304 },
+  { date: 'Jan', views: 322.4, engagements: 15.3, posts: 1386 },
+  { date: 'Feb', views: 187.6, engagements: 8.7, posts: 782 },
 ]
 
 export const topChannels: ChannelSummary[] = [
@@ -156,7 +177,7 @@ export const campaigns: CampaignSummary[] = [
     id: 'camp-3',
     name: 'Community Drive',
     brand: 'Horizon Health',
-    status: 'AtRisk',
+    status: 'At Risk',
     startDate: 'Jan 20, 2026',
     endDate: 'Apr 5, 2026',
     guaranteedViews: 24_000_000,

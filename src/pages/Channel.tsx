@@ -2,10 +2,13 @@ import {
   Bar,
   BarChart,
   CartesianGrid,
+  Pie,
+  PieChart,
   ResponsiveContainer,
   Tooltip,
   XAxis,
   YAxis,
+  Cell,
 } from 'recharts'
 import { Badge } from '../components/ui/Badge'
 import { SectionHeader } from '../components/ui/SectionHeader'
@@ -14,6 +17,14 @@ import { formatNumber, formatPercent } from '../utils/format'
 
 export const Channel = () => {
   const channel = topChannels[0]
+  const pieColors = [
+    'var(--primary)',
+    '#FC46AA',
+    '#4aa3df',
+    '#f2a24b',
+    '#f97066',
+    '#9fb2a7',
+  ]
 
   return (
     <>
@@ -51,11 +62,16 @@ export const Channel = () => {
                 <XAxis dataKey="label" tick={{ fill: 'var(--muted)', fontSize: 12 }} />
                 <YAxis tick={{ fill: 'var(--muted)', fontSize: 12 }} />
                 <Tooltip
-                  formatter={(value: number) => [`${value}%`, 'Share']}
+                  formatter={(value, _name, payload) => [
+                    `${typeof value === 'number' ? value : value ?? 0}%`,
+                    payload?.payload?.label ?? 'Share',
+                  ]}
+                  labelStyle={{ color: 'var(--muted)' }}
                   contentStyle={{
                     background: 'var(--surface)',
                     border: '1px solid var(--border)',
                     borderRadius: 12,
+                    color: 'var(--primary)',
                   }}
                 />
                 <Bar dataKey="value" fill="var(--primary)" radius={[6, 6, 0, 0]} />
@@ -93,32 +109,106 @@ export const Channel = () => {
       <div className="grid grid-3">
         <div className="card">
           <SectionHeader title="Age Distribution" subtitle="Audience age bands." />
-          <div className="filter-bar">
-            {ageDistribution.map((item) => (
-              <span key={item.label} className="filter-chip">
-                {item.label}: {item.value}%
-              </span>
-            ))}
+          <div style={{ height: '220px', marginTop: '12px' }}>
+            <ResponsiveContainer width="100%" height="100%">
+              <PieChart>
+                <Tooltip
+                  formatter={(value, _name, payload) => [
+                    `${typeof value === 'number' ? value : value ?? 0}%`,
+                    payload?.payload?.label ?? 'Share',
+                  ]}
+                  labelStyle={{ color: 'var(--muted)' }}
+                  itemStyle={{ color: 'var(--muted)' }}
+                  contentStyle={{
+                    background: 'var(--surface)',
+                    border: '1px solid var(--border)',
+                    borderRadius: 12,
+                    color: 'var(--primary)',
+                  }}
+                />
+                <Pie
+                  data={ageDistribution}
+                  dataKey="value"
+                  nameKey="label"
+                  innerRadius={45}
+                  outerRadius={80}
+                  paddingAngle={2}
+                >
+                  {ageDistribution.map((entry, index) => (
+                    <Cell key={entry.label} fill={pieColors[index % pieColors.length]} />
+                  ))}
+                </Pie>
+              </PieChart>
+            </ResponsiveContainer>
           </div>
         </div>
         <div className="card">
           <SectionHeader title="Gender" subtitle="Audience gender split." />
-          <div className="filter-bar">
-            {genderDistribution.map((item) => (
-              <span key={item.label} className="filter-chip">
-                {item.label}: {item.value}%
-              </span>
-            ))}
+          <div style={{ height: '220px', marginTop: '12px' }}>
+            <ResponsiveContainer width="100%" height="100%">
+              <PieChart>
+                <Tooltip
+                  formatter={(value, _name, payload) => [
+                    `${typeof value === 'number' ? value : value ?? 0}%`,
+                    payload?.payload?.label ?? 'Share',
+                  ]}
+                  labelStyle={{ color: 'var(--muted)' }}
+                  itemStyle={{ color: 'var(--muted)' }}
+                  contentStyle={{
+                    background: 'var(--surface)',
+                    border: '1px solid var(--border)',
+                    borderRadius: 12,
+                    color: 'var(--primary)',
+                  }}
+                />
+                <Pie
+                  data={genderDistribution}
+                  dataKey="value"
+                  nameKey="label"
+                  innerRadius={45}
+                  outerRadius={80}
+                  paddingAngle={2}
+                >
+                  {genderDistribution.map((entry, index) => (
+                    <Cell key={entry.label} fill={pieColors[index % pieColors.length]} />
+                  ))}
+                </Pie>
+              </PieChart>
+            </ResponsiveContainer>
           </div>
         </div>
         <div className="card">
           <SectionHeader title="Top Geos" subtitle="Top countries/cities." />
-          <div className="filter-bar">
-            {topGeos.map((item) => (
-              <span key={item.label} className="filter-chip">
-                {item.label}: {item.value}%
-              </span>
-            ))}
+          <div style={{ height: '220px', marginTop: '12px' }}>
+            <ResponsiveContainer width="100%" height="100%">
+              <PieChart>
+                <Tooltip
+                  formatter={(value, _name, payload) => [
+                    `${typeof value === 'number' ? value : value ?? 0}%`,
+                    payload?.payload?.label ?? 'Share',
+                  ]}
+                  labelStyle={{ color: 'var(--muted)' }}
+                  itemStyle={{ color: 'var(--muted)' }}                  contentStyle={{
+                    background: 'var(--surface)',
+                    border: '1px solid var(--border)',
+                    borderRadius: 12,
+                    color: 'var(--primary)',
+                  }}
+                />
+                <Pie
+                  data={topGeos}
+                  dataKey="value"
+                  nameKey="label"
+                  innerRadius={45}
+                  outerRadius={80}
+                  paddingAngle={2}
+                >
+                  {topGeos.map((entry, index) => (
+                    <Cell key={entry.label} fill={pieColors[index % pieColors.length]} />
+                  ))}
+                </Pie>
+              </PieChart>
+            </ResponsiveContainer>
           </div>
         </div>
       </div>

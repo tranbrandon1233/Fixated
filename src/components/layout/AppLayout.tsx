@@ -10,6 +10,7 @@ interface AppLayoutProps {
   onRoleChange: (role: Role) => void
   themeMode: 'light' | 'dark'
   onToggleTheme: () => void
+  onLogout: () => void
 }
 
 const routeTitles: Record<string, string> = {
@@ -27,6 +28,7 @@ export const AppLayout = ({
   onRoleChange,
   themeMode,
   onToggleTheme,
+  onLogout,
 }: AppLayoutProps) => {
   const location = useLocation()
   const title = routeTitles[location.pathname] ?? 'Dashboard'
@@ -43,6 +45,7 @@ export const AppLayout = ({
           onRoleChange={onRoleChange}
           themeMode={themeMode}
           onToggleTheme={onToggleTheme}
+          onLogout={onLogout}
         />
         <main className="page">
           <Outlet />

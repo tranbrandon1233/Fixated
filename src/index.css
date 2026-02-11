@@ -14,6 +14,7 @@ html[data-theme="light"] {
   --surface: #ffffff;
   --surface-alt: #eef3ef;
   --text: #0f1f18;
+  --tooltip-text: #0f1f18;
   --muted: #536159;
   --border: #dbe3de;
   --primary: #0f5f44;
@@ -30,6 +31,7 @@ html[data-theme="dark"] {
   --surface: #111f18;
   --surface-alt: #162822;
   --text: #e8f2ec;
+  --tooltip-text: #ffffff;
   --muted: #9fb2a7;
   --border: #24332c;
   --primary: #2fb66d;
@@ -290,6 +292,144 @@ a:focus-visible {
   font-size: 13px;
 }
 
+.filter-chip.active {
+  background: var(--primary);
+  color: #ffffff;
+  border-color: transparent;
+}
+
+.filter-chip,
+.filter-chip button {
+  cursor: pointer;
+}
+
+.filter-chip.static {
+  cursor: default;
+}
+
+.role-select {
+  margin-left: 8px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+}
+
+.role-select option {
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+}
+
+html[data-theme="dark"] .role-select,
+html[data-theme="dark"] .role-select option {
+  background: #111f18;
+  color: var(--text);
+}
+
+.form-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.input,
+.select,
+.textarea {
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  padding: 8px 12px;
+  border-radius: 10px;
+}
+
+.select {
+  cursor: pointer;
+}
+
+.textarea {
+  min-height: 96px;
+  resize: vertical;
+}
+
+.check-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.check-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.check-pill input {
+  margin: 0;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(8, 14, 11, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  z-index: 50;
+}
+
+.modal-card {
+  width: min(720px, 100%);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 24px;
+  box-shadow: var(--shadow);
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-top: 20px;
+}
+
+.tooltip {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.tooltip::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 10px);
+  transform: translateX(-50%);
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+  white-space: nowrap;
+  box-shadow: var(--shadow);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease;
+}
+
+.tooltip:hover::after,
+.tooltip:focus-within::after {
+  opacity: 1;
+}
+
 .primary-button {
   background: var(--primary);
   color: #ffffff;
@@ -422,10 +562,15 @@ a:focus-visible {
   border-radius: 12px;
   background: #ffffff;
   color: #1f1f1f;
-  border: 1px solid var(--border);
+  border: 1px solid #dadce0;
   font-weight: 600;
   cursor: pointer;
   transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+html[data-theme="dark"] .google-button {
+  background: #ffffff;
+  color: #1f1f1f;
 }
 
 .google-button:hover {
@@ -435,6 +580,13 @@ a:focus-visible {
 
 .google-button:active {
   transform: translateY(0);
+}
+
+.login-error {
+  margin: 0;
+  font-size: 12px;
+  color: var(--danger);
+  text-align: center;
 }
 
 .login-footnote {

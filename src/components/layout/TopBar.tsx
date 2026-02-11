@@ -8,6 +8,7 @@ interface TopBarProps {
   themeMode: 'light' | 'dark'
   onRoleChange: (role: Role) => void
   onToggleTheme: () => void
+  onLogout: () => void
 }
 
 export const TopBar = ({
@@ -18,25 +19,23 @@ export const TopBar = ({
   themeMode,
   onRoleChange,
   onToggleTheme,
+  onLogout,
 }: TopBarProps) => {
   return (
     <header className="topbar">
       <div className="topbar-title">{title}</div>
       <div className="filter-bar">
-        <span className="filter-chip">Data refreshed 2 hrs ago</span>
+        <span className="filter-chip static">Data refreshed 2 hrs ago</span>
         <button className="ghost-button" onClick={onToggleTheme}>
           Theme: {themeMode === 'dark' ? 'Dark' : 'Light'}
         </button>
+      
         <label className="filter-chip">
           Role:
           <select
             value={role}
             onChange={(event) => onRoleChange(event.target.value as Role)}
-            style={{
-              marginLeft: '8px',
-              border: 'none',
-              background: 'transparent',
-            }}
+            className="role-select"
           >
             {roleOptions.map((option) => (
               <option key={option} value={option}>
@@ -45,7 +44,10 @@ export const TopBar = ({
             ))}
           </select>
         </label>
-        <span className="filter-chip">{roleLabel}</span>
+        <span className="filter-chip bg-black">{roleLabel}</span>
+        <button className="ghost-button" onClick={onLogout}>
+          Log out
+        </button>
       </div>
     </header>
   )
