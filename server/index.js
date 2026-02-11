@@ -1,6 +1,7 @@
 import 'dotenv/config'
 import crypto from 'node:crypto'
-import { URLSearchParams } from 'node:url'
+import path from 'node:path'
+import { URLSearchParams, fileURLToPath } from 'node:url'
 import cookieParser from 'cookie-parser'
 import express from 'express'
 
@@ -146,6 +147,14 @@ app.post('/auth/logout', (_req, res) => {
   res.sendStatus(204)
 })
 
-app.listen(port, () => {
-  console.log(`Auth server listening on ${serverBaseUrl}`)
-})
+const isDirectRun = process.argv[1]
+  ? path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+  : false
+
+if (isDirectRun) {
+  app.listen(port, () => {
+    console.log(`Auth server listening on ${serverBaseUrl}`)
+  })
+}
+
+export { app }
