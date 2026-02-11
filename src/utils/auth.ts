@@ -4,7 +4,7 @@ const normalizeBaseUrl = (value?: string) => {
 }
 
 const authBaseUrl =
-  normalizeBaseUrl(import.meta.env.VITE_AUTH_BASE_URL) || 'http://localhost:5000'
+  normalizeBaseUrl(import.meta.env.VITE_AUTH_BASE_URL) || 'https://fixated-dashboard.netlify.app'
 
 export const getGoogleLoginUrl = () => `${authBaseUrl}/oauth/google`
 
