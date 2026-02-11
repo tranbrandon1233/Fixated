@@ -17,3 +17,8 @@
   from = "/health"
   to = "/.netlify/functions/auth/health"
   status = 200
+
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200

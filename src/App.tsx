@@ -15,9 +15,22 @@ import { logout } from './utils/auth'
 const roleOptions: Role[] = ['admin', 'internal', 'brand']
 
 const App = () => {
-  const [isAuthed, setIsAuthed] = useState(
-    () => localStorage.getItem('auth_provider') === 'google',
-  )
+  const [isAuthed, setIsAuthed] = useState(() => {
+    if (localStorage.getItem('auth_provider') === 'google') return true
+
+    const searchParams = new URLSearchParams(window.location.search)
+    const isGoogleLoginSuccess =
+      window.location.pathname === '/login' &&
+      searchParams.get('status') === 'success' &&
+      searchParams.get('provider') === 'google'
+
+    if (isGoogleLoginSuccess) {
+      localStorage.setItem('auth_provider', 'google')
+      return true
+    }
+
+    return false
+  })
   const [role, setRole] = useState<Role>('internal')
   const { mode, toggle } = useTheme()
 
