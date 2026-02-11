@@ -1,4 +1,5 @@
 
+<<<<<<< HEAD
 Tech Spec: ONO / LNO Performance Dashboard +
 Brand Reporting (v1.1)
 
@@ -290,3 +291,5 @@ External
 • Brands can understand: reach, audience, and proof of performance in <2 minutes
 • NEW: Brands can see exactly what their investment delivered vs. what was guaranteed
 • NEW: ROI metrics (CPM/CPV) demonstrate value vs. industry alternatives
+=======
+>>>>>>> eb972f62e8041ffc188d805ed87022f92ba1589b
