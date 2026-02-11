@@ -1,4 +1,5 @@
 import type {
+  CampaignStatus,
   CampaignSummary,
   ChannelSummary,
   DemographicPoint,
@@ -177,7 +178,7 @@ export const campaigns: CampaignSummary[] = [
     id: 'camp-3',
     name: 'Community Drive',
     brand: 'Horizon Health',
-    status: 'At Risk',
+    status: 'At Risk' as CampaignStatus,
     startDate: 'Jan 20, 2026',
     endDate: 'Apr 5, 2026',
     guaranteedViews: 24_000_000,

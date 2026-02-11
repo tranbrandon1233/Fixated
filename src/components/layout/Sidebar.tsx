@@ -1,4 +1,4 @@
-import { NavLink } from 'react-router-dom'
+import { NavLink, useNavigate } from 'react-router-dom'
 import type { Role } from '../../types/dashboard'
 
 interface SidebarProps {
@@ -14,6 +14,7 @@ const baseLinks = [
 ]
 
 export const Sidebar = ({ role }: SidebarProps) => {
+  const navigate = useNavigate()
   const links =
     role === 'brand'
       ? [
@@ -44,8 +45,12 @@ export const Sidebar = ({ role }: SidebarProps) => {
         <div className="section-title">Quick Actions</div>
         <div className="section-subtitle">Two-click access</div>
         <div className="filter-bar" style={{ marginTop: '12px' }}>
-          <button className="primary-button">Export Brand Report</button>
-          <button className="ghost-button">View Campaign ROI</button>
+          <button className="primary-button" onClick={() => navigate('/reports')}>
+            Export Brand Report
+          </button>
+          <button className="ghost-button" onClick={() => navigate('/campaigns')}>
+            View Campaign ROI
+          </button>
         </div>
       </div>
     </aside>

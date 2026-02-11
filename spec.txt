@@ -209,6 +209,8 @@ C) Media Kit Snapshot (optional v1.1)
 • Top content examples
 • "What brands get" positioning
 
+
+
 10.2 Report Builder UI
 User selects:
 • Date range
@@ -220,6 +222,8 @@ User selects:
 • Optional notes/summary bullets (editable)
 • NEW: Toggle: Show CPM/CPV (yes/no)
 • NEW: Toggle: Show guarantee vs. delivered (yes/no)
+
+
 Output preview
 • Live preview of report layout before exporting
 • Choose layout style: Clean PDF (1-5 pages) or Deck-style PDF (slide-like pages)
