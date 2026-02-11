@@ -21,7 +21,7 @@ const normalizeEnvValue = (value) => {
 const getEnv = (key, fallback = '') => normalizeEnvValue(process.env[key] ?? fallback)
 
 const serverBaseUrl = getEnv('SERVER_BASE_URL', 'http://localhost:5000')
-const appBaseUrl = getEnv('APP_BASE_URL', 'http://localhost:5173')
+const appBaseUrl = getEnv('APP_BASE_URL', 'https://fixated-dashboard.netlify.app/')
 const clientId = getEnv('GOOGLE_CLIENT_ID')
 const clientSecret = getEnv('GOOGLE_CLIENT_SECRET')
 const redirectUri = getEnv('GOOGLE_REDIRECT_URI', `${serverBaseUrl}/oauth/google/callback`)
