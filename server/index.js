@@ -18,10 +18,30 @@ const normalizeEnvValue = (value) => {
   return trimmed
 }
 
-const getEnv = (key, fallback = '') => normalizeEnvValue(process.env[key] ?? fallback)
+const getEnv = (key, fallback = '') => {
+  const normalized = normalizeEnvValue(process.env[key])
+  if (normalized) return normalized
+  return normalizeEnvValue(fallback)
+}
 
-const serverBaseUrl = getEnv('SERVER_BASE_URL', 'https://fixated-dashboard.netlify.app')
-const appBaseUrl = getEnv('APP_BASE_URL', 'https://fixated-dashboard.netlify.app')
+const normalizeBaseUrl = (value) => {
+  if (!value) return ''
+  return value.endsWith('/') ? value.slice(0, -1) : value
+}
+
+const withFallbackUrl = (value, fallback) => {
+  const normalizedValue = normalizeBaseUrl(value)
+  const normalizedFallback = normalizeBaseUrl(fallback)
+  try {
+    return new URL(normalizedValue).toString().replace(/\/$/, '')
+  } catch {
+    return normalizedFallback
+  }
+}
+
+const defaultBaseUrl = 'https://fixated-dashboard.netlify.app'
+const serverBaseUrl = withFallbackUrl(getEnv('SERVER_BASE_URL', defaultBaseUrl), defaultBaseUrl)
+const appBaseUrl = withFallbackUrl(getEnv('APP_BASE_URL', defaultBaseUrl), defaultBaseUrl)
 const clientId = getEnv('GOOGLE_CLIENT_ID')
 const clientSecret = getEnv('GOOGLE_CLIENT_SECRET')
 const redirectUri = getEnv('GOOGLE_REDIRECT_URI', `${serverBaseUrl}/oauth/google/callback`)
