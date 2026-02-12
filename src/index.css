@@ -367,10 +367,12 @@ html[data-theme="dark"] .role-select option {
   background: var(--surface);
   font-size: 12px;
   color: var(--muted);
+  cursor: pointer;
 }
 
 .check-pill input {
   margin: 0;
+  cursor: pointer;
 }
 
 .modal-backdrop {

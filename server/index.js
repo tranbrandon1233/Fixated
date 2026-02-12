@@ -26,15 +26,60 @@ const clientId = getEnv('GOOGLE_CLIENT_ID')
 const clientSecret = getEnv('GOOGLE_CLIENT_SECRET')
 const redirectUri = getEnv('GOOGLE_REDIRECT_URI', `${serverBaseUrl}/oauth/google/callback`)
 const scope = getEnv('GOOGLE_SCOPE', 'openid email profile')
+const youtubeClientId = getEnv('YOUTUBE_CLIENT_ID', clientId)
+const youtubeClientSecret = getEnv('YOUTUBE_CLIENT_SECRET', clientSecret)
+const youtubeRedirectUri = getEnv(
+  'YOUTUBE_REDIRECT_URI',
+  `${serverBaseUrl}/oauth/youtube/callback`,
+)
+const youtubeScope = getEnv('YOUTUBE_SCOPE', 'https://www.googleapis.com/auth/youtube.readonly')
 
 const parsedServerUrl = new URL(serverBaseUrl)
 const port = Number(getEnv('PORT', parsedServerUrl.port || '5000'))
 const isProd = getEnv('NODE_ENV') === 'production'
 
-const buildAppRedirect = ({ status, message, provider = 'google' }) => {
+const buildAppRedirect = ({ status, message, provider = 'google', path = '/login', extraParams = {} }) => {
   const params = new URLSearchParams({ status, provider })
   if (message) params.set('message', message)
-  return `${appBaseUrl}/login?${params.toString()}`
+  Object.entries(extraParams).forEach(([key, value]) => {
+    if (value === undefined || value === null || value === '') return
+    params.set(key, String(value))
+  })
+  return `${appBaseUrl}${path}?${params.toString()}`
+}
+
+const fetchYouTubeChannelName = async (accessToken) => {
+  try {
+    const response = await fetch(
+      'https://www.googleapis.com/youtube/v3/channels?part=snippet&mine=true&maxResults=1',
+      {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      },
+    )
+
+    if (!response.ok) return ''
+    const payload = await response.json().catch(() => ({}))
+    const channelTitle = payload?.items?.[0]?.snippet?.title
+    if (typeof channelTitle !== 'string') return ''
+    return channelTitle.trim()
+  } catch (_err) {
+    return ''
+  }
+}
+
+const fetchGoogleProfileName = async (accessToken) => {
+  try {
+    const response = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    })
+    if (!response.ok) return ''
+    const payload = await response.json().catch(() => ({}))
+    const profileName = payload?.name
+    if (typeof profileName !== 'string') return ''
+    return profileName.trim()
+  } catch (_err) {
+    return ''
+  }
 }
 
 app.use(cookieParser())
@@ -141,8 +186,143 @@ app.get('/oauth/google/callback', async (req, res) => {
   }
 })
 
+app.get('/oauth/youtube', (_req, res) => {
+  if (!youtubeClientId || !youtubeClientSecret || !youtubeRedirectUri) {
+    res.redirect(
+      buildAppRedirect({
+        status: 'error',
+        provider: 'youtube',
+        message: 'YouTube OAuth not configured.',
+        path: '/settings',
+      }),
+    )
+    return
+  }
+
+  const state = crypto.randomBytes(16).toString('hex')
+  res.cookie('youtube_oauth_state', state, {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: isProd,
+    maxAge: 10 * 60 * 1000,
+  })
+
+  const params = new URLSearchParams({
+    client_id: youtubeClientId,
+    redirect_uri: youtubeRedirectUri,
+    response_type: 'code',
+    scope: youtubeScope,
+    state,
+    include_granted_scopes: 'true',
+    access_type: 'offline',
+    prompt: 'consent',
+  })
+
+  res.redirect(`https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`)
+})
+
+app.get('/oauth/youtube/callback', async (req, res) => {
+  const { code, state, error, error_description: errorDescription } = req.query
+  const expectedState = req.cookies.youtube_oauth_state
+
+  if (error) {
+    res.redirect(
+      buildAppRedirect({
+        status: 'error',
+        provider: 'youtube',
+        message: typeof errorDescription === 'string' ? errorDescription : 'YouTube connection failed.',
+        path: '/settings',
+      }),
+    )
+    return
+  }
+
+  if (!state || !expectedState || state !== expectedState) {
+    res.redirect(
+      buildAppRedirect({
+        status: 'error',
+        provider: 'youtube',
+        message: 'YouTube connection state mismatch.',
+        path: '/settings',
+      }),
+    )
+    return
+  }
+
+  if (!code || typeof code !== 'string') {
+    res.redirect(
+      buildAppRedirect({
+        status: 'error',
+        provider: 'youtube',
+        message: 'Missing authorization code.',
+        path: '/settings',
+      }),
+    )
+    return
+  }
+
+  try {
+    const tokenParams = new URLSearchParams({
+      client_id: youtubeClientId,
+      client_secret: youtubeClientSecret,
+      code,
+      grant_type: 'authorization_code',
+      redirect_uri: youtubeRedirectUri,
+    })
+
+    const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: tokenParams.toString(),
+    })
+
+    const tokenPayload = await tokenResponse.json().catch(() => ({}))
+    const accessToken = tokenPayload?.access_token
+
+    if (!tokenResponse.ok || !accessToken) {
+      const message =
+        tokenPayload?.error_description ||
+        tokenPayload?.error ||
+        'YouTube token exchange failed.'
+      res.redirect(
+        buildAppRedirect({
+          status: 'error',
+          provider: 'youtube',
+          message,
+          path: '/settings',
+        }),
+      )
+      return
+    }
+
+    const youtubeChannelName = await fetchYouTubeChannelName(accessToken)
+    const fallbackProfileName = youtubeChannelName ? '' : await fetchGoogleProfileName(accessToken)
+    const connectedDisplayName = youtubeChannelName || fallbackProfileName
+
+    res.clearCookie('youtube_oauth_state')
+    res.redirect(
+      buildAppRedirect({
+        status: 'success',
+        provider: 'youtube',
+        path: '/settings',
+        extraParams: { youtube_channel_name: connectedDisplayName },
+      }),
+    )
+  } catch (_err) {
+    res.redirect(
+      buildAppRedirect({
+        status: 'error',
+        provider: 'youtube',
+        message: 'YouTube connection failed.',
+        path: '/settings',
+      }),
+    )
+  }
+})
+
 app.post('/auth/logout', (_req, res) => {
   res.clearCookie('google_oauth_state')
+  res.clearCookie('youtube_oauth_state')
   res.sendStatus(204)
 })
 

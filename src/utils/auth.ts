@@ -7,6 +7,7 @@ const authBaseUrl =
   normalizeBaseUrl(import.meta.env.VITE_AUTH_BASE_URL) || 'https://fixated-dashboard.netlify.app'
 
 export const getGoogleLoginUrl = () => `${authBaseUrl}/oauth/google`
+export const getYouTubeConnectUrl = () => `${authBaseUrl}/oauth/youtube`
 
 export const logout = async () => {
   try {

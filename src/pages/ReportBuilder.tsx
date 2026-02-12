@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { jsPDF } from 'jspdf'
 import { SectionHeader } from '../components/ui/SectionHeader'
 import {
@@ -11,6 +11,7 @@ import {
   topGeos,
   topPosts,
 } from '../data/mock'
+import { createCsvContent, downloadCsv, toFileSlug } from '../utils/csv'
 import { formatNumber } from '../utils/format'
 
 export const ReportBuilder = () => {
@@ -26,21 +27,63 @@ export const ReportBuilder = () => {
   ]
   const dataStartDate = '2026-01-01'
   const dataEndDate = '2026-02-02'
+  const campaignFilterOptions = ['No campaign filter', ...campaigns.map((campaign) => campaign.name)]
 
-  const [brandName, setBrandName] = useState(reportConfig.brand)
-  const [campaignName, setCampaignName] = useState(reportConfig.campaign)
-  const [campaignFilter, setCampaignFilter] = useState('No campaign filter')
-  const [rangeSelection, setRangeSelection] = useState(reportConfig.range)
-  const [customStart, setCustomStart] = useState(dataStartDate)
-  const [customEnd, setCustomEnd] = useState(dataEndDate)
-  const [showCPM, setShowCPM] = useState(reportConfig.showCPM)
-  const [showGuarantee, setShowGuarantee] = useState(reportConfig.showGuarantee)
-  const [notes, setNotes] = useState(
-    'Key win: TikTok drove 42% of total views.\nStrong engagement lift after Jan 20.',
-  )
-  const [channels, setChannels] = useState<string[]>(['All ONO/LNO'])
-  const [platforms, setPlatforms] = useState<string[]>(platformOptions)
-  const [metrics, setMetrics] = useState<string[]>(['Views', 'Engagements', 'Posts'])
+  const parseListParam = (value: string | null, allowed: string[], fallback: string[]) => {
+    if (!value) return fallback
+    const normalized = value
+      .split(',')
+      .map((item) => item.trim())
+      .filter((item) => allowed.includes(item))
+    return normalized.length ? normalized : fallback
+  }
+
+  const parseDateParam = (value: string | null, fallback: string, min: string, max: string) => {
+    if (!value) return fallback
+    if (value < min || value > max) return fallback
+    return value
+  }
+
+  const [initialShareState] = useState(() => {
+    const params = new URLSearchParams(window.location.search)
+    const initialChannels = parseListParam(params.get('channels'), channelOptions, ['All ONO/LNO'])
+    const hasAllChannel = initialChannels.includes('All ONO/LNO')
+
+    return {
+      brandName: params.get('brand') ?? reportConfig.brand,
+      campaignName: params.get('campaign') ?? reportConfig.campaign,
+      campaignFilter: campaignFilterOptions.includes(params.get('filter') ?? '')
+        ? (params.get('filter') as string)
+        : 'No campaign filter',
+      rangeSelection: rangeOptions.includes(params.get('range') ?? '')
+        ? (params.get('range') as string)
+        : reportConfig.range,
+      customStart: parseDateParam(params.get('start'), dataStartDate, dataStartDate, dataEndDate),
+      customEnd: parseDateParam(params.get('end'), dataEndDate, dataStartDate, dataEndDate),
+      showCPM: (params.get('showCpm') ?? String(reportConfig.showCPM)) === 'true',
+      showGuarantee: (params.get('showGuarantee') ?? String(reportConfig.showGuarantee)) === 'true',
+      notes:
+        params.get('notes') ??
+        'Key win: TikTok drove 42% of total views.\nStrong engagement lift after Jan 20.',
+      channels: hasAllChannel ? ['All ONO/LNO'] : initialChannels,
+      platforms: parseListParam(params.get('platforms'), platformOptions, platformOptions),
+      metrics: parseListParam(params.get('metrics'), metricOptions, ['Views', 'Engagements', 'Posts']),
+    }
+  })
+
+  const [brandName, setBrandName] = useState(initialShareState.brandName)
+  const [campaignName, setCampaignName] = useState(initialShareState.campaignName)
+  const [campaignFilter, setCampaignFilter] = useState(initialShareState.campaignFilter)
+  const [rangeSelection, setRangeSelection] = useState(initialShareState.rangeSelection)
+  const [customStart, setCustomStart] = useState(initialShareState.customStart)
+  const [customEnd, setCustomEnd] = useState(initialShareState.customEnd)
+  const [showCPM, setShowCPM] = useState(initialShareState.showCPM)
+  const [showGuarantee, setShowGuarantee] = useState(initialShareState.showGuarantee)
+  const [notes, setNotes] = useState(initialShareState.notes)
+  const [channels, setChannels] = useState<string[]>(initialShareState.channels)
+  const [platforms, setPlatforms] = useState<string[]>(initialShareState.platforms)
+  const [metrics, setMetrics] = useState<string[]>(initialShareState.metrics)
+  const [shareStatus, setShareStatus] = useState('')
 
   const allChannelsSelected = channels.includes('All ONO/LNO')
 
@@ -339,6 +382,96 @@ export const ReportBuilder = () => {
     doc.save(safeFileName)
   }
 
+  const handleExportCsv = () => {
+    const generatedAt = new Date().toISOString()
+    const selectedMetrics = new Set(metrics)
+    const filePrefix = toFileSlug(campaignName || brandName || 'brand-report')
+
+    const overviewRows: Array<{ field: string; value: string | number }> = [
+      { field: 'generated_at', value: generatedAt },
+      { field: 'brand', value: brandName || '' },
+      { field: 'campaign_name', value: campaignName || '' },
+      { field: 'campaign_filter', value: campaignFilter },
+      { field: 'date_range', value: displayRange },
+      { field: 'channels_included', value: allChannelsSelected ? 'All ONO/LNO' : channels.join(', ') },
+      { field: 'platforms_included', value: platforms.join(', ') },
+      { field: 'metrics_included', value: metrics.join(', ') },
+      { field: 'show_cpm', value: showCPM ? 'yes' : 'no' },
+      { field: 'show_guarantee_vs_delivered', value: showGuarantee ? 'yes' : 'no' },
+    ]
+
+    if (selectedCampaign) {
+      overviewRows.push(
+        { field: 'campaign_status', value: selectedCampaign.status },
+        { field: 'guaranteed_views', value: selectedCampaign.guaranteedViews },
+        { field: 'delivered_views', value: selectedCampaign.deliveredViews },
+        { field: 'guaranteed_engagements', value: selectedCampaign.guaranteedEngagements },
+        { field: 'delivered_engagements', value: selectedCampaign.deliveredEngagements },
+        { field: 'ono_distribution_percent', value: selectedCampaign.distribution.ono },
+        { field: 'clipper_distribution_percent', value: selectedCampaign.distribution.clipper },
+        { field: 'pacing', value: selectedCampaign.pacing },
+      )
+    }
+
+    const channelRows = filteredChannels.map((channel) => ({
+      id: channel.id,
+      name: channel.name,
+      platform: channel.platform,
+      views: channel.views,
+      engagement_rate_percent: channel.engagementRate,
+      followers: channel.followers,
+      status: channel.status,
+    }))
+
+    const postRows = filteredPosts.map((post) => ({
+      id: post.id,
+      title: post.title,
+      platform: post.platform,
+      views: post.views,
+      engagement_rate_percent: post.engagementRate,
+      campaign_tag: post.campaignTag ?? '',
+    }))
+
+    const audienceRows = [
+      ...ageDistribution.map((point) => ({
+        segment: 'age',
+        label: point.label,
+        percent: point.value,
+      })),
+      ...genderDistribution.map((point) => ({
+        segment: 'gender',
+        label: point.label,
+        percent: point.value,
+      })),
+      ...topGeos.map((point) => ({
+        segment: 'geo',
+        label: point.label,
+        percent: point.value,
+      })),
+    ]
+
+    const timeSeriesRows = portfolioSeriesDaily.map((point) => ({
+      date: point.date,
+      ...(selectedMetrics.has('Views') ? { views_millions: point.views } : {}),
+      ...(selectedMetrics.has('Engagements') ? { engagements_millions: point.engagements } : {}),
+      ...(selectedMetrics.has('Posts') ? { posts: point.posts } : {}),
+      ...(selectedMetrics.has('Watch Time') ? { watch_time_hours: '' } : {}),
+      ...(selectedMetrics.has('Followers') ? { followers_net_change: '' } : {}),
+    }))
+
+    downloadCsv(
+      `${filePrefix}-overview.csv`,
+      createCsvContent(overviewRows, ['field', 'value']),
+    )
+    downloadCsv(`${filePrefix}-channels.csv`, createCsvContent(channelRows))
+    downloadCsv(`${filePrefix}-posts.csv`, createCsvContent(postRows))
+    downloadCsv(
+      `${filePrefix}-audience.csv`,
+      createCsvContent(audienceRows, ['segment', 'label', 'percent']),
+    )
+    downloadCsv(`${filePrefix}-timeseries.csv`, createCsvContent(timeSeriesRows))
+  }
+
   const toggleSelection = (value: string, list: string[], setList: (next: string[]) => void) => {
     if (list.includes(value)) {
       setList(list.filter((item) => item !== value))
@@ -358,15 +491,74 @@ export const ReportBuilder = () => {
     setChannels(next.length ? next : ['All ONO/LNO'])
   }
 
+  const buildShareUrl = () => {
+    const params = new URLSearchParams()
+    params.set('brand', brandName)
+    params.set('campaign', campaignName)
+    params.set('filter', campaignFilter)
+    params.set('range', rangeSelection)
+    params.set('start', customStart)
+    params.set('end', customEnd)
+    params.set('showCpm', String(showCPM))
+    params.set('showGuarantee', String(showGuarantee))
+    params.set('notes', notes)
+    params.set('channels', channels.join(','))
+    params.set('platforms', platforms.join(','))
+    params.set('metrics', metrics.join(','))
+    return `${window.location.origin}/reports?${params.toString()}`
+  }
+
+  const fallbackCopy = (value: string) => {
+    const textArea = document.createElement('textarea')
+    textArea.value = value
+    textArea.style.position = 'fixed'
+    textArea.style.opacity = '0'
+    document.body.appendChild(textArea)
+    textArea.select()
+    const copied = document.execCommand('copy')
+    document.body.removeChild(textArea)
+    return copied
+  }
+
+  const handleShareLink = async () => {
+    const shareUrl = buildShareUrl()
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(shareUrl)
+      } else if (!fallbackCopy(shareUrl)) {
+        window.prompt('Copy this report link', shareUrl)
+      }
+      setShareStatus('Shareable link copied.')
+    } catch {
+      if (!fallbackCopy(shareUrl)) {
+        window.prompt('Copy this report link', shareUrl)
+        setShareStatus('Clipboard blocked. Link opened for manual copy.')
+        return
+      }
+      setShareStatus('Shareable link copied.')
+    }
+  }
+
+  useEffect(() => {
+    if (!shareStatus) return
+    const timeoutId = window.setTimeout(() => setShareStatus(''), 2500)
+    return () => window.clearTimeout(timeoutId)
+  }, [shareStatus])
+
   return (
     <>
       <SectionHeader
         title="Brand Report Builder"
         subtitle="Configure a polished, client-ready report."
         actions={
-          <button className="primary-button" onClick={handleExportPdf}>
-            Export PDF
-          </button>
+          <div className="filter-bar">
+            <button className="ghost-button" onClick={handleExportCsv}>
+              Export CSV
+            </button>
+            <button className="primary-button" onClick={handleExportPdf}>
+              Export PDF
+            </button>
+          </div>
         }
       />
 
@@ -528,9 +720,18 @@ export const ReportBuilder = () => {
               Clean PDF
             </button>
             <button className="ghost-button">Deck-style PDF</button>
-            <button className="ghost-button">Shareable link</button>
-            <button className="ghost-button">CSV export</button>
+            <button className="ghost-button" onClick={handleShareLink}>
+              Shareable link
+            </button>
+            <button className="ghost-button" onClick={handleExportCsv}>
+              CSV export
+            </button>
           </div>
+          {shareStatus ? (
+            <div className="section-subtitle" style={{ marginTop: '8px' }}>
+              {shareStatus}
+            </div>
+          ) : null}
         </div>
         <div className="card">
           <div className="section-title">Live preview</div>
