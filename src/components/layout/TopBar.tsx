@@ -1,10 +1,13 @@
+import { useEffect, useMemo, useState } from 'react'
 import type { Role } from '../../types/dashboard'
+import { formatRelativeRefreshTime } from '../../utils/refresh'
 
 interface TopBarProps {
   title: string
   role: Role
   roleLabel: string
   roleOptions: Role[]
+  lastDataRefreshAt: number | null
   themeMode: 'light' | 'dark'
   onRoleChange: (role: Role) => void
   onToggleTheme: () => void
@@ -16,16 +19,31 @@ export const TopBar = ({
   role,
   roleLabel,
   roleOptions,
+  lastDataRefreshAt,
   themeMode,
   onRoleChange,
   onToggleTheme,
   onLogout,
 }: TopBarProps) => {
+  const [refreshClock, setRefreshClock] = useState(() => Date.now())
+
+  useEffect(() => {
+    const intervalId = window.setInterval(() => {
+      setRefreshClock(Date.now())
+    }, 60_000)
+    return () => window.clearInterval(intervalId)
+  }, [])
+
+  const refreshLabel = useMemo(
+    () => formatRelativeRefreshTime(lastDataRefreshAt, refreshClock),
+    [lastDataRefreshAt, refreshClock],
+  )
+
   return (
     <header className="topbar">
       <div className="topbar-title">{title}</div>
       <div className="filter-bar">
-        <span className="filter-chip static">Data refreshed 2 hrs ago</span>
+        <span className="filter-chip static">Data refreshed {refreshLabel}</span>
         <button className="ghost-button" onClick={onToggleTheme}>
           Theme: {themeMode === 'dark' ? 'Dark' : 'Light'}
         </button>

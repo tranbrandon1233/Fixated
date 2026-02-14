@@ -2,7 +2,7 @@ export type Role = 'admin' | 'internal' | 'brand'
 
 export type Platform = 'YouTube' | 'Instagram' | 'TikTok' | 'X'
 
-export type CampaignStatus = 'Draft' | 'Active' | 'Completed' | 'Overdelivering' | 'AtRisk'
+export type CampaignStatus = 'Draft' | 'Active' | 'Completed' | 'Overdelivering' | 'At Risk'
 
 export interface KPI {
   label: string
@@ -24,6 +24,7 @@ export interface ChannelSummary {
   views: number
   engagementRate: number
   followers: number
+  followersDelta30d?: number
   status: string
 }
 

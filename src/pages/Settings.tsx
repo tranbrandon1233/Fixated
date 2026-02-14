@@ -1,42 +1,33 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { SectionHeader } from '../components/ui/SectionHeader'
+import { formatRelativeRefreshTime } from '../utils/refresh'
+import { bumpRefreshCounter } from '../utils/refreshCounter'
 import { getYouTubeConnectUrl } from '../utils/auth'
-
-const YOUTUBE_ACCOUNTS_KEY = 'youtube_connected_accounts'
-const YOUTUBE_CHANNEL_NAMES_KEY = 'youtube_connected_channel_names'
-const loadYouTubeAccounts = () => {
-  const value = Number(localStorage.getItem(YOUTUBE_ACCOUNTS_KEY))
-  if (Number.isNaN(value) || value < 0) return 0
-  return value
-}
-const loadYouTubeChannelNames = () => {
-  try {
-    const raw = localStorage.getItem(YOUTUBE_CHANNEL_NAMES_KEY)
-    if (!raw) return []
-    const parsed = JSON.parse(raw)
-    if (!Array.isArray(parsed)) return []
-    return parsed.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
-  } catch {
-    return []
-  }
-}
-const normalizeChannelName = (value: string) => value.trim().toLowerCase()
-const isExistingYouTubeChannel = (existingNames: string[], channelName: string) => {
-  const normalized = normalizeChannelName(channelName)
-  return existingNames.some((name) => normalizeChannelName(name) === normalized)
-}
+import {
+  clearYouTubeConnectionsCache,
+  clearYouTubeSummaryCache,
+  disconnectYouTubeChannels,
+  fetchAndCacheYouTubeSummary,
+  fetchYouTubeConnections,
+  startYouTubeRefresh,
+  waitForYouTubeRefresh,
+} from '../utils/youtube'
 
 type PlatformKey = 'youtube' | 'instagram' | 'tiktok' | 'x'
 type RoleKey = 'admin' | 'internal' | 'brandViewers'
 
-export const Settings = () => {
+interface SettingsProps {
+  lastDataRefreshAt: number | null
+  onDataRefreshed: (timestamp?: number) => void
+}
+
+export const Settings = ({ lastDataRefreshAt, onDataRefreshed }: SettingsProps) => {
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
 
   const status = searchParams.get('status')
   const provider = searchParams.get('provider')
-  const connectedYouTubeChannelName = searchParams.get('youtube_channel_name')?.trim() ?? ''
   const youtubeAuthMessage =
     searchParams.get('message') ??
     searchParams.get('error_description') ??
@@ -44,34 +35,10 @@ export const Settings = () => {
   const isYoutubeSuccess = provider === 'youtube' && status === 'success'
   const isYoutubeError = provider === 'youtube' && status === 'error'
 
-  const [youtubeAccounts, setYoutubeAccounts] = useState(() => {
-    const persistedAccounts = loadYouTubeAccounts()
-    if (!isYoutubeSuccess) return persistedAccounts
-    if (!connectedYouTubeChannelName) return persistedAccounts + 1
-    const existingNames = loadYouTubeChannelNames()
-    const shouldAdd = !isExistingYouTubeChannel(existingNames, connectedYouTubeChannelName)
-    return persistedAccounts + (shouldAdd ? 1 : 0)
-  })
-  const [youtubeChannelNames, setYoutubeChannelNames] = useState<string[]>(() => {
-    const existingNames = loadYouTubeChannelNames()
-    const persistedAccounts = loadYouTubeAccounts()
-    const shouldAdd =
-      isYoutubeSuccess &&
-      (!connectedYouTubeChannelName ||
-        !isExistingYouTubeChannel(existingNames, connectedYouTubeChannelName))
-    const initialAccounts = persistedAccounts + (shouldAdd ? 1 : 0)
-    if (isYoutubeSuccess) {
-      const nextName = connectedYouTubeChannelName || `Channel ${existingNames.length + 1}`
-      if (shouldAdd) return [...existingNames, nextName].slice(0, initialAccounts)
-    }
-    return existingNames.slice(0, initialAccounts)
-  })
+  const [youtubeAccounts, setYoutubeAccounts] = useState(0)
+  const [youtubeChannelNames, setYoutubeChannelNames] = useState<string[]>([])
   const [youtubeStatusMessage, setYoutubeStatusMessage] = useState<string | null>(() => {
     if (isYoutubeSuccess) {
-      const existingNames = loadYouTubeChannelNames()
-      if (connectedYouTubeChannelName && isExistingYouTubeChannel(existingNames, connectedYouTubeChannelName)) {
-        return `YouTube channel "${connectedYouTubeChannelName}" is already connected.`
-      }
       return 'YouTube account connected successfully.'
     }
     if (isYoutubeError) return youtubeAuthMessage
@@ -80,19 +47,79 @@ export const Settings = () => {
   const [selectedPlatform, setSelectedPlatform] = useState<PlatformKey | null>(null)
   const [selectedRole, setSelectedRole] = useState<RoleKey | null>(null)
   const [selectedYouTubeChannels, setSelectedYouTubeChannels] = useState<string[]>([])
+  const [isRefreshing, setIsRefreshing] = useState(false)
+  const [refreshClock, setRefreshClock] = useState(() => Date.now())
+  const [refreshCount24h, setRefreshCount24h] = useState<number | null>(null)
+
+  const fetchConnections = useCallback(async () => {
+    try {
+      const payload = await fetchYouTubeConnections()
+      const channelNames = payload.connections
+        .map((connection) => connection.channelName?.trim())
+        .filter((name): name is string => Boolean(name))
+      setYoutubeChannelNames(channelNames)
+      setYoutubeAccounts(payload.count)
+    } catch {
+      setYoutubeStatusMessage('Unable to load YouTube connections.')
+    }
+  }, [])
 
   useEffect(() => {
-    localStorage.setItem(YOUTUBE_ACCOUNTS_KEY, String(youtubeAccounts))
-  }, [youtubeAccounts])
+    const intervalId = window.setInterval(() => {
+      setRefreshClock(Date.now())
+    }, 60_000)
+    return () => window.clearInterval(intervalId)
+  }, [])
 
   useEffect(() => {
-    localStorage.setItem(YOUTUBE_CHANNEL_NAMES_KEY, JSON.stringify(youtubeChannelNames))
-  }, [youtubeChannelNames])
+    if (provider === 'youtube') return
+    let cancelled = false
+    const timeoutId = window.setTimeout(() => {
+      if (cancelled) return
+      void fetchConnections()
+    }, 0)
+    return () => {
+      cancelled = true
+      window.clearTimeout(timeoutId)
+    }
+  }, [fetchConnections, provider])
+
+  const lastRefreshLabel = useMemo(
+    () => formatRelativeRefreshTime(lastDataRefreshAt, refreshClock),
+    [lastDataRefreshAt, refreshClock],
+  )
+
+  const recordSuccessfulRefresh = useCallback((refreshedAt: number) => {
+    onDataRefreshed(refreshedAt)
+    void bumpRefreshCounter()
+      .then((payload) => {
+        setRefreshCount24h(payload.refreshCount)
+      })
+      .catch(() => null)
+  }, [onDataRefreshed])
 
   useEffect(() => {
     if (provider !== 'youtube') return
+    let cancelled = false
+    const timeoutId = window.setTimeout(() => {
+      if (cancelled) return
+      if (isYoutubeSuccess) {
+        clearYouTubeSummaryCache()
+        void fetchConnections()
+        setYoutubeStatusMessage('YouTube account connected successfully. Click Refresh now to load analytics.')
+      } else {
+        void fetchConnections()
+      }
+      if (isYoutubeError) {
+        setYoutubeStatusMessage(youtubeAuthMessage)
+      }
+    }, 0)
     navigate('/settings', { replace: true })
-  }, [navigate, provider])
+    return () => {
+      cancelled = true
+      window.clearTimeout(timeoutId)
+    }
+  }, [fetchConnections, isYoutubeError, isYoutubeSuccess, navigate, provider, recordSuccessfulRefresh, youtubeAuthMessage])
 
   const youtubeConnectionLabel = useMemo(() => {
     const noun = youtubeAccounts === 1 ? 'account' : 'accounts'
@@ -101,7 +128,9 @@ export const Settings = () => {
 
   const resolvedYoutubeChannelNames = useMemo(() => {
     if (youtubeAccounts === 0) return []
-    if (youtubeChannelNames.length >= youtubeAccounts) return youtubeChannelNames.slice(0, youtubeAccounts)
+    if (youtubeChannelNames.length >= youtubeAccounts) {
+      return youtubeChannelNames.slice(0, youtubeAccounts)
+    }
     return [
       ...youtubeChannelNames,
       ...Array.from(
@@ -129,6 +158,11 @@ export const Settings = () => {
   }
 
   const handleDisconnectYouTube = () => {
+    clearYouTubeConnectionsCache()
+    clearYouTubeSummaryCache()
+    void disconnectYouTubeChannels()
+      .then(() => fetchConnections())
+      .catch(() => null)
     setYoutubeAccounts(0)
     setYoutubeChannelNames([])
     setSelectedYouTubeChannels([])
@@ -152,6 +186,11 @@ export const Settings = () => {
       return
     }
 
+    clearYouTubeConnectionsCache()
+    clearYouTubeSummaryCache()
+    void disconnectYouTubeChannels(selectedConnectedChannels)
+      .then(() => fetchConnections())
+      .catch(() => null)
     const selectedSet = new Set(selectedConnectedChannels)
     const remainingChannels = resolvedYoutubeChannelNames.filter((name) => !selectedSet.has(name))
     const noun = selectedConnectedChannels.length === 1 ? 'channel' : 'channels'
@@ -160,6 +199,44 @@ export const Settings = () => {
     setYoutubeAccounts(remainingChannels.length)
     setSelectedYouTubeChannels([])
     setYoutubeStatusMessage(`Disconnected ${selectedConnectedChannels.length} YouTube ${noun}.`)
+  }
+
+  const handleRefreshNow = () => {
+    if (isRefreshing) return
+    setIsRefreshing(true)
+    setYoutubeStatusMessage('Refreshing YouTube data...')
+    void startYouTubeRefresh()
+      .then((job) =>
+        waitForYouTubeRefresh(job.jobId, {
+          onProgress: (status) => {
+            if (status.status === 'running' && status.channelsTotal > 0) {
+              setYoutubeStatusMessage(
+                `Refreshing YouTube data... ${Math.min(status.channelsProcessed, status.channelsTotal)}/${status.channelsTotal} channels`,
+              )
+            }
+          },
+        }),
+      )
+      .then((status) => {
+        if (status.status === 'failed') {
+          throw new Error(status.errorMessage || 'YouTube refresh failed.')
+        }
+        const refreshedAt = Date.now()
+        return fetchAndCacheYouTubeSummary({ force: true }).then((summary) => ({ summary, refreshedAt }))
+      })
+      .then(({ summary, refreshedAt }) => {
+        const connectedChannelNames = summary.channels
+          .map((channel) => channel.name?.trim())
+          .filter((name): name is string => Boolean(name))
+        setYoutubeChannelNames(connectedChannelNames)
+        setYoutubeAccounts(connectedChannelNames.length)
+        recordSuccessfulRefresh(refreshedAt)
+        setYoutubeStatusMessage('YouTube data refreshed successfully.')
+      })
+      .catch(() => {
+        setYoutubeStatusMessage('Unable to refresh YouTube data.')
+      })
+      .finally(() => setIsRefreshing(false))
   }
 
   const selectedConnectedYouTubeCount = resolvedYoutubeChannelNames.filter((name) =>
@@ -248,6 +325,7 @@ export const Settings = () => {
               {youtubeStatusMessage}
             </p>
           ) : null}
+        
         </div>
         <div className="card">
           <div className="section-title">Access & roles</div>
@@ -271,10 +349,13 @@ export const Settings = () => {
         <div className="section-title">Data refresh</div>
         <div className="section-subtitle">Daily refresh with hourly campaign pacing updates.</div>
         <div className="filter-bar" style={{ marginTop: '16px' }}>
-          <button className="ghost-button" type="button">
-            Refresh now
+          <button className="ghost-button" type="button" onClick={handleRefreshNow} disabled={isRefreshing}>
+            {isRefreshing ? 'Refreshing...' : 'Refresh now'}
           </button>
-          <span className="filter-chip">Last refresh: 2 hours ago</span>
+          <span className="filter-chip">Last refresh: {lastRefreshLabel}</span>
+          {refreshCount24h !== null ? (
+            <span className="filter-chip">Refreshes in last 24h: {refreshCount24h}</span>
+          ) : null}
         </div>
       </div>
     </>

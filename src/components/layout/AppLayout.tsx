@@ -8,6 +8,7 @@ interface AppLayoutProps {
   roleLabel: string
   roleOptions: Role[]
   onRoleChange: (role: Role) => void
+  lastDataRefreshAt: number | null
   themeMode: 'light' | 'dark'
   onToggleTheme: () => void
   onLogout: () => void
@@ -26,6 +27,7 @@ export const AppLayout = ({
   roleLabel,
   roleOptions,
   onRoleChange,
+  lastDataRefreshAt,
   themeMode,
   onToggleTheme,
   onLogout,
@@ -43,6 +45,7 @@ export const AppLayout = ({
           roleLabel={roleLabel}
           roleOptions={roleOptions}
           onRoleChange={onRoleChange}
+          lastDataRefreshAt={lastDataRefreshAt}
           themeMode={themeMode}
           onToggleTheme={onToggleTheme}
           onLogout={onLogout}

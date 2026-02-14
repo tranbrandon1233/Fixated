@@ -5,12 +5,13 @@ import {
   ageDistribution,
   campaigns,
   genderDistribution,
-  portfolioSeriesDaily,
+  portfolioSeriesDaily as mockSeries,
   reportConfig,
-  topChannels,
+  topChannels as mockTopChannels,
   topGeos,
-  topPosts,
+  topPosts as mockTopPosts,
 } from '../data/mock'
+import { useYouTubeSummary } from '../hooks/useYouTubeSummary'
 import { createCsvContent, downloadCsv, toFileSlug } from '../utils/csv'
 import { formatNumber } from '../utils/format'
 
@@ -28,6 +29,24 @@ export const ReportBuilder = () => {
   const dataStartDate = '2026-01-01'
   const dataEndDate = '2026-02-02'
   const campaignFilterOptions = ['No campaign filter', ...campaigns.map((campaign) => campaign.name)]
+  const { summary: youtubeSummary } = useYouTubeSummary()
+
+  const resolvedChannels = useMemo(() => {
+    if (!youtubeSummary.channels.length) return mockTopChannels
+    const nonYoutubeChannels = mockTopChannels.filter((channel) => channel.platform !== 'YouTube')
+    return [...youtubeSummary.channels, ...nonYoutubeChannels]
+  }, [youtubeSummary.channels])
+
+  const resolvedPosts = useMemo(() => {
+    if (!youtubeSummary.topPosts.length) return mockTopPosts
+    const nonYoutubePosts = mockTopPosts.filter((post) => post.platform !== 'YouTube')
+    return [...youtubeSummary.topPosts, ...nonYoutubePosts]
+  }, [youtubeSummary.topPosts])
+
+  const resolvedSeries = useMemo(
+    () => (youtubeSummary.timeSeries.length ? youtubeSummary.timeSeries : mockSeries),
+    [youtubeSummary.timeSeries],
+  )
 
   const parseListParam = (value: string | null, allowed: string[], fallback: string[]) => {
     if (!value) return fallback
@@ -99,17 +118,17 @@ export const ReportBuilder = () => {
   }, [campaignFilter, campaignName])
 
   const filteredChannels = useMemo(() => {
-    const byPlatform = topChannels.filter((channel) => platforms.includes(channel.platform))
-    return byPlatform.length ? byPlatform : topChannels
-  }, [platforms])
+    const byPlatform = resolvedChannels.filter((channel) => platforms.includes(channel.platform))
+    return byPlatform.length ? byPlatform : resolvedChannels
+  }, [platforms, resolvedChannels])
 
   const filteredPosts = useMemo(() => {
-    const byPlatform = topPosts.filter((post) => platforms.includes(post.platform))
-    if (!selectedCampaign) return byPlatform.length ? byPlatform : topPosts
+    const byPlatform = resolvedPosts.filter((post) => platforms.includes(post.platform))
+    if (!selectedCampaign) return byPlatform.length ? byPlatform : resolvedPosts
     const byCampaign = byPlatform.filter((post) => post.campaignTag === selectedCampaign.name)
     if (byCampaign.length) return byCampaign
-    return byPlatform.length ? byPlatform : topPosts
-  }, [platforms, selectedCampaign])
+    return byPlatform.length ? byPlatform : resolvedPosts
+  }, [platforms, resolvedPosts, selectedCampaign])
 
   const formatDateLabel = (value: string) => {
     const date = new Date(value)
@@ -253,22 +272,24 @@ export const ReportBuilder = () => {
     const chartTop = 130
     const chartWidth = availableWidth
     const chartHeight = 230
-    const maxViews = Math.max(...portfolioSeriesDaily.map((point) => point.views))
+    const maxViews = resolvedSeries.length ? Math.max(...resolvedSeries.map((point) => point.views)) : 0
     doc.setDrawColor(205, 205, 205)
     doc.rect(chartLeft, chartTop, chartWidth, chartHeight)
-    portfolioSeriesDaily.forEach((point, index) => {
-      const barWidth = chartWidth / portfolioSeriesDaily.length - 8
-      const x = chartLeft + index * (chartWidth / portfolioSeriesDaily.length) + 4
-      const height = (point.views / maxViews) * (chartHeight - 35)
-      const y = chartTop + chartHeight - height - 20
-      doc.setFillColor(28, 79, 216)
-      doc.rect(x, y, barWidth, height, 'F')
-      doc.setFontSize(8)
-      doc.setTextColor(90, 90, 90)
-      if (index % 2 === 0) {
-        doc.text(point.date, x + barWidth / 2, chartTop + chartHeight - 6, { align: 'center' })
-      }
-    })
+    if (resolvedSeries.length && maxViews > 0) {
+      resolvedSeries.forEach((point, index) => {
+        const barWidth = chartWidth / resolvedSeries.length - 8
+        const x = chartLeft + index * (chartWidth / resolvedSeries.length) + 4
+        const height = (point.views / maxViews) * (chartHeight - 35)
+        const y = chartTop + chartHeight - height - 20
+        doc.setFillColor(28, 79, 216)
+        doc.rect(x, y, barWidth, height, 'F')
+        doc.setFontSize(8)
+        doc.setTextColor(90, 90, 90)
+        if (index % 2 === 0) {
+          doc.text(point.date, x + barWidth / 2, chartTop + chartHeight - 6, { align: 'center' })
+        }
+      })
+    }
     doc.setFont('helvetica', 'bold')
     doc.setFontSize(13)
     doc.setTextColor(20, 20, 20)
@@ -450,7 +471,7 @@ export const ReportBuilder = () => {
       })),
     ]
 
-    const timeSeriesRows = portfolioSeriesDaily.map((point) => ({
+    const timeSeriesRows = resolvedSeries.map((point) => ({
       date: point.date,
       ...(selectedMetrics.has('Views') ? { views_millions: point.views } : {}),
       ...(selectedMetrics.has('Engagements') ? { engagements_millions: point.engagements } : {}),

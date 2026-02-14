@@ -209,6 +209,30 @@ a:focus-visible {
   box-shadow: var(--shadow);
 }
 
+@keyframes skeleton-shimmer {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+
+.skeleton {
+  background: linear-gradient(90deg, var(--surface-alt), var(--surface), var(--surface-alt));
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.4s ease-in-out infinite;
+}
+
+.skeleton-line {
+  height: 10px;
+  border-radius: 999px;
+}
+
+.skeleton-block {
+  border-radius: 12px;
+}
+
 .card.compact {
   padding: 16px;
 }
