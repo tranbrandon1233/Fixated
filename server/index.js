@@ -2,6 +2,7 @@ import 'dotenv/config'
 import crypto from 'node:crypto'
 import { readFile, writeFile } from 'node:fs/promises'
 import { URLSearchParams } from 'node:url'
+import path from 'node:path'
 import cookieParser from 'cookie-parser'
 import express from 'express'
 
@@ -117,7 +118,21 @@ const resolveAppRedirectBase = (req) => {
   return appBaseUrl
 }
 
-const reportingStorePath = new URL('./reporting-store.json', import.meta.url)
+const isServerlessRuntime = Boolean(process.env.NETLIFY || process.env.AWS_LAMBDA_FUNCTION_NAME)
+
+const resolveReportingStorePath = () => {
+  if (isServerlessRuntime) return null
+  try {
+    if (typeof import.meta !== 'undefined' && import.meta?.url) {
+      return new URL('./reporting-store.json', import.meta.url)
+    }
+  } catch {
+    // Ignore and fall back to process.cwd path resolution.
+  }
+  return path.join(process.cwd(), 'server', 'reporting-store.json')
+}
+
+const reportingStorePath = resolveReportingStorePath()
 let reportingStore = null
 
 const buildEmptyReportingStore = () => ({
@@ -127,6 +142,10 @@ const buildEmptyReportingStore = () => ({
 
 const loadReportingStore = async () => {
   if (reportingStore) return reportingStore
+  if (!reportingStorePath) {
+    reportingStore = buildEmptyReportingStore()
+    return reportingStore
+  }
   try {
     const raw = await readFile(reportingStorePath, 'utf8')
     const parsed = JSON.parse(raw)
@@ -143,7 +162,7 @@ const loadReportingStore = async () => {
 }
 
 const persistReportingStore = async () => {
-  if (!reportingStore) return
+  if (!reportingStore || !reportingStorePath) return
   await writeFile(reportingStorePath, JSON.stringify(reportingStore, null, 2))
 }
 
@@ -4024,8 +4043,6 @@ app.post('/auth/logout', async (req, res) => {
   clearSupabaseSessionCookies(res)
   res.sendStatus(204)
 })
-
-const isServerlessRuntime = Boolean(process.env.NETLIFY || process.env.AWS_LAMBDA_FUNCTION_NAME)
 
 const runScheduledYouTubeAutoRefresh = async () => {
   if (!isSupabaseConfigured) return
