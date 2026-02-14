@@ -924,6 +924,56 @@ const normalizeUuidArray = (value) => {
   return []
 }
 
+const CAMPAIGN_MEMBER_ROLE_ADMIN = 'admin'
+const CAMPAIGN_MEMBER_ROLE_MEMBER = 'member'
+
+const normalizeCampaignMemberRole = (value) => {
+  if (typeof value !== 'string') return CAMPAIGN_MEMBER_ROLE_MEMBER
+  return value.trim().toLowerCase() === CAMPAIGN_MEMBER_ROLE_ADMIN
+    ? CAMPAIGN_MEMBER_ROLE_ADMIN
+    : CAMPAIGN_MEMBER_ROLE_MEMBER
+}
+
+const normalizeCampaignMemberRoles = (value, creatorId = '') => {
+  const roleByUserId = {}
+
+  if (Array.isArray(value)) {
+    for (const userId of normalizeUuidArray(value)) {
+      roleByUserId[userId] = CAMPAIGN_MEMBER_ROLE_MEMBER
+    }
+  } else if (value && typeof value === 'object') {
+    for (const [rawUserId, rawRole] of Object.entries(value)) {
+      const userId = typeof rawUserId === 'string' ? rawUserId.trim() : ''
+      if (!isUuid(userId)) continue
+      roleByUserId[userId] = normalizeCampaignMemberRole(rawRole)
+    }
+  } else if (typeof value === 'string') {
+    const trimmed = value.trim()
+    if (isUuid(trimmed)) {
+      roleByUserId[trimmed] = CAMPAIGN_MEMBER_ROLE_MEMBER
+    } else if (
+      (trimmed.startsWith('[') && trimmed.endsWith(']')) ||
+      (trimmed.startsWith('{') && trimmed.endsWith('}'))
+    ) {
+      try {
+        const parsed = JSON.parse(trimmed)
+        const parsedRoles = normalizeCampaignMemberRoles(parsed)
+        Object.assign(roleByUserId, parsedRoles)
+      } catch {
+        for (const userId of normalizeUuidArray(trimmed)) {
+          roleByUserId[userId] = CAMPAIGN_MEMBER_ROLE_MEMBER
+        }
+      }
+    }
+  }
+
+  if (isUuid(creatorId)) {
+    roleByUserId[creatorId] = CAMPAIGN_MEMBER_ROLE_ADMIN
+  }
+
+  return roleByUserId
+}
+
 const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
 const normalizeEmail = (value) => {
@@ -958,6 +1008,83 @@ const normalizeEmailInputArray = (value) => {
   }
 
   return { validEmails, invalidEmails }
+}
+
+const normalizeMemberInviteInputArray = (value) => {
+  if (!Array.isArray(value)) return { validMembers: [], invalidEmails: [] }
+  const roleByEmail = new Map()
+  const invalidEmails = []
+  const seenInvalid = new Set()
+
+  for (const entry of value) {
+    const rawEmail =
+      typeof entry === 'string'
+        ? entry
+        : entry && typeof entry === 'object' && typeof entry.email === 'string'
+          ? entry.email
+          : ''
+    const rawRole =
+      entry && typeof entry === 'object' && !Array.isArray(entry)
+        ? normalizeCampaignMemberRole(entry.role)
+        : CAMPAIGN_MEMBER_ROLE_MEMBER
+    const normalizedEmail = normalizeEmail(rawEmail)
+    if (!normalizedEmail) {
+      const trimmedRawEmail = typeof rawEmail === 'string' ? rawEmail.trim().toLowerCase() : ''
+      if (trimmedRawEmail && !seenInvalid.has(trimmedRawEmail)) {
+        seenInvalid.add(trimmedRawEmail)
+        invalidEmails.push(trimmedRawEmail)
+      }
+      continue
+    }
+
+    const existingRole = roleByEmail.get(normalizedEmail)
+    if (!existingRole || rawRole === CAMPAIGN_MEMBER_ROLE_ADMIN) {
+      roleByEmail.set(normalizedEmail, rawRole)
+    }
+  }
+
+  const validMembers = [...roleByEmail.entries()].map(([email, role]) => ({ email, role }))
+  return { validMembers, invalidEmails }
+}
+
+const normalizeMemberRoleUpdateInputArray = (value) => {
+  if (!Array.isArray(value)) return { validUpdates: [], invalidUserIds: [] }
+  const roleByUserId = new Map()
+  const invalidUserIds = []
+  const seenInvalid = new Set()
+
+  for (const entry of value) {
+    const rawUserId =
+      entry && typeof entry === 'object' && typeof entry.userId === 'string' ? entry.userId : ''
+    const userId = typeof rawUserId === 'string' ? rawUserId.trim() : ''
+    if (!isUuid(userId)) {
+      if (userId && !seenInvalid.has(userId)) {
+        seenInvalid.add(userId)
+        invalidUserIds.push(userId)
+      }
+      continue
+    }
+
+    const role =
+      entry && typeof entry === 'object' && !Array.isArray(entry)
+        ? normalizeCampaignMemberRole(entry.role)
+        : CAMPAIGN_MEMBER_ROLE_MEMBER
+    const existingRole = roleByUserId.get(userId)
+    if (!existingRole || role === CAMPAIGN_MEMBER_ROLE_ADMIN) {
+      roleByUserId.set(userId, role)
+    }
+  }
+
+  const validUpdates = [...roleByUserId.entries()].map(([userId, role]) => ({ userId, role }))
+  return { validUpdates, invalidUserIds }
+}
+
+const resolveCampaignUserRole = (row, userId) => {
+  if (!isUuid(userId)) return ''
+  const creator = typeof row?.creator === 'string' ? row.creator.trim() : ''
+  if (creator && creator === userId) return CAMPAIGN_MEMBER_ROLE_ADMIN
+  const allowedMemberRoles = normalizeCampaignMemberRoles(row?.allowed_members, creator)
+  return allowedMemberRoles[userId] || ''
 }
 
 const hasIntersection = (left, right) => {
@@ -1149,12 +1276,14 @@ const buildEmptyMemberResolution = () => ({
   failed: [],
 })
 
-const resolveMemberIdsFromEmails = async (emails) => {
+const resolveMemberIdsFromEmails = async (members) => {
   const resolution = buildEmptyMemberResolution()
-  const resolvedUserIds = []
-  const seenUserIds = new Set()
+  const resolvedMembersByUserId = new Map()
 
-  for (const email of emails) {
+  for (const member of members) {
+    const email = normalizeEmail(member?.email)
+    const role = normalizeCampaignMemberRole(member?.role)
+    if (!email) continue
     const lookupResult = await fetchUsersRowByEmail(email)
     if (!lookupResult.ok) {
       resolution.failed.push({
@@ -1177,20 +1306,26 @@ const resolveMemberIdsFromEmails = async (emails) => {
       continue
     }
 
-    if (!seenUserIds.has(userId)) {
-      seenUserIds.add(userId)
-      resolvedUserIds.push(userId)
+    const existingMember = resolvedMembersByUserId.get(userId)
+    if (!existingMember || role === CAMPAIGN_MEMBER_ROLE_ADMIN) {
+      resolvedMembersByUserId.set(userId, {
+        userId,
+        role,
+      })
     }
 
     resolution.added.push({
       action: 'add',
       email,
       userId,
-      message: 'User added to campaign members.',
+      message: `User added to campaign members as ${role}.`,
     })
   }
 
-  return { resolvedUserIds, resolution }
+  return {
+    resolvedMembers: [...resolvedMembersByUserId.values()],
+    resolution,
+  }
 }
 
 const resolveAuthedUserContext = async (req, res) => {
@@ -1388,7 +1523,8 @@ const fetchCampaignRowById = async (campaignId) => {
   return lastResult
 }
 
-const updateCampaignAllowedMembers = async (campaignId, allowedMembers) => {
+const updateCampaignAllowedMembers = async (campaignId, allowedMemberRoles, creatorId = '') => {
+  const normalizedAllowedMembers = normalizeCampaignMemberRoles(allowedMemberRoles, creatorId)
   const campaignFilter = encodeURIComponent(campaignId)
   const endpoints = [
     `${supabaseUrl}/rest/v1/%22Campaigns%22?id=eq.${campaignFilter}`,
@@ -1406,7 +1542,7 @@ const updateCampaignAllowedMembers = async (campaignId, allowedMembers) => {
         Prefer: 'return=representation',
       },
       body: JSON.stringify({
-        allowed_members: normalizeUuidArray(allowedMembers),
+        allowed_members: normalizedAllowedMembers,
       }),
     })
     const payload = await response.json().catch(() => null)
@@ -1456,21 +1592,19 @@ const deleteCampaignRowById = async (campaignId) => {
 }
 
 const canUserSeeCampaign = (row, userId, organizationIds) => {
-  const creator = typeof row?.creator === 'string' ? row.creator.trim() : ''
-  if (creator && creator === userId) return true
-  const allowedMembers = normalizeUuidArray(row?.allowed_members)
-  if (allowedMembers.includes(userId)) return true
+  const viewerRole = resolveCampaignUserRole(row, userId)
+  if (viewerRole) return true
   const allowedOrgs = normalizeUuidArray(row?.allowed_orgs)
   return hasIntersection(allowedOrgs, organizationIds)
 }
 
 const buildCampaignMemberIds = (row) => {
   const creatorId = typeof row?.creator === 'string' ? row.creator.trim() : ''
-  const creatorIds = isUuid(creatorId) ? [creatorId] : []
-  return uniqueValues([...normalizeUuidArray(row?.allowed_members), ...creatorIds])
+  const allowedMemberRoles = normalizeCampaignMemberRoles(row?.allowed_members, creatorId)
+  return Object.keys(allowedMemberRoles)
 }
 
-const mapCampaignMembersForClient = (memberIds, userRows) => {
+const mapCampaignMembersForClient = (memberIds, userRows, memberRoles = {}) => {
   const userEmailById = new Map(
     (Array.isArray(userRows) ? userRows : [])
       .filter((row) => row && typeof row === 'object')
@@ -1484,6 +1618,7 @@ const mapCampaignMembersForClient = (memberIds, userRows) => {
   return memberIds.map((id) => ({
     id,
     email: userEmailById.get(id) || '',
+    role: normalizeCampaignMemberRole(memberRoles[id]),
   }))
 }
 
@@ -1499,6 +1634,7 @@ const mapCampaignForClient = (row) => {
   const guaranteed = toNumber(row?.guaranteed)
   const engagementRate = toNumber(row?.engagement_rate)
   const distributionSources = normalizeJsonValue(row?.distribution_sources)
+  const allowedMemberRoles = normalizeCampaignMemberRoles(row?.allowed_members, creator)
 
   return {
     id,
@@ -1512,7 +1648,8 @@ const mapCampaignForClient = (row) => {
     engagementRate,
     allowedOrgs: normalizeUuidArray(row?.allowed_orgs),
     distributionSources,
-    allowedMembers: normalizeUuidArray(row?.allowed_members),
+    allowedMembers: Object.keys(allowedMemberRoles),
+    allowedMemberRoles,
     creator,
   }
 }
@@ -1571,9 +1708,32 @@ app.post('/api/campaigns', async (req, res) => {
   const viewsDelivered = Math.max(0, toNumber(payload.viewsDelivered))
   const engagementRate = Math.max(0, toNumber(payload.engagementRate))
   let allowedOrgs = normalizeUuidArray(payload.allowedOrgs)
-  const requestedMembers = normalizeUuidArray(payload.allowedMembers)
+  const requestedMembers = normalizeUuidArray(payload.allowedMembers).filter(
+    (userId) => userId !== viewer.userId,
+  )
+  const requestedMemberRoles = normalizeCampaignMemberRoles(payload.allowedMemberRoles)
+  const requestedRoleEmailInputs = normalizeMemberInviteInputArray(payload.memberAccess)
   const requestedEmailInputs = normalizeEmailInputArray(payload.memberEmails)
-  const requestedMemberEmails = requestedEmailInputs.validEmails
+  const requestedMemberInviteByEmail = new Map()
+  for (const member of requestedRoleEmailInputs.validMembers) {
+    requestedMemberInviteByEmail.set(member.email, member.role)
+  }
+  for (const email of requestedEmailInputs.validEmails) {
+    if (!requestedMemberInviteByEmail.has(email)) {
+      requestedMemberInviteByEmail.set(email, CAMPAIGN_MEMBER_ROLE_MEMBER)
+    }
+  }
+  const creatorEmail = normalizeEmail(viewer.email)
+  const creatorEmailWasRequested = Boolean(
+    creatorEmail && requestedMemberInviteByEmail.has(creatorEmail),
+  )
+  if (creatorEmailWasRequested) {
+    requestedMemberInviteByEmail.delete(creatorEmail)
+  }
+  const requestedMemberInvites = [...requestedMemberInviteByEmail.entries()].map(([email, role]) => ({
+    email,
+    role,
+  }))
   const distributionSources = sanitizeDistributionSources(payload.distributionSources)
 
   if (!campaignName || !brand || !startDate || !endDate) {
@@ -1605,7 +1765,29 @@ app.post('/api/campaigns', async (req, res) => {
   }
 
   let memberResolution = buildEmptyMemberResolution()
-  let resolvedEmailMemberIds = []
+  let resolvedEmailMembers = []
+  const requestedRoleByUserId = normalizeCampaignMemberRoles(requestedMemberRoles)
+  if (creatorEmailWasRequested) {
+    memberResolution.failed.push({
+      action: 'add',
+      email: creatorEmail,
+      error: 'cannot_add_creator',
+      message: 'Campaign creator is added automatically and cannot be invited as a member.',
+    })
+  }
+  for (const userId of requestedMembers) {
+    if (!requestedRoleByUserId[userId]) {
+      requestedRoleByUserId[userId] = CAMPAIGN_MEMBER_ROLE_MEMBER
+    }
+  }
+  for (const email of requestedRoleEmailInputs.invalidEmails) {
+    memberResolution.failed.push({
+      action: 'add',
+      email,
+      error: 'invalid_email',
+      message: 'Email format is invalid.',
+    })
+  }
   for (const email of requestedEmailInputs.invalidEmails) {
     memberResolution.failed.push({
       action: 'add',
@@ -1614,15 +1796,21 @@ app.post('/api/campaigns', async (req, res) => {
       message: 'Email format is invalid.',
     })
   }
-  if (requestedMemberEmails.length) {
-    const resolvedMembers = await resolveMemberIdsFromEmails(requestedMemberEmails)
-    resolvedEmailMemberIds = resolvedMembers.resolvedUserIds
+  if (requestedMemberInvites.length) {
+    const resolvedMembers = await resolveMemberIdsFromEmails(requestedMemberInvites)
+    resolvedEmailMembers = resolvedMembers.resolvedMembers
     memberResolution.added.push(...resolvedMembers.resolution.added)
     memberResolution.removed.push(...resolvedMembers.resolution.removed)
     memberResolution.failed.push(...resolvedMembers.resolution.failed)
   }
+  for (const member of resolvedEmailMembers) {
+    const existingRole = requestedRoleByUserId[member.userId]
+    if (!existingRole || member.role === CAMPAIGN_MEMBER_ROLE_ADMIN) {
+      requestedRoleByUserId[member.userId] = member.role
+    }
+  }
 
-  const allowedMembers = uniqueValues([...requestedMembers, ...resolvedEmailMemberIds, viewer.userId])
+  const allowedMemberRoles = normalizeCampaignMemberRoles(requestedRoleByUserId, viewer.userId)
   const rowToInsert = {
     id: crypto.randomUUID(),
     campaign_name: campaignName,
@@ -1634,7 +1822,7 @@ app.post('/api/campaigns', async (req, res) => {
     engagement_rate: engagementRate,
     allowed_orgs: allowedOrgs.length ? allowedOrgs : null,
     distribution_sources: distributionSources,
-    allowed_members: allowedMembers.length ? allowedMembers : [viewer.userId],
+    allowed_members: allowedMemberRoles,
     creator: viewer.userId,
   }
 
@@ -1779,6 +1967,7 @@ app.get('/api/campaigns/:campaignId/members', async (req, res) => {
   }
 
   const creator = typeof campaignRow.creator === 'string' ? campaignRow.creator.trim() : ''
+  const allowedMemberRoles = normalizeCampaignMemberRoles(campaignRow?.allowed_members, creator)
   const campaignName =
     typeof campaignRow.campaign_name === 'string' ? campaignRow.campaign_name.trim() : ''
 
@@ -1786,7 +1975,11 @@ app.get('/api/campaigns/:campaignId/members', async (req, res) => {
     campaignId,
     campaignName,
     creator,
-    members: mapCampaignMembersForClient(memberIds, usersResult.ok ? usersResult.rows : []),
+    members: mapCampaignMembersForClient(
+      memberIds,
+      usersResult.ok ? usersResult.rows : [],
+      allowedMemberRoles,
+    ),
   })
 })
 
@@ -1811,21 +2004,37 @@ app.post('/api/campaigns/:campaignId/members', async (req, res) => {
   }
 
   const payload = req.body ?? {}
+  const addMemberInputs = normalizeMemberInviteInputArray(payload.addMembers)
   const addEmailInputs = normalizeEmailInputArray(payload.addEmails)
   const removeEmailInputs = normalizeEmailInputArray(payload.removeEmails)
-  const addEmails = addEmailInputs.validEmails
+  const roleUpdateInputs = normalizeMemberRoleUpdateInputArray(payload.roleUpdates)
+  const addMemberByEmail = new Map()
+  for (const member of addMemberInputs.validMembers) {
+    addMemberByEmail.set(member.email, member.role)
+  }
+  for (const email of addEmailInputs.validEmails) {
+    if (!addMemberByEmail.has(email)) {
+      addMemberByEmail.set(email, CAMPAIGN_MEMBER_ROLE_MEMBER)
+    }
+  }
+  const addMembers = [...addMemberByEmail.entries()].map(([email, role]) => ({ email, role }))
+  const roleUpdates = roleUpdateInputs.validUpdates
   const removeEmails = removeEmailInputs.validEmails
   const removeUserIds = normalizeUuidArray(payload.removeUserIds)
   if (
-    !addEmails.length &&
+    !addMembers.length &&
+    !roleUpdates.length &&
     !removeEmails.length &&
+    !addMemberInputs.invalidEmails.length &&
     !addEmailInputs.invalidEmails.length &&
     !removeEmailInputs.invalidEmails.length &&
+    !roleUpdateInputs.invalidUserIds.length &&
     !removeUserIds.length
   ) {
     res.status(400).json({
       error: 'invalid_member_update_payload',
-      message: 'Provide at least one valid member in addEmails, removeEmails, or removeUserIds.',
+      message:
+        'Provide at least one valid member in addMembers, roleUpdates, addEmails, removeEmails, or removeUserIds.',
     })
     return
   }
@@ -1858,16 +2067,45 @@ app.post('/api/campaigns/:campaignId/members', async (req, res) => {
   }
 
   const creatorId = typeof campaignRow.creator === 'string' ? campaignRow.creator.trim() : ''
-  if (!creatorId || viewer.userId !== creatorId) {
+  const viewerRole = resolveCampaignUserRole(campaignRow, viewer.userId)
+  const isCreator = Boolean(creatorId && viewer.userId === creatorId)
+  if (viewerRole !== CAMPAIGN_MEMBER_ROLE_ADMIN) {
     res.status(403).json({
       error: 'forbidden',
-      message: 'Only the campaign creator can manage members.',
+      message: 'Only campaign admins can manage members.',
+    })
+    return
+  }
+  const hasRoleMutations = Boolean(roleUpdates.length || roleUpdateInputs.invalidUserIds.length)
+  if (!isCreator && hasRoleMutations) {
+    res.status(403).json({
+      error: 'forbidden',
+      message: 'Only the campaign creator can change member roles.',
+    })
+    return
+  }
+  const hasRemoveMutations = Boolean(
+    removeEmails.length || removeEmailInputs.invalidEmails.length || removeUserIds.length,
+  )
+  if (!isCreator && hasRemoveMutations) {
+    res.status(403).json({
+      error: 'forbidden',
+      message: 'Only the campaign creator can remove members.',
     })
     return
   }
 
   const updateResult = buildEmptyMemberResolution()
-  const memberSet = new Set(buildCampaignMemberIds(campaignRow))
+  const memberRoleByUserId = normalizeCampaignMemberRoles(campaignRow?.allowed_members, creatorId)
+
+  for (const email of addMemberInputs.invalidEmails) {
+    updateResult.failed.push({
+      action: 'add',
+      email,
+      error: 'invalid_email',
+      message: 'Email format is invalid.',
+    })
+  }
 
   for (const email of addEmailInputs.invalidEmails) {
     updateResult.failed.push({
@@ -1887,7 +2125,20 @@ app.post('/api/campaigns/:campaignId/members', async (req, res) => {
     })
   }
 
-  for (const email of addEmails) {
+  for (const userId of roleUpdateInputs.invalidUserIds) {
+    updateResult.failed.push({
+      email: userId,
+      userId,
+      error: 'invalid_user_id',
+      message: 'User id must be a valid UUID.',
+    })
+  }
+
+  for (const member of addMembers) {
+    const email = member.email
+    const role = isCreator
+      ? normalizeCampaignMemberRole(member.role)
+      : CAMPAIGN_MEMBER_ROLE_MEMBER
     const lookupResult = await fetchUsersRowByEmail(email)
     if (!lookupResult.ok) {
       updateResult.failed.push({
@@ -1910,7 +2161,20 @@ app.post('/api/campaigns/:campaignId/members', async (req, res) => {
       continue
     }
 
-    if (memberSet.has(userId)) {
+    if (memberRoleByUserId[userId]) {
+      if (
+        role === CAMPAIGN_MEMBER_ROLE_ADMIN &&
+        normalizeCampaignMemberRole(memberRoleByUserId[userId]) !== CAMPAIGN_MEMBER_ROLE_ADMIN
+      ) {
+        memberRoleByUserId[userId] = CAMPAIGN_MEMBER_ROLE_ADMIN
+        updateResult.added.push({
+          action: 'add',
+          email,
+          userId,
+          message: 'User role updated to admin.',
+        })
+        continue
+      }
       updateResult.failed.push({
         action: 'add',
         email,
@@ -1921,12 +2185,12 @@ app.post('/api/campaigns/:campaignId/members', async (req, res) => {
       continue
     }
 
-    memberSet.add(userId)
+    memberRoleByUserId[userId] = role
     updateResult.added.push({
       action: 'add',
       email,
       userId,
-      message: 'User added to campaign members.',
+      message: `User added to campaign members as ${role}.`,
     })
   }
 
@@ -1964,7 +2228,7 @@ app.post('/api/campaigns/:campaignId/members', async (req, res) => {
       continue
     }
 
-    if (!memberSet.has(userId)) {
+    if (!memberRoleByUserId[userId]) {
       updateResult.failed.push({
         action: 'remove',
         email,
@@ -1975,7 +2239,7 @@ app.post('/api/campaigns/:campaignId/members', async (req, res) => {
       continue
     }
 
-    memberSet.delete(userId)
+    delete memberRoleByUserId[userId]
     updateResult.removed.push({
       action: 'remove',
       email,
@@ -1984,11 +2248,12 @@ app.post('/api/campaigns/:campaignId/members', async (req, res) => {
     })
   }
 
-  const removeUsersLookup = removeUserIds.length
-    ? await fetchUsersRowsByIds(removeUserIds)
+  const lookupUserIds = uniqueValues([...removeUserIds, ...roleUpdates.map((entry) => entry.userId)])
+  const usersLookup = lookupUserIds.length
+    ? await fetchUsersRowsByIds(lookupUserIds)
     : { ok: true, rows: [] }
-  const removeLabelById = new Map(
-    (removeUsersLookup.ok && Array.isArray(removeUsersLookup.rows) ? removeUsersLookup.rows : []).map((row) => {
+  const userLabelById = new Map(
+    (usersLookup.ok && Array.isArray(usersLookup.rows) ? usersLookup.rows : []).map((row) => {
       const id = typeof row?.id === 'string' ? row.id.trim() : ''
       const email = typeof row?.email === 'string' ? row.email.trim() : ''
       return [id, email]
@@ -1996,7 +2261,7 @@ app.post('/api/campaigns/:campaignId/members', async (req, res) => {
   )
 
   for (const userId of removeUserIds) {
-    const label = removeLabelById.get(userId) || userId
+    const label = userLabelById.get(userId) || userId
     if (userId === creatorId) {
       updateResult.failed.push({
         action: 'remove',
@@ -2008,7 +2273,7 @@ app.post('/api/campaigns/:campaignId/members', async (req, res) => {
       continue
     }
 
-    if (!memberSet.has(userId)) {
+    if (!memberRoleByUserId[userId]) {
       updateResult.failed.push({
         action: 'remove',
         email: label,
@@ -2019,7 +2284,7 @@ app.post('/api/campaigns/:campaignId/members', async (req, res) => {
       continue
     }
 
-    memberSet.delete(userId)
+    delete memberRoleByUserId[userId]
     updateResult.removed.push({
       action: 'remove',
       email: label,
@@ -2028,9 +2293,50 @@ app.post('/api/campaigns/:campaignId/members', async (req, res) => {
     })
   }
 
-  if (isUuid(creatorId)) memberSet.add(creatorId)
-  const nextAllowedMembers = [...memberSet]
-  const updateCampaignResult = await updateCampaignAllowedMembers(campaignId, nextAllowedMembers)
+  for (const update of roleUpdates) {
+    const userId = update.userId
+    const role = normalizeCampaignMemberRole(update.role)
+    const label = userLabelById.get(userId) || userId
+    if (userId === creatorId) {
+      updateResult.failed.push({
+        email: label,
+        userId,
+        error: 'cannot_change_creator_role',
+        message: 'The campaign creator role cannot be changed.',
+      })
+      continue
+    }
+
+    if (!memberRoleByUserId[userId]) {
+      updateResult.failed.push({
+        email: label,
+        userId,
+        error: 'user_not_member',
+        message: 'User is not currently a campaign member.',
+      })
+      continue
+    }
+
+    const currentRole = normalizeCampaignMemberRole(memberRoleByUserId[userId])
+    if (currentRole === role) {
+      continue
+    }
+
+    memberRoleByUserId[userId] = role
+    updateResult.added.push({
+      action: 'add',
+      email: label,
+      userId,
+      message: `User role updated to ${role}.`,
+    })
+  }
+
+  const nextAllowedMemberRoles = normalizeCampaignMemberRoles(memberRoleByUserId, creatorId)
+  const updateCampaignResult = await updateCampaignAllowedMembers(
+    campaignId,
+    nextAllowedMemberRoles,
+    creatorId,
+  )
   if (!updateCampaignResult.ok) {
     res.status(updateCampaignResult.status || 500).json({
       error: 'campaign_members_update_failed',
@@ -2042,7 +2348,7 @@ app.post('/api/campaigns/:campaignId/members', async (req, res) => {
 
   const updatedCampaignRow = updateCampaignResult.row ?? {
     ...campaignRow,
-    allowed_members: nextAllowedMembers,
+    allowed_members: nextAllowedMemberRoles,
   }
   const memberIds = buildCampaignMemberIds(updatedCampaignRow)
   const usersResult = await fetchUsersRowsByIds(memberIds)
@@ -2056,7 +2362,11 @@ app.post('/api/campaigns/:campaignId/members', async (req, res) => {
 
   res.json({
     campaignId,
-    members: mapCampaignMembersForClient(memberIds, usersResult.ok ? usersResult.rows : []),
+    members: mapCampaignMembersForClient(
+      memberIds,
+      usersResult.ok ? usersResult.rows : [],
+      nextAllowedMemberRoles,
+    ),
     updateResult,
   })
 })

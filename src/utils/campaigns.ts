@@ -2,6 +2,18 @@ import { resolveAuthBaseUrl } from './baseUrl'
 
 const apiBaseUrl = resolveAuthBaseUrl()
 
+export type CampaignMemberRole = 'admin' | 'member'
+
+export interface MemberAccessInput {
+  email: string
+  role?: CampaignMemberRole
+}
+
+export interface MemberRoleUpdateInput {
+  userId: string
+  role?: CampaignMemberRole
+}
+
 export interface CampaignApiItem {
   id: string
   createdAt: string
@@ -15,6 +27,7 @@ export interface CampaignApiItem {
   allowedOrgs: string[]
   distributionSources: unknown
   allowedMembers: string[]
+  allowedMemberRoles?: Record<string, CampaignMemberRole>
   creator: string
 }
 
@@ -35,6 +48,7 @@ export interface MemberResolutionSummary {
 export interface CampaignMember {
   id: string
   email: string
+  role?: CampaignMemberRole
 }
 
 export interface CampaignMembersPayload {
@@ -59,7 +73,9 @@ export interface CreateCampaignInput {
   engagementRate?: number
   allowedOrgs?: string[]
   allowedMembers?: string[]
+  allowedMemberRoles?: Record<string, CampaignMemberRole>
   memberEmails?: string[]
+  memberAccess?: MemberAccessInput[]
   distributionSources?: unknown
 }
 
@@ -70,6 +86,8 @@ export interface CreateCampaignResult {
 }
 
 export interface UpdateCampaignMembersInput {
+  addMembers?: MemberAccessInput[]
+  roleUpdates?: MemberRoleUpdateInput[]
   addEmails?: string[]
   removeEmails?: string[]
   removeUserIds?: string[]
@@ -92,9 +110,24 @@ const asNumber = (value: unknown) => {
 
 const asString = (value: unknown) => (typeof value === 'string' ? value : '')
 
+const asCampaignMemberRole = (value: unknown): CampaignMemberRole => {
+  return typeof value === 'string' && value.trim().toLowerCase() === 'admin' ? 'admin' : 'member'
+}
+
 const asStringArray = (value: unknown): string[] => {
   if (!Array.isArray(value)) return []
   return value.filter((entry): entry is string => typeof entry === 'string' && Boolean(entry.trim()))
+}
+
+const asMemberRoleMap = (value: unknown): Record<string, CampaignMemberRole> => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+  const normalized: Record<string, CampaignMemberRole> = {}
+  Object.entries(value as Record<string, unknown>).forEach(([id, role]) => {
+    const trimmedId = id.trim()
+    if (!trimmedId) return
+    normalized[trimmedId] = asCampaignMemberRole(role)
+  })
+  return normalized
 }
 
 const normalizeMemberResolutionItem = (payload: unknown): MemberResolutionItem | null => {
@@ -131,6 +164,8 @@ const normalizeCampaign = (payload: unknown): CampaignApiItem | null => {
   const row = payload as Partial<CampaignApiItem>
   const id = asString(row.id).trim()
   if (!id) return null
+  const allowedMemberRoles = asMemberRoleMap((row as { allowedMemberRoles?: unknown }).allowedMemberRoles)
+  const allowedMembersFromPayload = asStringArray(row.allowedMembers)
 
   return {
     id,
@@ -144,7 +179,8 @@ const normalizeCampaign = (payload: unknown): CampaignApiItem | null => {
     engagementRate: asNumber(row.engagementRate),
     allowedOrgs: asStringArray(row.allowedOrgs),
     distributionSources: row.distributionSources ?? null,
-    allowedMembers: asStringArray(row.allowedMembers),
+    allowedMembers: allowedMembersFromPayload.length ? allowedMembersFromPayload : Object.keys(allowedMemberRoles),
+    allowedMemberRoles,
     creator: asString(row.creator),
   }
 }
@@ -157,6 +193,7 @@ const normalizeCampaignMember = (payload: unknown): CampaignMember | null => {
   return {
     id,
     email: asString(row.email).trim(),
+    role: asCampaignMemberRole(row.role),
   }
 }
 

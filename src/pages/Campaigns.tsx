@@ -10,6 +10,8 @@ import {
   fetchCampaigns,
   updateCampaignMembers,
   type CampaignApiItem,
+  type CampaignMemberRole,
+  type MemberAccessInput,
   type CampaignMember,
   type MemberResolutionItem,
   type MemberResolutionSummary,
@@ -18,12 +20,18 @@ import { formatNumber, formatPercent } from '../utils/format'
 
 interface CampaignCardModel extends CampaignSummary {
   creator: string
+  allowedMemberRoles: Record<string, CampaignMemberRole>
 }
 
 interface FeedbackState {
   title: string
   summary: MemberResolutionSummary
   submittedEmails?: string[]
+}
+
+interface MemberInputRow {
+  email: string
+  role: CampaignMemberRole
 }
 
 const hasResolutionRows = (summary: MemberResolutionSummary) => flattenResolutionItems(summary).length > 0
@@ -42,23 +50,47 @@ const toNumber = (value: unknown) => {
 
 const normalizeEmail = (value: string) => value.trim().toLowerCase()
 
-const collectEmails = (inputs: string[]) =>
-  [...new Set(inputs.map((entry) => normalizeEmail(entry)).filter((entry) => entry.length > 0))]
+const normalizeMemberRole = (value: unknown): CampaignMemberRole =>
+  value === 'admin' ? 'admin' : 'member'
+
+const createEmptyMemberInput = (): MemberInputRow => ({ email: '', role: 'member' })
+
+const buildMemberInputSignature = (inputs: MemberInputRow[]) =>
+  JSON.stringify(
+    inputs.map((entry) => ({
+      email: normalizeEmail(entry.email),
+      role: normalizeMemberRole(entry.role),
+    })),
+  )
+
+const collectMemberInputs = (inputs: MemberInputRow[]): MemberAccessInput[] => {
+  const roleByEmail = new Map<string, CampaignMemberRole>()
+  inputs.forEach((entry) => {
+    const normalizedEmail = normalizeEmail(entry.email)
+    if (!normalizedEmail) return
+    const normalizedRole = normalizeMemberRole(entry.role)
+    const existingRole = roleByEmail.get(normalizedEmail)
+    if (!existingRole || normalizedRole === 'admin') {
+      roleByEmail.set(normalizedEmail, normalizedRole)
+    }
+  })
+  return [...roleByEmail.entries()].map(([email, role]) => ({ email, role }))
+}
 
 const extractEmailsFromCsvText = (content: string) => {
   const matches = content.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) ?? []
   return [...new Set(matches.map((entry) => normalizeEmail(entry)))]
 }
 
-const mergeEmailInputs = (current: string[], additions: string[]) => {
+const mergeEmailInputs = (current: MemberInputRow[], additions: string[]) => {
   const merged = [...current]
   additions.forEach((email) => {
     const normalized = normalizeEmail(email)
     if (!normalized) return
-    const exists = merged.some((entry) => normalizeEmail(entry) === normalized)
-    if (!exists) merged.push(normalized)
+    const exists = merged.some((entry) => normalizeEmail(entry.email) === normalized)
+    if (!exists) merged.push({ email: normalized, role: 'member' })
   })
-  return merged.length ? merged : ['']
+  return merged.length ? merged : [createEmptyMemberInput()]
 }
 
 const resolveDistribution = (value: unknown) => {
@@ -120,6 +152,7 @@ const mapCampaignToCard = (campaign: CampaignApiItem): CampaignCardModel => {
       clipper: distribution.clipper,
     },
     creator: campaign.creator,
+    allowedMemberRoles: campaign.allowedMemberRoles ?? {},
   }
 }
 
@@ -257,14 +290,18 @@ export const Campaigns = () => {
   const [draftEnd, setDraftEnd] = useState('')
   const [draftGuaranteedViews, setDraftGuaranteedViews] = useState('')
   const [draftGuaranteedEngagements, setDraftGuaranteedEngagements] = useState('')
-  const [inviteEmails, setInviteEmails] = useState<string[]>([''])
+  const [inviteEmails, setInviteEmails] = useState<MemberInputRow[]>([createEmptyMemberInput()])
 
   const [manageCampaign, setManageCampaign] = useState<CampaignCardModel | null>(null)
   const [members, setMembers] = useState<CampaignMember[]>([])
   const [manageLoading, setManageLoading] = useState(false)
   const [manageSubmitting, setManageSubmitting] = useState(false)
   const [manageError, setManageError] = useState<string | null>(null)
-  const [addEmailInputs, setAddEmailInputs] = useState<string[]>([''])
+  const [addEmailInputs, setAddEmailInputs] = useState<MemberInputRow[]>([createEmptyMemberInput()])
+  const [manageAddInputsBaseline, setManageAddInputsBaseline] = useState(
+    buildMemberInputSignature([createEmptyMemberInput()]),
+  )
+  const [memberRoleEdits, setMemberRoleEdits] = useState<Record<string, CampaignMemberRole>>({})
   const [removeMemberTarget, setRemoveMemberTarget] = useState<CampaignMember | null>(null)
   const [removeMemberSubmitting, setRemoveMemberSubmitting] = useState(false)
   const [removeMemberError, setRemoveMemberError] = useState<string | null>(null)
@@ -283,6 +320,63 @@ export const Campaigns = () => {
     return draftStart
   }, [draftStart, todayDate])
 
+  const isManageViewerCreator = useMemo(() => {
+    if (!manageCampaign || !viewerUserId) return false
+    return manageCampaign.creator === viewerUserId
+  }, [manageCampaign, viewerUserId])
+
+  const isManageViewerAdmin = useMemo(() => {
+    if (isManageViewerCreator) return true
+    if (!viewerUserId) return false
+    const viewerMember = members.find((member) => member.id === viewerUserId)
+    return normalizeMemberRole(viewerMember?.role) === 'admin'
+  }, [isManageViewerCreator, members, viewerUserId])
+
+  const sortedMembers = useMemo(() => {
+    if (!manageCampaign) return members
+    const creatorId = manageCampaign.creator
+    return [...members].sort((left, right) => {
+      if (left.id === creatorId && right.id !== creatorId) return -1
+      if (right.id === creatorId && left.id !== creatorId) return 1
+      const leftLabel = (left.email || left.id).toLowerCase()
+      const rightLabel = (right.email || right.id).toLowerCase()
+      return leftLabel.localeCompare(rightLabel)
+    })
+  }, [manageCampaign, members])
+
+  const pendingAddMembers = useMemo(() => {
+    return isManageViewerAdmin ? collectMemberInputs(addEmailInputs) : []
+  }, [addEmailInputs, isManageViewerAdmin])
+
+  const pendingRoleUpdates = useMemo(() => {
+    if (!manageCampaign) return []
+    return sortedMembers
+      .filter((member) => member.id !== manageCampaign.creator)
+      .map((member) => {
+        const requestedRole = memberRoleEdits[member.id]
+        if (!requestedRole) return null
+        const currentRole = normalizeMemberRole(member.role)
+        if (requestedRole === currentRole) return null
+        return { userId: member.id, role: requestedRole }
+      })
+      .filter(
+        (
+          entry,
+        ): entry is {
+          userId: string
+          role: CampaignMemberRole
+        } => Boolean(entry),
+      )
+  }, [manageCampaign, memberRoleEdits, sortedMembers])
+
+  const addInputSignature = useMemo(() => buildMemberInputSignature(addEmailInputs), [addEmailInputs])
+
+  const hasPendingManageChanges = useMemo(
+    () =>
+      addInputSignature !== manageAddInputsBaseline || Object.keys(memberRoleEdits).length > 0,
+    [addInputSignature, manageAddInputsBaseline, memberRoleEdits],
+  )
+
   const resetCreateDraft = () => {
     setHasCreateSubmitAttempt(false)
     setDraftName('')
@@ -291,7 +385,7 @@ export const Campaigns = () => {
     setDraftEnd('')
     setDraftGuaranteedViews('')
     setDraftGuaranteedEngagements('')
-    setInviteEmails([''])
+    setInviteEmails([createEmptyMemberInput()])
   }
 
   const createRequiredFieldErrors = useMemo(() => {
@@ -380,7 +474,7 @@ export const Campaigns = () => {
 
   const readCsvIntoInputs = async (
     event: ChangeEvent<HTMLInputElement>,
-    setter: Dispatch<SetStateAction<string[]>>,
+    setter: Dispatch<SetStateAction<MemberInputRow[]>>,
     setError: Dispatch<SetStateAction<string | null>>,
   ) => {
     const file = event.target.files?.[0]
@@ -413,7 +507,8 @@ export const Campaigns = () => {
     }
 
     setIsSubmitting(true)
-    const submittedEmails = collectEmails(inviteEmails)
+    const submittedMembers = collectMemberInputs(inviteEmails)
+    const submittedEmails = submittedMembers.map((entry) => entry.email)
     const guaranteedViews = Number(draftGuaranteedViews)
     const guaranteedEngagements = Number(draftGuaranteedEngagements)
     const engagementRate =
@@ -428,6 +523,7 @@ export const Campaigns = () => {
         guaranteed: guaranteedViews,
         viewsDelivered: 0,
         engagementRate,
+        memberAccess: submittedMembers,
         memberEmails: submittedEmails,
         distributionSources: {
           brand: draftBrand.trim(),
@@ -458,7 +554,9 @@ export const Campaigns = () => {
     setMembers([])
     setManageLoading(true)
     setManageError(null)
-    setAddEmailInputs([''])
+    setAddEmailInputs([createEmptyMemberInput()])
+    setManageAddInputsBaseline(buildMemberInputSignature([createEmptyMemberInput()]))
+    setMemberRoleEdits({})
     setRemoveMemberTarget(null)
     setRemoveMemberError(null)
     try {
@@ -473,24 +571,43 @@ export const Campaigns = () => {
 
   const handleManageSubmit = async () => {
     if (!manageCampaign || manageSubmitting) return
-    const addEmails = collectEmails(addEmailInputs)
-    if (!addEmails.length) {
-      setManageError('Enter at least one email or upload a CSV file.')
+    const addMembers = pendingAddMembers
+    const addEmails = addMembers.map((entry) => entry.email)
+    const roleUpdates = isManageViewerCreator ? pendingRoleUpdates : []
+    const roleUpdateEmails = roleUpdates.map((entry) => {
+      const member = sortedMembers.find((candidate) => candidate.id === entry.userId)
+      const email = typeof member?.email === 'string' ? member.email.trim() : ''
+      return email || member?.id || entry.userId
+    })
+
+    if (!addMembers.length && !roleUpdates.length) {
+      setManageError(
+        isManageViewerCreator
+          ? 'Enter at least one email, upload a CSV file, or change a member role.'
+          : 'Enter at least one email or upload a CSV file.',
+      )
       return
     }
     setManageSubmitting(true)
     setManageError(null)
     try {
       const result = await updateCampaignMembers(manageCampaign.id, {
-        addEmails,
+        addMembers: addMembers.length ? addMembers : undefined,
+        addEmails: addEmails.length ? addEmails : undefined,
+        roleUpdates: roleUpdates.length ? roleUpdates : undefined,
       })
       setMembers(result.members)
       setFeedbackModal({
         title: `Updated members for ${manageCampaign.name}`,
         summary: result.updateResult,
-        submittedEmails: addEmails,
+        submittedEmails: [
+          ...addEmails,
+          ...roleUpdateEmails,
+        ],
       })
-      setAddEmailInputs([''])
+      setAddEmailInputs([createEmptyMemberInput()])
+      setManageAddInputsBaseline(buildMemberInputSignature([createEmptyMemberInput()]))
+      setMemberRoleEdits({})
     } catch (err) {
       setManageError(err instanceof Error ? err.message : 'Unable to update campaign members.')
     } finally {
@@ -499,18 +616,24 @@ export const Campaigns = () => {
   }
 
   const handleRemoveMember = async () => {
-    if (!manageCampaign || !removeMemberTarget || removeMemberSubmitting) return
+    if (!manageCampaign || !removeMemberTarget || removeMemberSubmitting || !isManageViewerCreator) return
     setRemoveMemberSubmitting(true)
     setRemoveMemberError(null)
     try {
+      const target = removeMemberTarget
       const result = await updateCampaignMembers(manageCampaign.id, {
-        removeUserIds: [removeMemberTarget.id],
+        removeUserIds: [target.id],
       })
       setMembers(result.members)
+      setMemberRoleEdits((previous) => {
+        const next = { ...previous }
+        delete next[target.id]
+        return next
+      })
       setFeedbackModal({
         title: `Updated members for ${manageCampaign.name}`,
         summary: result.updateResult,
-        submittedEmails: [removeMemberTarget.email || removeMemberTarget.id],
+        submittedEmails: [target.email || target.id],
       })
       setRemoveMemberTarget(null)
     } catch (err) {
@@ -688,20 +811,39 @@ export const Campaigns = () => {
                 <div style={{ display: 'grid', gap: '6px' }}>
                   <label className="section-subtitle">Member emails (optional)</label>
                   <div style={{ display: 'grid', gap: '8px' }}>
-                    {inviteEmails.map((email, index) => (
+                    {inviteEmails.map((member, index) => (
                       <div key={`invite-email-${index}`} className="split" style={{ gap: '8px' }}>
                         <input
                           className="input"
-                          value={email}
+                          value={member.email}
                           onChange={(event) =>
                             setInviteEmails((previous) =>
                               previous.map((value, fieldIndex) =>
-                                fieldIndex === index ? event.target.value : value,
+                                fieldIndex === index
+                                  ? { ...value, email: event.target.value }
+                                  : value,
                               ),
                             )
                           }
                           placeholder="user@example.com"
                         />
+                        <select
+                          className="select"
+                          value={member.role}
+                          onChange={(event) =>
+                            setInviteEmails((previous) =>
+                              previous.map((value, fieldIndex) =>
+                                fieldIndex === index
+                                  ? { ...value, role: normalizeMemberRole(event.target.value) }
+                                  : value,
+                              ),
+                            )
+                          }
+                          style={{ minWidth: '120px' }}
+                        >
+                          <option value="member">Member</option>
+                          <option value="admin">Admin</option>
+                        </select>
                         {inviteEmails.length > 1 ? (
                           <button
                             type="button"
@@ -722,7 +864,7 @@ export const Campaigns = () => {
                     <button
                       type="button"
                       className="ghost-button"
-                      onClick={() => setInviteEmails((previous) => [...previous, ''])}
+                      onClick={() => setInviteEmails((previous) => [...previous, createEmptyMemberInput()])}
                     >
                       + Add email
                     </button>
@@ -794,13 +936,14 @@ export const Campaigns = () => {
                       padding: '8px 10px',
                     }}
                   >
-                    {members.length ? (
-                      members.map((member) => {
+                    {sortedMembers.length ? (
+                      sortedMembers.map((member) => {
                         const isCampaignCreator = Boolean(manageCampaign && member.id === manageCampaign.creator)
+                        const memberRole = memberRoleEdits[member.id] ?? normalizeMemberRole(member.role)
                         return (
                           <div key={member.id} className="split" style={{ fontSize: '13px', padding: '3px 0' }}>
                             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                              {!isCampaignCreator ? (
+                              {isManageViewerCreator && !isCampaignCreator ? (
                                 <button
                                   type="button"
                                   className="ghost-button"
@@ -825,7 +968,32 @@ export const Campaigns = () => {
                               ) : null}
                               <span>{member.email || member.id}</span>
                             </div>
-                            {isCampaignCreator ? <span className="muted">Creator</span> : null}
+                            {isCampaignCreator ? (
+                              <span className="muted">Creator (Admin)</span>
+                            ) : isManageViewerCreator ? (
+                              <select
+                                className="select"
+                                value={memberRole}
+                                onChange={(event) => {
+                                  const nextRole = normalizeMemberRole(event.target.value)
+                                  const currentRole = normalizeMemberRole(member.role)
+                                  setMemberRoleEdits((previous) => {
+                                    if (nextRole === currentRole) {
+                                      const next = { ...previous }
+                                      delete next[member.id]
+                                      return next
+                                    }
+                                    return { ...previous, [member.id]: nextRole }
+                                  })
+                                }}
+                                style={{ minWidth: '120px' }}
+                              >
+                                <option value="member">Member</option>
+                                <option value="admin">Admin</option>
+                              </select>
+                            ) : (
+                              <span className="muted">{memberRole === 'admin' ? 'Admin' : 'Member'}</span>
+                            )}
                           </div>
                         )
                       })
@@ -835,56 +1003,83 @@ export const Campaigns = () => {
                   </div>
                 </div>
 
-                <div style={{ marginTop: '14px', display: 'grid', gap: '12px' }}>
-                  <div className="form-field">
-                    <label className="section-subtitle">Add emails</label>
-                    {addEmailInputs.map((email, index) => (
-                      <div key={`add-email-${index}`} className="split" style={{ marginTop: '6px', gap: '8px' }}>
-                        <input
-                          className="input"
-                          value={email}
-                          onChange={(event) =>
-                            setAddEmailInputs((previous) =>
-                              previous.map((value, fieldIndex) =>
-                                fieldIndex === index ? event.target.value : value,
-                              ),
-                            )
-                          }
-                          placeholder="add-user@example.com"
-                        />
-                        {addEmailInputs.length > 1 ? (
-                          <button
-                            type="button"
-                            className="ghost-button"
-                            onClick={() =>
+                {isManageViewerAdmin ? (
+                  <div style={{ marginTop: '14px', display: 'grid', gap: '12px' }}>
+                    <div className="form-field">
+                      <label className="section-subtitle">Add emails</label>
+                      {addEmailInputs.map((member, index) => (
+                        <div key={`add-email-${index}`} className="split" style={{ marginTop: '6px', gap: '8px' }}>
+                          <input
+                            className="input"
+                            value={member.email}
+                            onChange={(event) =>
                               setAddEmailInputs((previous) =>
-                                previous.filter((_value, fieldIndex) => fieldIndex !== index),
+                                previous.map((value, fieldIndex) =>
+                                  fieldIndex === index
+                                    ? { ...value, email: event.target.value }
+                                    : value,
+                                ),
                               )
                             }
-                          >
-                            Remove
-                          </button>
-                        ) : null}
+                            placeholder="add-user@example.com"
+                          />
+                          {isManageViewerCreator ? (
+                            <select
+                              className="select"
+                              value={member.role}
+                              onChange={(event) =>
+                                setAddEmailInputs((previous) =>
+                                  previous.map((value, fieldIndex) =>
+                                    fieldIndex === index
+                                      ? { ...value, role: normalizeMemberRole(event.target.value) }
+                                      : value,
+                                  ),
+                                )
+                              }
+                              style={{ minWidth: '120px' }}
+                            >
+                              <option value="member">Member</option>
+                              <option value="admin">Admin</option>
+                            </select>
+                          ) : (
+                            <span className="muted" style={{ minWidth: '120px', textAlign: 'right' }}>
+                              Member
+                            </span>
+                          )}
+                          {addEmailInputs.length > 1 ? (
+                            <button
+                              type="button"
+                              className="ghost-button"
+                              onClick={() =>
+                                setAddEmailInputs((previous) =>
+                                  previous.filter((_value, fieldIndex) => fieldIndex !== index),
+                                )
+                              }
+                            >
+                              Remove
+                            </button>
+                          ) : null}
+                        </div>
+                      ))}
+                      <div className="split" style={{ marginTop: '8px' }}>
+                        <button
+                          type="button"
+                          className="ghost-button"
+                          onClick={() => setAddEmailInputs((previous) => [...previous, createEmptyMemberInput()])}
+                        >
+                          + Add email
+                        </button>
+                        <input
+                          type="file"
+                          accept=".csv,text/csv"
+                          onChange={(event) => {
+                            void readCsvIntoInputs(event, setAddEmailInputs, setManageError)
+                          }}
+                        />
                       </div>
-                    ))}
-                    <div className="split" style={{ marginTop: '8px' }}>
-                      <button
-                        type="button"
-                        className="ghost-button"
-                        onClick={() => setAddEmailInputs((previous) => [...previous, ''])}
-                      >
-                        + Add email
-                      </button>
-                      <input
-                        type="file"
-                        accept=".csv,text/csv"
-                        onChange={(event) => {
-                          void readCsvIntoInputs(event, setAddEmailInputs, setManageError)
-                        }}
-                      />
                     </div>
                   </div>
-                </div>
+                ) : null}
               </>
             )}
 
@@ -894,6 +1089,9 @@ export const Campaigns = () => {
                 onClick={() => {
                   setManageCampaign(null)
                   setManageError(null)
+                  setAddEmailInputs([createEmptyMemberInput()])
+                  setManageAddInputsBaseline(buildMemberInputSignature([createEmptyMemberInput()]))
+                  setMemberRoleEdits({})
                   setRemoveMemberTarget(null)
                   setRemoveMemberError(null)
                 }}
@@ -904,7 +1102,7 @@ export const Campaigns = () => {
               <button
                 className="primary-button"
                 onClick={() => void handleManageSubmit()}
-                disabled={manageSubmitting || manageLoading}
+                disabled={manageSubmitting || manageLoading || !hasPendingManageChanges}
               >
                 {manageSubmitting ? 'Updating...' : 'Submit'}
               </button>
@@ -1054,6 +1252,12 @@ export const Campaigns = () => {
             ? (campaign.deliveredEngagements / campaign.deliveredViews) * 100
             : 0
           const isCreator = Boolean(viewerUserId && campaign.creator === viewerUserId)
+          const isAdmin = Boolean(
+            viewerUserId &&
+              campaign.allowedMemberRoles &&
+              campaign.allowedMemberRoles[viewerUserId] === 'admin',
+          )
+          const canManageMembers = isCreator || isAdmin
 
           return (
             <div key={campaign.id} className="card" style={{ position: 'relative' }}>
@@ -1134,10 +1338,10 @@ export const Campaigns = () => {
                   <span>{campaign.distribution.clipper}%</span>
                 </div>
               </div>
-              {isCreator ? (
+              {canManageMembers ? (
                 <div style={{ marginTop: '14px' }}>
                   <button
-                    className="ghost-button"
+                    className="primary-button"
                     type="button"
                     onClick={() => {
                       void openManageModal(campaign)
