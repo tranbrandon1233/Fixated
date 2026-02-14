@@ -53,14 +53,11 @@ const youtubeRedirectUri = getEnv(
   'YOUTUBE_REDIRECT_URI',
   `${serverBaseUrl}/oauth/youtube/callback`,
 )
-const youtubeScope = getEnv(
-  'YOUTUBE_SCOPE',
-  'https://www.googleapis.com/auth/youtube.readonly https://www.googleapis.com/auth/yt-analytics.readonly',
-)
-const youtubeReportChannelDaily = getEnv('YOUTUBE_REPORT_CHANNEL_DAILY', 'channel_basic_a2')
-const youtubeReportVideoDaily = getEnv('YOUTUBE_REPORT_VIDEO_DAILY', 'video_basic_a2')
-const youtubeReportDemographics = getEnv('YOUTUBE_REPORT_DEMOGRAPHICS', 'channel_demographics_a1')
-const youtubeReportGeo = getEnv('YOUTUBE_REPORT_GEO', 'channel_geography_a1')
+const youtubeScope = getEnv('YOUTUBE_SCOPE')
+const youtubeReportChannelDaily = getEnv('YOUTUBE_REPORT_CHANNEL_DAILY')
+const youtubeReportVideoDaily = getEnv('YOUTUBE_REPORT_VIDEO_DAILY')
+const youtubeReportDemographics = getEnv('YOUTUBE_REPORT_DEMOGRAPHICS')
+const youtubeReportGeo = getEnv('YOUTUBE_REPORT_GEO')
 const supabaseUrl = withFallbackUrl(getEnv('SUPABASE_URL'), '')
 const supabasePublishableKey = getEnv('SUPABASE_PUBLISHABLE_KEY', getEnv('SUPABASE_ANON_KEY'))
 const supabaseSecretKey = getEnv('SUPABASE_SECRET_KEY', getEnv('SUPABASE_SERVICE_ROLE_KEY'))
@@ -95,16 +92,6 @@ const buildAppRedirect = ({
     params.set(key, String(value))
   })
   return `${baseUrl}${path}?${params.toString()}`
-}
-
-const parseJsonCookie = (value) => {
-  if (!value || typeof value !== 'string') return null
-  try {
-    const decoded = decodeURIComponent(value)
-    return JSON.parse(decoded)
-  } catch (_err) {
-    return null
-  }
 }
 
 const normalizeChannelName = (value) => String(value ?? '').trim().toLowerCase()
@@ -164,19 +151,6 @@ const buildEmptySession = () => ({
     reports: {},
   },
 })
-
-const ensureSessionId = (req, res) => {
-  const existing = req.cookies?.[YOUTUBE_SESSION_COOKIE]
-  if (typeof existing === 'string' && existing.trim()) return existing
-  const sessionId = crypto.randomBytes(16).toString('hex')
-  res.cookie(YOUTUBE_SESSION_COOKIE, sessionId, {
-    httpOnly: true,
-    sameSite: cookieSameSite,
-    secure: cookieSecure,
-    maxAge: 7 * 24 * 60 * 60 * 1000,
-  })
-  return sessionId
-}
 
 const getSessionId = (req) => {
   const existing = req.cookies?.[YOUTUBE_SESSION_COOKIE]
@@ -253,44 +227,6 @@ const ensureValidAccessToken = async (sessionId, connection, options = {}) => {
   return { accessToken: refreshed.accessToken, connection: updatedConnection }
 }
 
-const loadLegacyConnections = (req) => {
-  const parsed = parseJsonCookie(req.cookies?.[YOUTUBE_CONNECTIONS_COOKIE])
-  if (!Array.isArray(parsed)) return []
-  return parsed.filter(
-    (entry) =>
-      entry &&
-      typeof entry === 'object' &&
-      typeof entry.channelId === 'string' &&
-      typeof entry.accessToken === 'string',
-  )
-}
-
-const loadYouTubeConnections = async (req, res) => {
-  const sessionId = getSessionId(req)
-  if (sessionId) {
-    const session = await loadSession(sessionId)
-    return { sessionId, session, connections: session.connections ?? [] }
-  }
-
-  const legacyConnections = loadLegacyConnections(req)
-  if (legacyConnections.length && res) {
-    const nextSessionId = ensureSessionId(req, res)
-    const session = buildEmptySession()
-    session.connections = legacyConnections
-    await saveSession(nextSessionId, session)
-    res.clearCookie(YOUTUBE_CONNECTIONS_COOKIE)
-    return { sessionId: nextSessionId, session, connections: session.connections }
-  }
-
-  return { sessionId: '', session: buildEmptySession(), connections: [] }
-}
-
-const storeYouTubeConnections = async (sessionId, connections) => {
-  if (!sessionId) return
-  const session = await loadSession(sessionId)
-  session.connections = connections
-  await saveSession(sessionId, session)
-}
 
 const buildSupabaseTableUrl = (tableName, query = '') => {
   const suffix = query ? `?${query}` : ''
