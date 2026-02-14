@@ -53,11 +53,14 @@ const youtubeRedirectUri = getEnv(
   'YOUTUBE_REDIRECT_URI',
   `${serverBaseUrl}/oauth/youtube/callback`,
 )
-const youtubeScope = getEnv('YOUTUBE_SCOPE')
-const youtubeReportChannelDaily = getEnv('YOUTUBE_REPORT_CHANNEL_DAILY')
-const youtubeReportVideoDaily = getEnv('YOUTUBE_REPORT_VIDEO_DAILY')
-const youtubeReportDemographics = getEnv('YOUTUBE_REPORT_DEMOGRAPHICS')
-const youtubeReportGeo = getEnv('YOUTUBE_REPORT_GEO')
+const youtubeScope = getEnv(
+  'YOUTUBE_SCOPE',
+  'https://www.googleapis.com/auth/youtube.readonly https://www.googleapis.com/auth/yt-analytics.readonly',
+)
+const youtubeReportChannelDaily = getEnv('YOUTUBE_REPORT_CHANNEL_DAILY', 'channel_basic_a2')
+const youtubeReportVideoDaily = getEnv('YOUTUBE_REPORT_VIDEO_DAILY', 'video_basic_a2')
+const youtubeReportDemographics = getEnv('YOUTUBE_REPORT_DEMOGRAPHICS', 'channel_demographics_a1')
+const youtubeReportGeo = getEnv('YOUTUBE_REPORT_GEO', 'channel_geography_a1')
 const supabaseUrl = withFallbackUrl(getEnv('SUPABASE_URL'), '')
 const supabasePublishableKey = getEnv('SUPABASE_PUBLISHABLE_KEY', getEnv('SUPABASE_ANON_KEY'))
 const supabaseSecretKey = getEnv('SUPABASE_SECRET_KEY', getEnv('SUPABASE_SERVICE_ROLE_KEY'))
