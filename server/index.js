@@ -924,8 +924,19 @@ const normalizeUuidArray = (value) => {
   return []
 }
 
+const normalizeStringArray = (value) => {
+  if (!Array.isArray(value)) return []
+  return uniqueValues(
+    value
+      .map((entry) => (typeof entry === 'string' ? entry.trim() : ''))
+      .filter((entry) => entry.length > 0),
+  )
+}
+
 const CAMPAIGN_MEMBER_ROLE_ADMIN = 'admin'
 const CAMPAIGN_MEMBER_ROLE_MEMBER = 'member'
+const CAMPAIGN_SELECTED_POST_IDS_KEY = 'selected_post_ids'
+const CAMPAIGN_SELECTED_CHANNEL_ID_KEY = 'selected_channel_id'
 
 const normalizeCampaignMemberRole = (value) => {
   if (typeof value !== 'string') return CAMPAIGN_MEMBER_ROLE_MEMBER
@@ -1128,6 +1139,49 @@ const sanitizeDistributionSources = (value) => {
 
   const { brand: _ignoredBrand, ...sanitizedValue } = normalizedValue
   return sanitizedValue
+}
+
+const readCampaignDistributionObject = (value) => {
+  const normalizedValue = normalizeJsonValue(value)
+  if (normalizedValue && typeof normalizedValue === 'object' && !Array.isArray(normalizedValue)) {
+    return { ...normalizedValue }
+  }
+
+  if (typeof normalizedValue === 'string') {
+    const trimmed = normalizedValue.trim()
+    if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+      try {
+        const parsed = JSON.parse(trimmed)
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          return { ...parsed }
+        }
+      } catch {
+        return {}
+      }
+    }
+  }
+
+  return {}
+}
+
+const readCampaignSelectedPostIds = (distributionSources) =>
+  normalizeStringArray(distributionSources?.[CAMPAIGN_SELECTED_POST_IDS_KEY])
+
+const readCampaignSelectedChannelId = (distributionSources) => {
+  const rawValue = distributionSources?.[CAMPAIGN_SELECTED_CHANNEL_ID_KEY]
+  return typeof rawValue === 'string' ? rawValue.trim() : ''
+}
+
+const formatCampaignDistributionValueForWrite = (distributionObject, currentRawValue) => {
+  const sanitizedDistribution = sanitizeDistributionSources(distributionObject)
+  if (typeof currentRawValue === 'string') {
+    try {
+      return JSON.stringify(sanitizedDistribution ?? {})
+    } catch {
+      return currentRawValue
+    }
+  }
+  return sanitizedDistribution
 }
 
 const readSupabaseSessionTokens = (req) => {
@@ -1491,7 +1545,7 @@ const insertCampaignRow = async (row) => {
 
 const fetchCampaignRowById = async (campaignId) => {
   const selectFields = encodeURIComponent(
-    'id,campaign_name,allowed_members,allowed_orgs,creator',
+    'id,created_at,campaign_name,brand,start_date,end_date,views_delivered,guaranteed,engagement_rate,allowed_members,allowed_orgs,distribution_sources,creator',
   )
   const campaignFilter = encodeURIComponent(campaignId)
   const endpoints = [
@@ -1543,6 +1597,87 @@ const updateCampaignAllowedMembers = async (campaignId, allowedMemberRoles, crea
       },
       body: JSON.stringify({
         allowed_members: normalizedAllowedMembers,
+      }),
+    })
+    const payload = await response.json().catch(() => null)
+    const row = Array.isArray(payload) ? payload[0] ?? null : null
+    const result = {
+      ok: response.ok,
+      status: response.status,
+      payload,
+      row,
+    }
+    if (result.ok) return result
+    lastResult = result
+    if (response.status !== 404) break
+  }
+
+  return lastResult
+}
+
+const updateCampaignPostsAndMetrics = async (campaignId, input) => {
+  const campaignFilter = encodeURIComponent(campaignId)
+  const endpoints = [
+    `${supabaseUrl}/rest/v1/%22Campaigns%22?id=eq.${campaignFilter}`,
+    `${supabaseUrl}/rest/v1/Campaigns?id=eq.${campaignFilter}`,
+  ]
+
+  let lastResult = { ok: false, status: 500, payload: null, row: null }
+  for (const endpoint of endpoints) {
+    const response = await fetch(endpoint, {
+      method: 'PATCH',
+      headers: {
+        apikey: supabaseSecretKey,
+        Authorization: `Bearer ${supabaseSecretKey}`,
+        'Content-Type': 'application/json',
+        Prefer: 'return=representation',
+      },
+      body: JSON.stringify({
+        views_delivered: Math.max(0, toNumber(input.viewsDelivered)),
+        engagement_rate: Math.max(0, toNumber(input.engagementRate)),
+        distribution_sources: input.distributionSources,
+      }),
+    })
+    const payload = await response.json().catch(() => null)
+    const row = Array.isArray(payload) ? payload[0] ?? null : null
+    const result = {
+      ok: response.ok,
+      status: response.status,
+      payload,
+      row,
+    }
+    if (result.ok) return result
+    lastResult = result
+    if (response.status !== 404) break
+  }
+
+  return lastResult
+}
+
+const updateCampaignDetails = async (campaignId, input) => {
+  const campaignFilter = encodeURIComponent(campaignId)
+  const endpoints = [
+    `${supabaseUrl}/rest/v1/%22Campaigns%22?id=eq.${campaignFilter}`,
+    `${supabaseUrl}/rest/v1/Campaigns?id=eq.${campaignFilter}`,
+  ]
+
+  let lastResult = { ok: false, status: 500, payload: null, row: null }
+  for (const endpoint of endpoints) {
+    const response = await fetch(endpoint, {
+      method: 'PATCH',
+      headers: {
+        apikey: supabaseSecretKey,
+        Authorization: `Bearer ${supabaseSecretKey}`,
+        'Content-Type': 'application/json',
+        Prefer: 'return=representation',
+      },
+      body: JSON.stringify({
+        campaign_name: input.campaignName,
+        brand: input.brand,
+        start_date: input.startDate,
+        end_date: input.endDate,
+        guaranteed: Math.max(0, toNumber(input.guaranteed)),
+        engagement_rate: Math.max(0, toNumber(input.engagementRate)),
       }),
     })
     const payload = await response.json().catch(() => null)
@@ -1633,7 +1768,9 @@ const mapCampaignForClient = (row) => {
   const viewsDelivered = toNumber(row?.views_delivered)
   const guaranteed = toNumber(row?.guaranteed)
   const engagementRate = toNumber(row?.engagement_rate)
-  const distributionSources = normalizeJsonValue(row?.distribution_sources)
+  const distributionSources = readCampaignDistributionObject(row?.distribution_sources)
+  const selectedPostIds = readCampaignSelectedPostIds(distributionSources)
+  const selectedChannelId = readCampaignSelectedChannelId(distributionSources)
   const allowedMemberRoles = normalizeCampaignMemberRoles(row?.allowed_members, creator)
 
   return {
@@ -1648,6 +1785,8 @@ const mapCampaignForClient = (row) => {
     engagementRate,
     allowedOrgs: normalizeUuidArray(row?.allowed_orgs),
     distributionSources,
+    selectedPostIds,
+    selectedChannelId,
     allowedMembers: Object.keys(allowedMemberRoles),
     allowedMemberRoles,
     creator,
@@ -1848,6 +1987,131 @@ app.post('/api/campaigns', async (req, res) => {
   })
 })
 
+app.post('/api/campaigns/:campaignId/details', async (req, res) => {
+  const viewer = await resolveAuthedUserContext(req, res)
+  if (!viewer.ok) {
+    res.status(viewer.status || 500).json({
+      error: viewer.error || 'campaign_update_failed',
+      message: viewer.message || 'Unable to update campaign.',
+      details: viewer.details ?? null,
+    })
+    return
+  }
+
+  const campaignId = typeof req.params?.campaignId === 'string' ? req.params.campaignId.trim() : ''
+  if (!isUuid(campaignId)) {
+    res.status(400).json({
+      error: 'invalid_campaign_id',
+      message: 'Campaign id must be a valid UUID.',
+    })
+    return
+  }
+
+  const payload = req.body ?? {}
+  const campaignName = typeof payload.campaignName === 'string' ? payload.campaignName.trim() : ''
+  const brand = typeof payload.brand === 'string' ? payload.brand.trim() : ''
+  const startDate = normalizeDateOnly(payload.startDate)
+  const endDate = normalizeDateOnly(payload.endDate)
+  const guaranteed = toNumber(payload.guaranteed)
+  const guaranteedEngagements = toNumber(payload.guaranteedEngagements)
+
+  if (!campaignName || !brand || !startDate || !endDate) {
+    res.status(400).json({
+      error: 'invalid_campaign_payload',
+      message: 'campaignName, brand, startDate, and endDate are required.',
+    })
+    return
+  }
+
+  if (Date.parse(`${startDate}T00:00:00Z`) > Date.parse(`${endDate}T00:00:00Z`)) {
+    res.status(400).json({
+      error: 'invalid_campaign_payload',
+      message: 'startDate must be earlier than or equal to endDate.',
+    })
+    return
+  }
+
+  if (
+    !Number.isFinite(guaranteed) ||
+    !Number.isFinite(guaranteedEngagements) ||
+    guaranteed < 0 ||
+    guaranteedEngagements < 0
+  ) {
+    res.status(400).json({
+      error: 'invalid_campaign_payload',
+      message: 'guaranteed and guaranteedEngagements must be non-negative numbers.',
+    })
+    return
+  }
+
+  const campaignResult = await fetchCampaignRowById(campaignId)
+  if (!campaignResult.ok) {
+    res.status(campaignResult.status || 500).json({
+      error: 'campaign_update_failed',
+      message: 'Unable to load campaign from Supabase.',
+      details: campaignResult.payload,
+    })
+    return
+  }
+
+  const campaignRow = campaignResult.row
+  if (!campaignRow) {
+    res.status(404).json({
+      error: 'campaign_not_found',
+      message: 'Campaign was not found.',
+    })
+    return
+  }
+
+  if (!canUserSeeCampaign(campaignRow, viewer.userId, viewer.organizationIds)) {
+    res.status(403).json({
+      error: 'forbidden',
+      message: 'You do not have access to this campaign.',
+    })
+    return
+  }
+
+  const viewerRole = resolveCampaignUserRole(campaignRow, viewer.userId)
+  if (viewerRole !== CAMPAIGN_MEMBER_ROLE_ADMIN) {
+    res.status(403).json({
+      error: 'forbidden',
+      message: 'Only campaign admins can edit campaign details.',
+    })
+    return
+  }
+
+  const engagementRate = guaranteed > 0 ? (guaranteedEngagements / guaranteed) * 100 : 0
+  const updated = await updateCampaignDetails(campaignId, {
+    campaignName,
+    brand,
+    startDate,
+    endDate,
+    guaranteed,
+    engagementRate,
+  })
+  if (!updated.ok) {
+    res.status(updated.status || 500).json({
+      error: 'campaign_update_failed',
+      message: 'Unable to update campaign in Supabase.',
+      details: updated.payload,
+    })
+    return
+  }
+
+  const updatedRow = updated.row ?? {
+    ...campaignRow,
+    campaign_name: campaignName,
+    brand,
+    start_date: startDate,
+    end_date: endDate,
+    guaranteed,
+    engagement_rate: engagementRate,
+  }
+  res.json({
+    campaign: mapCampaignForClient(updatedRow),
+  })
+})
+
 app.delete('/api/campaigns/:campaignId', async (req, res) => {
   const viewer = await resolveAuthedUserContext(req, res)
   if (!viewer.ok) {
@@ -1860,10 +2124,10 @@ app.delete('/api/campaigns/:campaignId', async (req, res) => {
   }
 
   const campaignId = typeof req.params?.campaignId === 'string' ? req.params.campaignId.trim() : ''
-  if (!isUuid(campaignId)) {
+  if (!campaignId) {
     res.status(400).json({
       error: 'invalid_campaign_id',
-      message: 'Campaign id must be a valid UUID.',
+      message: 'Campaign id is required.',
     })
     return
   }
@@ -2371,6 +2635,122 @@ app.post('/api/campaigns/:campaignId/members', async (req, res) => {
   })
 })
 
+app.post('/api/campaigns/:campaignId/posts', async (req, res) => {
+  const viewer = await resolveAuthedUserContext(req, res)
+  if (!viewer.ok) {
+    res.status(viewer.status || 500).json({
+      error: viewer.error || 'campaign_posts_update_failed',
+      message: viewer.message || 'Unable to update campaign posts.',
+      details: viewer.details ?? null,
+    })
+    return
+  }
+
+  const campaignId = typeof req.params?.campaignId === 'string' ? req.params.campaignId.trim() : ''
+  if (!isUuid(campaignId)) {
+    res.status(400).json({
+      error: 'invalid_campaign_id',
+      message: 'Campaign id must be a valid UUID.',
+    })
+    return
+  }
+
+  const payload = req.body ?? {}
+  const selectedPostIds = normalizeStringArray(payload.selectedPostIds)
+  const selectedChannelId =
+    typeof payload.selectedChannelId === 'string' ? payload.selectedChannelId.trim() : ''
+  const viewsDelivered = toNumber(payload.viewsDelivered)
+  const engagementRate = toNumber(payload.engagementRate)
+
+  if (!Number.isFinite(viewsDelivered) || viewsDelivered < 0 || !Number.isFinite(engagementRate) || engagementRate < 0) {
+    res.status(400).json({
+      error: 'invalid_campaign_posts_payload',
+      message: 'viewsDelivered and engagementRate must be non-negative numbers.',
+    })
+    return
+  }
+
+  const campaignResult = await fetchCampaignRowById(campaignId)
+  if (!campaignResult.ok) {
+    res.status(campaignResult.status || 500).json({
+      error: 'campaign_posts_update_failed',
+      message: 'Unable to load campaign from Supabase.',
+      details: campaignResult.payload,
+    })
+    return
+  }
+
+  const campaignRow = campaignResult.row
+  if (!campaignRow) {
+    res.status(404).json({
+      error: 'campaign_not_found',
+      message: 'Campaign was not found.',
+    })
+    return
+  }
+
+  if (!canUserSeeCampaign(campaignRow, viewer.userId, viewer.organizationIds)) {
+    res.status(403).json({
+      error: 'forbidden',
+      message: 'You do not have access to this campaign.',
+    })
+    return
+  }
+
+  const viewerRole = resolveCampaignUserRole(campaignRow, viewer.userId)
+  if (viewerRole !== CAMPAIGN_MEMBER_ROLE_ADMIN) {
+    res.status(403).json({
+      error: 'forbidden',
+      message: 'Only campaign admins can manage campaign posts.',
+    })
+    return
+  }
+
+  const rawDistributionSources = campaignRow?.distribution_sources
+  const nextDistributionSources = readCampaignDistributionObject(rawDistributionSources)
+  nextDistributionSources[CAMPAIGN_SELECTED_POST_IDS_KEY] = selectedPostIds
+  if (selectedChannelId) {
+    nextDistributionSources[CAMPAIGN_SELECTED_CHANNEL_ID_KEY] = selectedChannelId
+  } else {
+    delete nextDistributionSources[CAMPAIGN_SELECTED_CHANNEL_ID_KEY]
+  }
+  const distributionSourcesForWrite = formatCampaignDistributionValueForWrite(
+    nextDistributionSources,
+    rawDistributionSources,
+  )
+
+  const updateResult = await updateCampaignPostsAndMetrics(campaignId, {
+    viewsDelivered,
+    engagementRate,
+    distributionSources: distributionSourcesForWrite,
+  })
+  if (!updateResult.ok) {
+    console.error('Campaign post update failed:', {
+      campaignId,
+      viewerUserId: viewer.userId,
+      status: updateResult.status,
+      details: updateResult.payload,
+    })
+    res.status(updateResult.status || 500).json({
+      error: 'campaign_posts_update_failed',
+      message: 'Unable to update campaign posts in Supabase.',
+      details: updateResult.payload,
+    })
+    return
+  }
+
+  const updatedCampaignRow = updateResult.row ?? {
+    ...campaignRow,
+    views_delivered: viewsDelivered,
+    engagement_rate: engagementRate,
+    distribution_sources: distributionSourcesForWrite,
+  }
+
+  res.json({
+    campaign: mapCampaignForClient(updatedCampaignRow),
+  })
+})
+
 app.get('/oauth/google', (_req, res) => {
   if (!clientId || !clientSecret || !redirectUri) {
     res.redirect(buildAppRedirect({ status: 'error', message: 'Google OAuth not configured.' }))
@@ -2765,6 +3145,8 @@ const fetchYouTubeVideos = async (accessToken, videoIds) => {
     return payload.items.map((item) => ({
       id: typeof item.id === 'string' ? item.id : '',
       title: typeof item?.snippet?.title === 'string' ? item.snippet.title.trim() : '',
+      channelId: typeof item?.snippet?.channelId === 'string' ? item.snippet.channelId.trim() : '',
+      channelName: typeof item?.snippet?.channelTitle === 'string' ? item.snippet.channelTitle.trim() : '',
       publishedAt: typeof item?.snippet?.publishedAt === 'string' ? item.snippet.publishedAt : '',
       views: toNumber(item?.statistics?.viewCount),
       likes: toNumber(item?.statistics?.likeCount),
@@ -3643,10 +4025,16 @@ const buildReportingSummary = async (sessionId, connections, options = {}) => {
     })
   }
 
+  const channelNameById = new Map(
+    connections.map((connection) => [connection.channelId, connection.channelName || 'YouTube Channel']),
+  )
+
   const topPosts = topVideoIds.map((item) => ({
     id: item.videoId,
     title: videoTitleMap.get(item.videoId) || 'Untitled video',
     platform: 'YouTube',
+    channelId: item.channelId || '',
+    channelName: channelNameById.get(item.channelId) || 'YouTube Channel',
     views: item.views,
     engagementRate: item.views ? (item.engagements / item.views) * 100 : 0,
   }))
@@ -3757,6 +4145,8 @@ const buildLiveYouTubeSummary = async ({
       id: video.id,
       title: video.title || 'Untitled video',
       platform: 'YouTube',
+      channelId: video.channelId || '',
+      channelName: video.channelName || 'YouTube Channel',
       views: video.views,
       engagementRate: video.views ? ((video.likes + video.comments) / video.views) * 100 : 0,
     }))

@@ -26,6 +26,8 @@ export interface CampaignApiItem {
   engagementRate: number
   allowedOrgs: string[]
   distributionSources: unknown
+  selectedPostIds?: string[]
+  selectedChannelId?: string
   allowedMembers: string[]
   allowedMemberRoles?: Record<string, CampaignMemberRole>
   creator: string
@@ -99,6 +101,30 @@ export interface UpdateCampaignMembersResult {
   updateResult: MemberResolutionSummary
 }
 
+export interface UpdateCampaignPostsInput {
+  selectedPostIds: string[]
+  selectedChannelId?: string
+  viewsDelivered: number
+  engagementRate: number
+}
+
+export interface UpdateCampaignPostsResult {
+  campaign: CampaignApiItem
+}
+
+export interface UpdateCampaignDetailsInput {
+  campaignName: string
+  brand: string
+  startDate: string
+  endDate: string
+  guaranteed: number
+  guaranteedEngagements: number
+}
+
+export interface UpdateCampaignDetailsResult {
+  campaign: CampaignApiItem
+}
+
 export interface DeleteCampaignResult {
   campaignId: string
 }
@@ -116,7 +142,15 @@ const asCampaignMemberRole = (value: unknown): CampaignMemberRole => {
 
 const asStringArray = (value: unknown): string[] => {
   if (!Array.isArray(value)) return []
-  return value.filter((entry): entry is string => typeof entry === 'string' && Boolean(entry.trim()))
+  const seen = new Set<string>()
+  return value
+    .filter((entry): entry is string => typeof entry === 'string' && Boolean(entry.trim()))
+    .map((entry) => entry.trim())
+    .filter((entry) => {
+      if (seen.has(entry)) return false
+      seen.add(entry)
+      return true
+    })
 }
 
 const asMemberRoleMap = (value: unknown): Record<string, CampaignMemberRole> => {
@@ -179,6 +213,8 @@ const normalizeCampaign = (payload: unknown): CampaignApiItem | null => {
     engagementRate: asNumber(row.engagementRate),
     allowedOrgs: asStringArray(row.allowedOrgs),
     distributionSources: row.distributionSources ?? null,
+    selectedPostIds: asStringArray((row as { selectedPostIds?: unknown }).selectedPostIds),
+    selectedChannelId: asString((row as { selectedChannelId?: unknown }).selectedChannelId).trim() || undefined,
     allowedMembers: allowedMembersFromPayload.length ? allowedMembersFromPayload : Object.keys(allowedMemberRoles),
     allowedMemberRoles,
     creator: asString(row.creator),
@@ -284,6 +320,48 @@ export const updateCampaignMembers = async (
       .filter((row: CampaignMember | null): row is CampaignMember => Boolean(row)),
     updateResult: normalizeMemberResolutionSummary(payload?.updateResult),
   }
+}
+
+export const updateCampaignPosts = async (
+  campaignId: string,
+  input: UpdateCampaignPostsInput,
+): Promise<UpdateCampaignPostsResult> => {
+  const response = await fetch(`${apiBaseUrl}/api/campaigns/${campaignId}/posts`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+  const payload = await response.json().catch(() => null)
+  if (!response.ok) {
+    throw new Error(readErrorMessage(payload, 'Unable to update campaign posts.'))
+  }
+  const campaign = normalizeCampaign(payload?.campaign)
+  if (!campaign) {
+    throw new Error('Campaign posts were updated but the response payload was invalid.')
+  }
+  return { campaign }
+}
+
+export const updateCampaignDetails = async (
+  campaignId: string,
+  input: UpdateCampaignDetailsInput,
+): Promise<UpdateCampaignDetailsResult> => {
+  const response = await fetch(`${apiBaseUrl}/api/campaigns/${campaignId}/details`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  })
+  const payload = await response.json().catch(() => null)
+  if (!response.ok) {
+    throw new Error(readErrorMessage(payload, 'Unable to update campaign details.'))
+  }
+  const campaign = normalizeCampaign(payload?.campaign)
+  if (!campaign) {
+    throw new Error('Campaign was updated but the response payload was invalid.')
+  }
+  return { campaign }
 }
 
 export const deleteCampaign = async (campaignId: string): Promise<DeleteCampaignResult> => {

@@ -26,15 +26,21 @@ const toIsoDate = (date: Date) => {
 const todayIso = () => toIsoDate(new Date())
 
 const normalizeIsoDate = (value: string, fallbackYear: number) => {
-  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return value
-  const hasExplicitYear = /\b\d{4}\b/.test(value)
+  const normalizedValue = value.trim()
+  if (/^\d{4}-\d{2}-\d{2}$/.test(normalizedValue)) return normalizedValue
+  const compactIsoMatch = /^(\d{4})(\d{2})(\d{2})$/.exec(normalizedValue)
+  if (compactIsoMatch) {
+    const [, year, month, day] = compactIsoMatch
+    return `${year}-${month}-${day}`
+  }
+  const hasExplicitYear = /\b\d{4}\b/.test(normalizedValue)
   if (!hasExplicitYear) {
-    const parsedWithFallbackYear = new Date(`${value} ${fallbackYear}`)
+    const parsedWithFallbackYear = new Date(`${normalizedValue} ${fallbackYear}`)
     if (!Number.isNaN(parsedWithFallbackYear.getTime())) return toIsoDate(parsedWithFallbackYear)
   }
-  const direct = new Date(value)
+  const direct = new Date(normalizedValue)
   if (!Number.isNaN(direct.getTime())) return toIsoDate(direct)
-  const parsed = new Date(`${value} ${fallbackYear}`)
+  const parsed = new Date(`${normalizedValue} ${fallbackYear}`)
   if (Number.isNaN(parsed.getTime())) return ''
   return toIsoDate(parsed)
 }

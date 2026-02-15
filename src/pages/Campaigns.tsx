@@ -2,12 +2,15 @@ import { useEffect, useMemo, useState, type ChangeEvent, type Dispatch, type Set
 import { Badge } from '../components/ui/Badge'
 import { ProgressBar } from '../components/ui/ProgressBar'
 import { SectionHeader } from '../components/ui/SectionHeader'
-import type { CampaignSummary } from '../types/dashboard'
+import { useYouTubeSummary } from '../hooks/useYouTubeSummary'
+import type { CampaignSummary, PostSummary } from '../types/dashboard'
 import {
   createCampaign,
   deleteCampaign,
   fetchCampaignMembers,
   fetchCampaigns,
+  updateCampaignDetails,
+  updateCampaignPosts,
   updateCampaignMembers,
   type CampaignApiItem,
   type CampaignMemberRole,
@@ -21,6 +24,8 @@ import { formatNumber, formatPercent } from '../utils/format'
 interface CampaignCardModel extends CampaignSummary {
   creator: string
   allowedMemberRoles: Record<string, CampaignMemberRole>
+  selectedPostIds: string[]
+  selectedChannelId?: string
 }
 
 interface FeedbackState {
@@ -32,6 +37,11 @@ interface FeedbackState {
 interface MemberInputRow {
   email: string
   role: CampaignMemberRole
+}
+
+interface CampaignChannelOption {
+  id: string
+  label: string
 }
 
 const hasResolutionRows = (summary: MemberResolutionSummary) => flattenResolutionItems(summary).length > 0
@@ -49,6 +59,7 @@ const toNumber = (value: unknown) => {
 }
 
 const normalizeEmail = (value: string) => value.trim().toLowerCase()
+const normalizePostId = (value: string) => value.trim()
 
 const normalizeMemberRole = (value: unknown): CampaignMemberRole =>
   value === 'admin' ? 'admin' : 'member'
@@ -153,6 +164,12 @@ const mapCampaignToCard = (campaign: CampaignApiItem): CampaignCardModel => {
     },
     creator: campaign.creator,
     allowedMemberRoles: campaign.allowedMemberRoles ?? {},
+    selectedPostIds: Array.isArray(campaign.selectedPostIds)
+      ? [...new Set(campaign.selectedPostIds.map((entry) => normalizePostId(entry)).filter(Boolean))]
+      : [],
+    selectedChannelId: typeof campaign.selectedChannelId === 'string' && campaign.selectedChannelId.trim()
+      ? campaign.selectedChannelId.trim()
+      : undefined,
   }
 }
 
@@ -274,6 +291,11 @@ const MemberFeedback = ({ feedback }: { feedback: FeedbackState }) => {
 }
 
 export const Campaigns = () => {
+  const {
+    summary: youtubeSummary,
+    status: youtubeSummaryStatus,
+    error: youtubeSummaryError,
+  } = useYouTubeSummary()
   const [campaignList, setCampaignList] = useState<CampaignCardModel[]>([])
   const [viewerUserId, setViewerUserId] = useState('')
   const [isLoading, setIsLoading] = useState(true)
@@ -308,6 +330,21 @@ export const Campaigns = () => {
   const [deleteCampaignTarget, setDeleteCampaignTarget] = useState<CampaignCardModel | null>(null)
   const [deleteSubmitting, setDeleteSubmitting] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
+  const [editCampaignTarget, setEditCampaignTarget] = useState<CampaignCardModel | null>(null)
+  const [editSubmitting, setEditSubmitting] = useState(false)
+  const [editError, setEditError] = useState<string | null>(null)
+  const [hasEditSubmitAttempt, setHasEditSubmitAttempt] = useState(false)
+  const [editName, setEditName] = useState('')
+  const [editBrand, setEditBrand] = useState('')
+  const [editStart, setEditStart] = useState('')
+  const [editEnd, setEditEnd] = useState('')
+  const [editGuaranteedViews, setEditGuaranteedViews] = useState('')
+  const [editGuaranteedEngagements, setEditGuaranteedEngagements] = useState('')
+  const [managePostsCampaign, setManagePostsCampaign] = useState<CampaignCardModel | null>(null)
+  const [managePostsSubmitting, setManagePostsSubmitting] = useState(false)
+  const [managePostsError, setManagePostsError] = useState<string | null>(null)
+  const [selectedPostIdsDraft, setSelectedPostIdsDraft] = useState<string[]>([])
+  const [selectedPostChannelId, setSelectedPostChannelId] = useState('all')
 
   const todayDate = useMemo(() => {
     const now = new Date()
@@ -319,6 +356,11 @@ export const Campaigns = () => {
     if (!draftStart || draftStart < todayDate) return todayDate
     return draftStart
   }, [draftStart, todayDate])
+
+  const minEditEndDate = useMemo(() => {
+    if (!editStart) return ''
+    return editStart
+  }, [editStart])
 
   const isManageViewerCreator = useMemo(() => {
     if (!manageCampaign || !viewerUserId) return false
@@ -377,6 +419,92 @@ export const Campaigns = () => {
     [addInputSignature, manageAddInputsBaseline, memberRoleEdits],
   )
 
+  const availablePosts = useMemo(() => {
+    const postById = new Map<string, PostSummary>()
+    youtubeSummary.topPosts.forEach((post) => {
+      const id = typeof post?.id === 'string' ? normalizePostId(post.id) : ''
+      if (!id) return
+      postById.set(id, {
+        ...post,
+        id,
+        title: typeof post?.title === 'string' && post.title.trim() ? post.title.trim() : 'Untitled video',
+        channelId: typeof post?.channelId === 'string' ? post.channelId.trim() : '',
+        channelName: typeof post?.channelName === 'string' ? post.channelName.trim() : '',
+        views: toNumber(post?.views),
+        engagementRate: toNumber(post?.engagementRate),
+      })
+    })
+    return [...postById.values()].sort((left, right) => right.views - left.views)
+  }, [youtubeSummary.topPosts])
+
+  const campaignChannelOptions = useMemo<CampaignChannelOption[]>(() => {
+    const channelLabelById = new Map<string, string>()
+
+    youtubeSummary.channels.forEach((channel) => {
+      const id = typeof channel?.id === 'string' ? channel.id.trim() : ''
+      if (!id) return
+      const label = typeof channel?.name === 'string' && channel.name.trim() ? channel.name.trim() : id
+      channelLabelById.set(id, label)
+    })
+
+    availablePosts.forEach((post) => {
+      const id = typeof post.channelId === 'string' ? post.channelId.trim() : ''
+      if (!id || channelLabelById.has(id)) return
+      const label =
+        typeof post.channelName === 'string' && post.channelName.trim()
+          ? post.channelName.trim()
+          : id
+      channelLabelById.set(id, label)
+    })
+
+    return [
+      { id: 'all', label: 'All channels' },
+      ...[...channelLabelById.entries()]
+        .map(([id, label]) => ({ id, label }))
+        .sort((left, right) => left.label.localeCompare(right.label)),
+    ]
+  }, [availablePosts, youtubeSummary.channels])
+
+  const visiblePostsForChannel = useMemo(() => {
+    if (selectedPostChannelId === 'all') return availablePosts
+    const hasChannelTaggedPosts = availablePosts.some((post) => Boolean(post.channelId))
+    if (!hasChannelTaggedPosts) return availablePosts
+    return availablePosts.filter((post) => post.channelId === selectedPostChannelId)
+  }, [availablePosts, selectedPostChannelId])
+
+  const selectedCampaignPosts = useMemo(() => {
+    if (!selectedPostIdsDraft.length || !availablePosts.length) return []
+    const selectedIds = new Set(selectedPostIdsDraft.map((entry) => normalizePostId(entry)))
+    return availablePosts.filter((post) => selectedIds.has(normalizePostId(post.id)))
+  }, [availablePosts, selectedPostIdsDraft])
+
+  const selectedPostIdSet = useMemo(
+    () => new Set(selectedPostIdsDraft.map((entry) => normalizePostId(entry)).filter(Boolean)),
+    [selectedPostIdsDraft],
+  )
+
+  const availablePostIdSet = useMemo(
+    () => new Set(availablePosts.map((post) => normalizePostId(post.id)).filter(Boolean)),
+    [availablePosts],
+  )
+
+  const selectedPostTotals = useMemo(() => {
+    const totals = selectedCampaignPosts.reduce(
+      (accumulator, post) => {
+        const views = toNumber(post.views)
+        const engagementRate = toNumber(post.engagementRate)
+        accumulator.views += views
+        accumulator.engagements += (views * engagementRate) / 100
+        return accumulator
+      },
+      { views: 0, engagements: 0 },
+    )
+    return {
+      viewsDelivered: Math.round(totals.views),
+      engagementRate: totals.views > 0 ? (totals.engagements / totals.views) * 100 : 0,
+    }
+  }, [selectedCampaignPosts])
+
   const resetCreateDraft = () => {
     setHasCreateSubmitAttempt(false)
     setDraftName('')
@@ -402,6 +530,21 @@ export const Campaigns = () => {
   const hasMissingRequiredCreateField = useMemo(() => {
     return Object.values(createRequiredFieldErrors).some(Boolean)
   }, [createRequiredFieldErrors])
+
+  const editRequiredFieldErrors = useMemo(() => {
+    return {
+      editName: !editName.trim() ? 'Campaign name is required.' : '',
+      editBrand: !editBrand.trim() ? 'Brand is required.' : '',
+      editStart: !editStart ? 'Start date is required.' : '',
+      editEnd: !editEnd ? 'End date is required.' : '',
+      editGuaranteedViews: !editGuaranteedViews ? 'Guaranteed views is required.' : '',
+      editGuaranteedEngagements: !editGuaranteedEngagements ? 'Guaranteed engagements is required.' : '',
+    }
+  }, [editBrand, editEnd, editGuaranteedEngagements, editGuaranteedViews, editName, editStart])
+
+  const hasMissingRequiredEditField = useMemo(() => {
+    return Object.values(editRequiredFieldErrors).some(Boolean)
+  }, [editRequiredFieldErrors])
 
   const canSubmit = useMemo(() => {
     if (
@@ -440,6 +583,34 @@ export const Campaigns = () => {
     todayDate,
   ])
 
+  const canSubmitEdit = useMemo(() => {
+    if (
+      !editName.trim() ||
+      !editBrand.trim() ||
+      !editStart ||
+      !editEnd ||
+      !editGuaranteedViews ||
+      !editGuaranteedEngagements
+    ) {
+      return false
+    }
+
+    const start = new Date(editStart)
+    const end = new Date(editEnd)
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return false
+    const guaranteedViews = Number(editGuaranteedViews)
+    const guaranteedEngagements = Number(editGuaranteedEngagements)
+    if (
+      !Number.isFinite(guaranteedViews) ||
+      !Number.isFinite(guaranteedEngagements) ||
+      guaranteedViews < 0 ||
+      guaranteedEngagements < 0
+    ) {
+      return false
+    }
+    return start <= end
+  }, [editBrand, editEnd, editGuaranteedEngagements, editGuaranteedViews, editName, editStart])
+
   useEffect(() => {
     let cancelled = false
 
@@ -465,6 +636,18 @@ export const Campaigns = () => {
       cancelled = true
     }
   }, [])
+
+  useEffect(() => {
+    if (!managePostsCampaign) return
+    const hasSelectedChannel = campaignChannelOptions.some((option) => option.id === selectedPostChannelId)
+    if (hasSelectedChannel) return
+
+    const preferredChannelId =
+      managePostsCampaign.selectedChannelId && campaignChannelOptions.some((option) => option.id === managePostsCampaign.selectedChannelId)
+        ? managePostsCampaign.selectedChannelId
+        : campaignChannelOptions[0]?.id ?? 'all'
+    setSelectedPostChannelId(preferredChannelId)
+  }, [campaignChannelOptions, managePostsCampaign, selectedPostChannelId])
 
   const formatCampaignDate = (value: string) => {
     const parsed = new Date(value)
@@ -655,11 +838,142 @@ export const Campaigns = () => {
         setManageError(null)
         setMembers([])
       }
+      if (managePostsCampaign?.id === deleteCampaignTarget.id) {
+        setManagePostsCampaign(null)
+        setManagePostsError(null)
+        setSelectedPostIdsDraft([])
+        setSelectedPostChannelId('all')
+      }
+      if (editCampaignTarget?.id === deleteCampaignTarget.id) {
+        setEditCampaignTarget(null)
+        setHasEditSubmitAttempt(false)
+        setEditError(null)
+      }
       setDeleteCampaignTarget(null)
     } catch (err) {
       setDeleteError(err instanceof Error ? err.message : 'Unable to delete campaign.')
     } finally {
       setDeleteSubmitting(false)
+    }
+  }
+
+  const openEditModal = (campaign: CampaignCardModel) => {
+    setEditCampaignTarget(campaign)
+    setHasEditSubmitAttempt(false)
+    setEditError(null)
+    setEditName(campaign.name)
+    setEditBrand(campaign.brand)
+    setEditStart(campaign.startDate)
+    setEditEnd(campaign.endDate)
+    setEditGuaranteedViews(String(campaign.guaranteedViews))
+    setEditGuaranteedEngagements(String(campaign.guaranteedEngagements))
+  }
+
+  const closeEditModal = () => {
+    if (editSubmitting) return
+    setEditCampaignTarget(null)
+    setHasEditSubmitAttempt(false)
+    setEditError(null)
+    setEditName('')
+    setEditBrand('')
+    setEditStart('')
+    setEditEnd('')
+    setEditGuaranteedViews('')
+    setEditGuaranteedEngagements('')
+  }
+
+  const handleEditCampaign = async () => {
+    if (!editCampaignTarget || editSubmitting) return
+    setHasEditSubmitAttempt(true)
+    if (hasMissingRequiredEditField || !canSubmitEdit) return
+
+    const guaranteedViews = Number(editGuaranteedViews)
+    const guaranteedEngagements = Number(editGuaranteedEngagements)
+    setEditSubmitting(true)
+    setEditError(null)
+    try {
+      const result = await updateCampaignDetails(editCampaignTarget.id, {
+        campaignName: editName.trim(),
+        brand: editBrand.trim(),
+        startDate: editStart,
+        endDate: editEnd,
+        guaranteed: guaranteedViews,
+        guaranteedEngagements,
+      })
+      const updatedCard = mapCampaignToCard(result.campaign)
+      setCampaignList((previous) =>
+        previous.map((campaign) => (campaign.id === updatedCard.id ? updatedCard : campaign)),
+      )
+      if (manageCampaign?.id === updatedCard.id) {
+        setManageCampaign(updatedCard)
+      }
+      if (managePostsCampaign?.id === updatedCard.id) {
+        setManagePostsCampaign(updatedCard)
+      }
+      if (deleteCampaignTarget?.id === updatedCard.id) {
+        setDeleteCampaignTarget(updatedCard)
+      }
+      setEditCampaignTarget(null)
+      setHasEditSubmitAttempt(false)
+      setEditError(null)
+      setEditName('')
+      setEditBrand('')
+      setEditStart('')
+      setEditEnd('')
+      setEditGuaranteedViews('')
+      setEditGuaranteedEngagements('')
+    } catch (err) {
+      setEditError(err instanceof Error ? err.message : 'Unable to update campaign.')
+    } finally {
+      setEditSubmitting(false)
+    }
+  }
+
+  const openManagePostsModal = (campaign: CampaignCardModel) => {
+    setManagePostsCampaign(campaign)
+    setManagePostsError(null)
+    setManagePostsSubmitting(false)
+    setSelectedPostIdsDraft([...campaign.selectedPostIds])
+    const preferredChannelId =
+      campaign.selectedChannelId && campaignChannelOptions.some((option) => option.id === campaign.selectedChannelId)
+        ? campaign.selectedChannelId
+        : 'all'
+    setSelectedPostChannelId(preferredChannelId)
+  }
+
+  const closeManagePostsModal = () => {
+    if (managePostsSubmitting) return
+    setManagePostsCampaign(null)
+    setManagePostsError(null)
+    setSelectedPostIdsDraft([])
+    setSelectedPostChannelId('all')
+  }
+
+  const handleManagePostsSubmit = async () => {
+    if (!managePostsCampaign || managePostsSubmitting) return
+    setManagePostsSubmitting(true)
+    setManagePostsError(null)
+    const deduplicatedPostIds = [...new Set(selectedPostIdsDraft.map((entry) => normalizePostId(entry)).filter(Boolean))]
+      .filter((postId) => availablePostIdSet.has(postId))
+    try {
+      const result = await updateCampaignPosts(managePostsCampaign.id, {
+        selectedPostIds: deduplicatedPostIds,
+        selectedChannelId: selectedPostChannelId === 'all' ? '' : selectedPostChannelId,
+        viewsDelivered: selectedPostTotals.viewsDelivered,
+        engagementRate: selectedPostTotals.engagementRate,
+      })
+      const updatedCard = mapCampaignToCard(result.campaign)
+      setCampaignList((previous) =>
+        previous.map((campaign) => (campaign.id === updatedCard.id ? updatedCard : campaign)),
+      )
+      setManagePostsCampaign(null)
+      setManagePostsError(null)
+      setSelectedPostIdsDraft([])
+      setSelectedPostChannelId('all')
+    } catch (err) {
+      setManagePostsError(err instanceof Error ? err.message : 'Unable to update campaign posts.')
+    } finally {
+      setManagePostsSubmitting(false)
     }
   }
 
@@ -912,6 +1226,154 @@ export const Campaigns = () => {
         </div>
       ) : null}
 
+      {editCampaignTarget ? (
+        <div className="modal-backdrop">
+          <div className="modal-card">
+            <div className="section-title">Edit campaign</div>
+            <div className="section-subtitle">{editCampaignTarget.name}</div>
+            <div className="grid grid-2" style={{ marginTop: '16px' }}>
+              <div className="form-field">
+                <label className="section-subtitle">Campaign name</label>
+                <input
+                  className="input"
+                  style={hasEditSubmitAttempt && editRequiredFieldErrors.editName ? { borderColor: 'var(--danger)' } : undefined}
+                  value={editName}
+                  onChange={(event) => setEditName(event.target.value)}
+                  placeholder="PowerPlay Q2"
+                />
+                {hasEditSubmitAttempt && editRequiredFieldErrors.editName ? (
+                  <div className="section-subtitle" style={{ marginTop: '6px', color: 'var(--danger)' }}>
+                    {editRequiredFieldErrors.editName}
+                  </div>
+                ) : null}
+              </div>
+              <div className="form-field">
+                <label className="section-subtitle">Brand</label>
+                <input
+                  className="input"
+                  style={hasEditSubmitAttempt && editRequiredFieldErrors.editBrand ? { borderColor: 'var(--danger)' } : undefined}
+                  value={editBrand}
+                  onChange={(event) => setEditBrand(event.target.value)}
+                  placeholder="Vertex Energy"
+                />
+                {hasEditSubmitAttempt && editRequiredFieldErrors.editBrand ? (
+                  <div className="section-subtitle" style={{ marginTop: '6px', color: 'var(--danger)' }}>
+                    {editRequiredFieldErrors.editBrand}
+                  </div>
+                ) : null}
+              </div>
+              <div className="form-field">
+                <label className="section-subtitle">Start date</label>
+                <input
+                  className="input"
+                  style={
+                    hasEditSubmitAttempt && editRequiredFieldErrors.editStart
+                      ? { borderColor: 'var(--danger)' }
+                      : undefined
+                  }
+                  value={editStart}
+                  onChange={(event) => {
+                    const nextStart = event.target.value
+                    setEditStart(nextStart)
+                    if (editEnd && nextStart && editEnd < nextStart) {
+                      setEditEnd(nextStart)
+                    }
+                  }}
+                  type="date"
+                />
+                {hasEditSubmitAttempt && editRequiredFieldErrors.editStart ? (
+                  <div className="section-subtitle" style={{ marginTop: '6px', color: 'var(--danger)' }}>
+                    {editRequiredFieldErrors.editStart}
+                  </div>
+                ) : null}
+              </div>
+              <div className="form-field">
+                <label className="section-subtitle">End date</label>
+                <input
+                  className="input"
+                  style={hasEditSubmitAttempt && editRequiredFieldErrors.editEnd ? { borderColor: 'var(--danger)' } : undefined}
+                  value={editEnd}
+                  onChange={(event) => setEditEnd(event.target.value)}
+                  type="date"
+                  min={minEditEndDate || undefined}
+                />
+                {hasEditSubmitAttempt && editRequiredFieldErrors.editEnd ? (
+                  <div className="section-subtitle" style={{ marginTop: '6px', color: 'var(--danger)' }}>
+                    {editRequiredFieldErrors.editEnd}
+                  </div>
+                ) : null}
+              </div>
+              <div className="form-field">
+                <label className="section-subtitle">Guaranteed views</label>
+                <input
+                  className="input"
+                  style={
+                    hasEditSubmitAttempt && editRequiredFieldErrors.editGuaranteedViews
+                      ? { borderColor: 'var(--danger)' }
+                      : undefined
+                  }
+                  value={editGuaranteedViews}
+                  onChange={(event) => setEditGuaranteedViews(event.target.value)}
+                  type="number"
+                  min={0}
+                  step={1}
+                />
+                {hasEditSubmitAttempt && editRequiredFieldErrors.editGuaranteedViews ? (
+                  <div className="section-subtitle" style={{ marginTop: '6px', color: 'var(--danger)' }}>
+                    {editRequiredFieldErrors.editGuaranteedViews}
+                  </div>
+                ) : null}
+              </div>
+              <div className="form-field">
+                <label className="section-subtitle">Guaranteed engagements</label>
+                <input
+                  className="input"
+                  style={
+                    hasEditSubmitAttempt && editRequiredFieldErrors.editGuaranteedEngagements
+                      ? { borderColor: 'var(--danger)' }
+                      : undefined
+                  }
+                  value={editGuaranteedEngagements}
+                  onChange={(event) => setEditGuaranteedEngagements(event.target.value)}
+                  type="number"
+                  min={0}
+                  step={1}
+                />
+                {hasEditSubmitAttempt && editRequiredFieldErrors.editGuaranteedEngagements ? (
+                  <div className="section-subtitle" style={{ marginTop: '6px', color: 'var(--danger)' }}>
+                    {editRequiredFieldErrors.editGuaranteedEngagements}
+                  </div>
+                ) : null}
+              </div>
+            </div>
+
+            <div className="modal-actions">
+              <button
+                className="ghost-button"
+                type="button"
+                onClick={() => closeEditModal()}
+                disabled={editSubmitting}
+              >
+                Cancel
+              </button>
+              <button
+                className="primary-button"
+                type="button"
+                onClick={() => void handleEditCampaign()}
+                disabled={editSubmitting}
+              >
+                {editSubmitting ? 'Saving...' : 'Save campaign'}
+              </button>
+            </div>
+            {editError ? (
+              <div className="section-subtitle" style={{ marginTop: '8px', color: 'var(--danger)' }}>
+                {editError}
+              </div>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+
       {manageCampaign ? (
         <div className="modal-backdrop">
           <div className="modal-card">
@@ -1118,6 +1580,146 @@ export const Campaigns = () => {
         </div>
       ) : null}
 
+      {managePostsCampaign ? (
+        <div className="modal-backdrop">
+          <div className="modal-card">
+            <div className="section-title">Manage campaign posts</div>
+            <div className="section-subtitle">{managePostsCampaign.name}</div>
+
+            <div style={{ marginTop: '14px', display: 'grid', gap: '12px' }}>
+              <div className="form-field">
+                <label className="section-subtitle">Channel</label>
+                <select
+                  className="select"
+                  value={selectedPostChannelId}
+                  onChange={(event) => setSelectedPostChannelId(event.target.value)}
+                >
+                  {campaignChannelOptions.map((option) => (
+                    <option key={option.id} value={option.id}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div
+                style={{
+                  border: '1px solid var(--border)',
+                  borderRadius: '10px',
+                  padding: '8px 10px',
+                  fontSize: '13px',
+                  display: 'grid',
+                  gap: '4px',
+                }}
+              >
+                <div className="split">
+                  <span className="muted">Selected posts</span>
+                  <strong>{formatNumber(selectedCampaignPosts.length)}</strong>
+                </div>
+                <div className="split">
+                  <span className="muted">Views delivered</span>
+                  <strong>{formatNumber(selectedPostTotals.viewsDelivered)}</strong>
+                </div>
+                <div className="split">
+                  <span className="muted">Engagement rate</span>
+                  <strong>{formatPercent(selectedPostTotals.engagementRate)}</strong>
+                </div>
+              </div>
+
+              <div
+                style={{
+                  border: '1px solid var(--border)',
+                  borderRadius: '10px',
+                  padding: '8px 10px',
+                  maxHeight: '320px',
+                  overflowY: 'auto',
+                  display: 'grid',
+                  gap: '8px',
+                }}
+              >
+                {youtubeSummaryStatus === 'loading' && !availablePosts.length ? (
+                  <div className="muted">Loading channel posts...</div>
+                ) : visiblePostsForChannel.length ? (
+                  visiblePostsForChannel.map((post) => {
+                    const postId = normalizePostId(post.id)
+                    const checked = selectedPostIdSet.has(postId)
+                    return (
+                      <label
+                        key={postId}
+                        style={{
+                          display: 'grid',
+                          gridTemplateColumns: '20px 1fr',
+                          gap: '10px',
+                          alignItems: 'start',
+                          fontSize: '13px',
+                          cursor: 'pointer',
+                        }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={(event) => {
+                            setSelectedPostIdsDraft((previous) => {
+                              const currentSet = new Set(
+                                previous.map((entry) => normalizePostId(entry)).filter(Boolean),
+                              )
+                              if (event.target.checked) {
+                                currentSet.add(postId)
+                              } else {
+                                currentSet.delete(postId)
+                              }
+                              return [...currentSet]
+                            })
+                          }}
+                        />
+                        <div style={{ display: 'grid', gap: '2px' }}>
+                          <span>{post.title || 'Untitled video'}</span>
+                          <span className="muted">
+                            {post.platform} · {formatNumber(post.views)} views · {formatPercent(post.engagementRate)}
+                          </span>
+                        </div>
+                      </label>
+                    )
+                  })
+                ) : (
+                  <div className="muted">
+                    {availablePosts.length
+                      ? 'No posts found for the selected channel.'
+                      : 'No posts are available yet. Refresh YouTube data and try again.'}
+                  </div>
+                )}
+              </div>
+
+              {youtubeSummaryError ? (
+                <div className="section-subtitle" style={{ color: 'var(--danger)' }}>
+                  {youtubeSummaryError}
+                </div>
+              ) : null}
+            </div>
+
+            <div className="modal-actions">
+              <button className="ghost-button" type="button" onClick={() => closeManagePostsModal()}>
+                Cancel
+              </button>
+              <button
+                className="primary-button"
+                type="button"
+                onClick={() => void handleManagePostsSubmit()}
+                disabled={managePostsSubmitting}
+              >
+                {managePostsSubmitting ? 'Saving...' : 'Save posts'}
+              </button>
+            </div>
+
+            {managePostsError ? (
+              <div className="section-subtitle" style={{ marginTop: '8px', color: 'var(--danger)' }}>
+                {managePostsError}
+              </div>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+
       {removeMemberTarget && manageCampaign ? (
         <div className="modal-backdrop">
           <div className="modal-card">
@@ -1258,6 +1860,8 @@ export const Campaigns = () => {
               campaign.allowedMemberRoles[viewerUserId] === 'admin',
           )
           const canManageMembers = isCreator || isAdmin
+          const canManageCampaignPosts = isCreator || isAdmin
+          const canEditCampaign = isCreator || isAdmin
 
           return (
             <div key={campaign.id} className="card" style={{ position: 'relative' }}>
@@ -1288,12 +1892,33 @@ export const Campaigns = () => {
                   x
                 </button>
               ) : null}
+              {canEditCampaign ? (
+                <button
+                  className="ghost-button"
+                  type="button"
+                  aria-label={`Edit ${campaign.name}`}
+                  onClick={() => {
+                    openEditModal(campaign)
+                  }}
+                  style={{
+                    position: 'absolute',
+                    top: isCreator ? '42px' : '10px',
+                    right: '10px',
+                    padding: '4px 10px',
+                    minHeight: '24px',
+                    fontSize: '12px',
+                    lineHeight: 1.2,
+                  }}
+                >
+                  Edit
+                </button>
+              ) : null}
               <div className="split">
                 <div>
                   <div className="section-title">{campaign.name}</div>
                   <div className="section-subtitle">{campaign.brand}</div>
                 </div>
-                <div style={isCreator ? { marginRight: '30px' } : undefined}>
+                <div style={canEditCampaign || isCreator ? { marginRight: '82px' } : undefined}>
                   <Badge tone={statusTone(campaign.status)} label={campaign.status} />
                 </div>
               </div>
@@ -1337,18 +1962,35 @@ export const Campaigns = () => {
                   <span className="muted">Clipper network</span>
                   <span>{campaign.distribution.clipper}%</span>
                 </div>
+                <div className="split">
+                  <span className="muted">Assigned posts</span>
+                  <span>{formatNumber(campaign.selectedPostIds.length)}</span>
+                </div>
               </div>
-              {canManageMembers ? (
-                <div style={{ marginTop: '14px' }}>
+              {canManageMembers || canManageCampaignPosts ? (
+                <div style={{ marginTop: '14px', display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
                   <button
                     className="primary-button"
                     type="button"
                     onClick={() => {
                       void openManageModal(campaign)
                     }}
+                    style={{ flex: '1 1 180px' }}
                   >
                     Manage Members
                   </button>
+                  {canManageCampaignPosts ? (
+                    <button
+                      className="ghost-button"
+                      type="button"
+                      onClick={() => {
+                        openManagePostsModal(campaign)
+                      }}
+                      style={{ flex: '1 1 180px' }}
+                    >
+                      Manage Posts
+                    </button>
+                  ) : null}
                 </div>
               ) : null}
             </div>

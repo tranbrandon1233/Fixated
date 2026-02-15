@@ -32,6 +32,8 @@ export interface PostSummary {
   id: string
   title: string
   platform: Platform
+  channelId?: string
+  channelName?: string
   views: number
   engagementRate: number
   campaignTag?: string
