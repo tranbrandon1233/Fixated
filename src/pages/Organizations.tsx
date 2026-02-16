@@ -1488,43 +1488,7 @@ export const Organizations = ({ role }: OrganizationsProps) => {
                   </div>
                 </div>
 
-                <div style={{ marginTop: '16px' }}>
-                  <div className="section-subtitle">Add Instagram or X</div>
-                  <div className="split" style={{ marginTop: '8px', gap: '8px' }}>
-                    <select
-                      className="select"
-                      value={connectionPlatform}
-                      onChange={(event) =>
-                        setConnectionPlatform(event.target.value as OrganizationConnectionPlatform)}
-                      disabled={connectionsSubmitting || Boolean(removeConnectionIdSubmitting)}
-                      style={{ minWidth: roleSelectMinWidth }}
-                    >
-                      {connectionPlatformOptions.map((option) => (
-                        <option key={option} value={option}>
-                          {option}
-                        </option>
-                      ))}
-                    </select>
-                    <input
-                      className="input"
-                      type="text"
-                      value={connectionAccountName}
-                      onChange={(event) => setConnectionAccountName(event.target.value)}
-                      placeholder="Account name"
-                      autoComplete="off"
-                      maxLength={180}
-                      disabled={connectionsSubmitting || Boolean(removeConnectionIdSubmitting)}
-                    />
-                    <button
-                      type="button"
-                      className="ghost-button"
-                      onClick={() => void handleAddConnection()}
-                      disabled={connectionsSubmitting || Boolean(removeConnectionIdSubmitting)}
-                    >
-                      {connectionsSubmitting ? 'Saving...' : 'Connect'}
-                    </button>
-                  </div>
-                </div>
+               
               </>
             ) : null}
 
