@@ -132,6 +132,17 @@ export interface UpdateCampaignPostsResult {
   campaign: CampaignApiItem
 }
 
+export interface CampaignAvailableChannelOption {
+  id: string
+  label: string
+}
+
+export interface CampaignAvailablePostsPayload {
+  accountLabels: string[]
+  channels: CampaignAvailableChannelOption[]
+  posts: CampaignManagedPost[]
+}
+
 export interface UpdateCampaignDetailsInput {
   campaignName: string
   brand: string
@@ -520,6 +531,46 @@ export const updateCampaignPosts = async (
     throw new Error('Campaign posts were updated but the response payload was invalid.')
   }
   return { campaign }
+}
+
+export const fetchCampaignAvailablePosts = async (
+  campaignId: string,
+): Promise<CampaignAvailablePostsPayload> => {
+  const response = await fetch(`${apiBaseUrl}/api/campaigns/${campaignId}/available-posts`, {
+    credentials: 'include',
+    cache: 'no-store',
+  })
+  const payload = await response.json().catch(() => null)
+  if (!response.ok) {
+    throw new Error(readErrorMessage(payload, 'Unable to load campaign posts.'))
+  }
+
+  const channels = (Array.isArray(payload?.channels) ? payload.channels : [])
+    .map((entry: unknown) => {
+      if (!entry || typeof entry !== 'object') return null
+      const id = sanitizeTokenInput((entry as { id?: unknown }).id, 300)
+      if (!id) return null
+      return {
+        id,
+        label: sanitizeTextInput((entry as { label?: unknown }).label, { maxLength: 220 }) || id,
+      }
+    })
+    .filter((entry: CampaignAvailableChannelOption | null): entry is CampaignAvailableChannelOption => Boolean(entry))
+
+  const posts = (Array.isArray(payload?.posts) ? payload.posts : [])
+    .map((entry: unknown) => normalizeCampaignManagedPost(entry))
+    .filter((entry: CampaignManagedPost | null): entry is CampaignManagedPost => Boolean(entry))
+
+  const normalizedAccountLabels = (Array.isArray(payload?.accountLabels) ? payload.accountLabels : [])
+    .map((entry: unknown) => sanitizeTextInput(entry, { maxLength: 220 }))
+    .filter((entry: string): entry is string => Boolean(entry))
+  const accountLabels = [...new Set<string>(normalizedAccountLabels)]
+
+  return {
+    accountLabels,
+    channels,
+    posts,
+  }
 }
 
 export const updateCampaignDetails = async (

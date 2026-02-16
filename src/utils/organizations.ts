@@ -7,6 +7,7 @@ const uuidRegex =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
 export type OrganizationMemberRole = 'admin' | 'internal' | 'brand viewer'
+export type OrganizationConnectionPlatform = 'YouTube' | 'Instagram' | 'X'
 
 export interface MemberAccessInput {
   email: string
@@ -38,6 +39,15 @@ export interface OrganizationMember {
   role: OrganizationMemberRole
 }
 
+export interface OrganizationConnectedAccount {
+  id: string
+  platform: OrganizationConnectionPlatform
+  accountName: string
+  channelId?: string
+  ownerUserId?: string
+  connectedAt?: string
+}
+
 export interface OrganizationApiItem {
   id: string
   createdAt: string
@@ -45,6 +55,7 @@ export interface OrganizationApiItem {
   campaigns: string[]
   members: Record<string, OrganizationMemberRole>
   memberDirectory: OrganizationMember[]
+  connectedAccounts: OrganizationConnectedAccount[]
   creator: string
   creatorEmail?: string
 }
@@ -94,9 +105,30 @@ export interface DeleteOrganizationResult {
   organizationId: string
 }
 
+export interface AddOrganizationConnectionInput {
+  platform: OrganizationConnectionPlatform
+  accountName: string
+}
+
+export interface AddOrganizationConnectionResult {
+  organization: OrganizationApiItem
+}
+
+export interface RemoveOrganizationConnectionResult {
+  organization: OrganizationApiItem
+}
+
 const asString = (value: unknown) => (typeof value === 'string' ? value : '')
 
 const isUuid = (value: string) => uuidRegex.test(value)
+
+const normalizeConnectionPlatform = (value: unknown): OrganizationConnectionPlatform => {
+  if (typeof value !== 'string') return 'YouTube'
+  const normalized = value.trim().toLowerCase()
+  if (normalized === 'x') return 'X'
+  if (normalized === 'instagram') return 'Instagram'
+  return 'YouTube'
+}
 
 const normalizeRole = (value: unknown): OrganizationMemberRole => {
   if (typeof value !== 'string') return 'internal'
@@ -157,6 +189,28 @@ const normalizeMember = (value: unknown): OrganizationMember | null => {
   }
 }
 
+const normalizeConnectedAccount = (value: unknown): OrganizationConnectedAccount | null => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const row = value as Partial<OrganizationConnectedAccount>
+  const platform = normalizeConnectionPlatform(row.platform)
+  const accountName = sanitizeTextInput(row.accountName, { maxLength: 180 })
+  if (!accountName) return null
+  const channelId = sanitizeTokenInput(row.channelId, 300) || undefined
+  const ownerUserId = sanitizeTokenInput((row as { ownerUserId?: unknown }).ownerUserId, 80) || undefined
+  const fallbackIdSource = channelId || accountName.toLowerCase().replace(/\s+/g, '-')
+  const id = sanitizeTokenInput(row.id, 180) || `${platform.toLowerCase()}:${fallbackIdSource}`
+  if (!id) return null
+  const connectedAt = sanitizeTokenInput(row.connectedAt, 64) || undefined
+  return {
+    id,
+    platform,
+    accountName,
+    channelId,
+    ownerUserId,
+    connectedAt,
+  }
+}
+
 const normalizeOrganization = (payload: unknown): OrganizationApiItem | null => {
   if (!payload || typeof payload !== 'object') return null
   const row = payload as Partial<OrganizationApiItem>
@@ -165,6 +219,10 @@ const normalizeOrganization = (payload: unknown): OrganizationApiItem | null => 
   const memberDirectory = (Array.isArray(row.memberDirectory) ? row.memberDirectory : [])
     .map((entry) => normalizeMember(entry))
     .filter((entry: OrganizationMember | null): entry is OrganizationMember => Boolean(entry))
+  const connectedAccountsSource = (row as { connectedAccounts?: unknown }).connectedAccounts
+  const connectedAccounts = (Array.isArray(connectedAccountsSource) ? connectedAccountsSource : [])
+    .map((entry) => normalizeConnectedAccount(entry))
+    .filter((entry: OrganizationConnectedAccount | null): entry is OrganizationConnectedAccount => Boolean(entry))
 
   return {
     id,
@@ -173,6 +231,7 @@ const normalizeOrganization = (payload: unknown): OrganizationApiItem | null => 
     campaigns: toUniqueUuidArray(row.campaigns),
     members: toMemberRoleMap(row.members),
     memberDirectory,
+    connectedAccounts,
     creator: sanitizeTokenInput(row.creator, 80),
     creatorEmail: sanitizeEmailInput((row as { creatorEmail?: unknown }).creatorEmail) || undefined,
   }
@@ -392,4 +451,60 @@ export const deleteOrganization = async (organizationId: string): Promise<Delete
   return {
     organizationId: sanitizeTokenInput(payload?.organizationId, 80),
   }
+}
+
+export const addOrganizationConnection = async (
+  organizationId: string,
+  input: AddOrganizationConnectionInput,
+): Promise<AddOrganizationConnectionResult> => {
+  const sanitizedInput: AddOrganizationConnectionInput = {
+    platform: normalizeConnectionPlatform(input.platform),
+    accountName: sanitizeTextInput(input.accountName, { maxLength: 180 }),
+  }
+
+  const response = await fetch(`${apiBaseUrl}/api/organizations/${organizationId}/connections`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(sanitizedInput),
+  })
+  const payload = await response.json().catch(() => null)
+  if (!response.ok) {
+    throw new Error(readErrorMessage(payload, 'Unable to add organization connection.'))
+  }
+
+  const organization = normalizeOrganization(payload?.organization)
+  if (!organization) {
+    throw new Error('Connection was added but the response payload was invalid.')
+  }
+
+  return { organization }
+}
+
+export const removeOrganizationConnection = async (
+  organizationId: string,
+  connectionId: string,
+): Promise<RemoveOrganizationConnectionResult> => {
+  const sanitizedConnectionId = sanitizeTokenInput(connectionId, 180)
+  if (!sanitizedConnectionId) {
+    throw new Error('Connection id is required.')
+  }
+  const response = await fetch(
+    `${apiBaseUrl}/api/organizations/${organizationId}/connections/${encodeURIComponent(sanitizedConnectionId)}`,
+    {
+      method: 'DELETE',
+      credentials: 'include',
+    },
+  )
+  const payload = await response.json().catch(() => null)
+  if (!response.ok) {
+    throw new Error(readErrorMessage(payload, 'Unable to remove organization connection.'))
+  }
+
+  const organization = normalizeOrganization(payload?.organization)
+  if (!organization) {
+    throw new Error('Connection was removed but the response payload was invalid.')
+  }
+
+  return { organization }
 }

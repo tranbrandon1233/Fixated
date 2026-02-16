@@ -1,18 +1,19 @@
-import { useEffect, useMemo, useState, type ChangeEvent, type Dispatch, type SetStateAction } from 'react'
+﻿import { useEffect, useMemo, useState, type ChangeEvent, type Dispatch, type SetStateAction } from 'react'
 import { Badge } from '../components/ui/Badge'
 import { ProgressBar } from '../components/ui/ProgressBar'
 import { SectionHeader } from '../components/ui/SectionHeader'
-import { useYouTubeSummary } from '../hooks/useYouTubeSummary'
-import type { CampaignSummary, PostSummary, Role } from '../types/dashboard'
+import type { CampaignSummary, Role } from '../types/dashboard'
 import {
   createCampaign,
   deleteCampaign,
+  fetchCampaignAvailablePosts,
   fetchCampaignMembers,
   fetchCampaigns,
   updateCampaignDetails,
   updateCampaignPosts,
   updateCampaignMembers,
   type CampaignApiItem,
+  type CampaignManagedPost,
   type CampaignMemberRole,
   type MemberAccessInput,
   type CampaignMember,
@@ -345,11 +346,6 @@ const MemberFeedback = ({ feedback }: { feedback: FeedbackState }) => {
 }
 
 export const Campaigns = ({ role }: CampaignsProps) => {
-  const {
-    summary: youtubeSummary,
-    status: youtubeSummaryStatus,
-    error: youtubeSummaryError,
-  } = useYouTubeSummary()
   const [campaignList, setCampaignList] = useState<CampaignCardModel[]>([])
   const [viewerUserId, setViewerUserId] = useState('')
   const [isLoading, setIsLoading] = useState(true)
@@ -397,6 +393,12 @@ export const Campaigns = ({ role }: CampaignsProps) => {
   const [managePostsCampaign, setManagePostsCampaign] = useState<CampaignCardModel | null>(null)
   const [managePostsSubmitting, setManagePostsSubmitting] = useState(false)
   const [managePostsError, setManagePostsError] = useState<string | null>(null)
+  const [managePostsLoading, setManagePostsLoading] = useState(false)
+  const [availableConnectedAccounts, setAvailableConnectedAccounts] = useState<string[]>([])
+  const [availablePosts, setAvailablePosts] = useState<CampaignManagedPost[]>([])
+  const [campaignChannelOptions, setCampaignChannelOptions] = useState<CampaignChannelOption[]>([
+    { id: 'all', label: 'All connected accounts' },
+  ])
   const [selectedPostIdsDraft, setSelectedPostIdsDraft] = useState<string[]>([])
   const [selectedPostChannelId, setSelectedPostChannelId] = useState('all')
   const canCreateCampaignByRole = role === 'admin'
@@ -471,52 +473,6 @@ export const Campaigns = ({ role }: CampaignsProps) => {
       addInputSignature !== manageAddInputsBaseline || Object.keys(memberRoleEdits).length > 0,
     [addInputSignature, manageAddInputsBaseline, memberRoleEdits],
   )
-
-  const availablePosts = useMemo(() => {
-    const postById = new Map<string, PostSummary>()
-    youtubeSummary.topPosts.forEach((post) => {
-      const id = typeof post?.id === 'string' ? normalizePostId(post.id) : ''
-      if (!id) return
-      postById.set(id, {
-        ...post,
-        id,
-        title: typeof post?.title === 'string' && post.title.trim() ? post.title.trim() : 'Untitled video',
-        channelId: typeof post?.channelId === 'string' ? post.channelId.trim() : '',
-        channelName: typeof post?.channelName === 'string' ? post.channelName.trim() : '',
-        views: toNumber(post?.views),
-        engagementRate: toNumber(post?.engagementRate),
-      })
-    })
-    return [...postById.values()].sort((left, right) => right.views - left.views)
-  }, [youtubeSummary.topPosts])
-
-  const campaignChannelOptions = useMemo<CampaignChannelOption[]>(() => {
-    const channelLabelById = new Map<string, string>()
-
-    youtubeSummary.channels.forEach((channel) => {
-      const id = typeof channel?.id === 'string' ? channel.id.trim() : ''
-      if (!id) return
-      const label = typeof channel?.name === 'string' && channel.name.trim() ? channel.name.trim() : id
-      channelLabelById.set(id, label)
-    })
-
-    availablePosts.forEach((post) => {
-      const id = typeof post.channelId === 'string' ? post.channelId.trim() : ''
-      if (!id || channelLabelById.has(id)) return
-      const label =
-        typeof post.channelName === 'string' && post.channelName.trim()
-          ? post.channelName.trim()
-          : id
-      channelLabelById.set(id, label)
-    })
-
-    return [
-      { id: 'all', label: 'All channels' },
-      ...[...channelLabelById.entries()]
-        .map(([id, label]) => ({ id, label }))
-        .sort((left, right) => left.label.localeCompare(right.label)),
-    ]
-  }, [availablePosts, youtubeSummary.channels])
 
   const visiblePostsForChannel = useMemo(() => {
     if (selectedPostChannelId === 'all') return availablePosts
@@ -1017,24 +973,58 @@ export const Campaigns = ({ role }: CampaignsProps) => {
     }
   }
 
-  const openManagePostsModal = (campaign: CampaignCardModel) => {
+  const openManagePostsModal = async (campaign: CampaignCardModel) => {
     const viewerRole = resolveViewerCampaignRole(campaign, viewerUserId)
     if (viewerRole !== 'admin' && viewerRole !== 'internal') return
     setManagePostsCampaign(campaign)
+    setManagePostsLoading(true)
     setManagePostsError(null)
     setManagePostsSubmitting(false)
-    setSelectedPostIdsDraft([...campaign.selectedPostIds])
-    const preferredChannelId =
-      campaign.selectedChannelId && campaignChannelOptions.some((option) => option.id === campaign.selectedChannelId)
-        ? campaign.selectedChannelId
-        : 'all'
-    setSelectedPostChannelId(preferredChannelId)
+    setAvailableConnectedAccounts([])
+    setAvailablePosts([])
+    setCampaignChannelOptions([{ id: 'all', label: 'All connected accounts' }])
+    setSelectedPostIdsDraft([])
+    setSelectedPostChannelId('all')
+    try {
+      const payload = await fetchCampaignAvailablePosts(campaign.id)
+      const nextOptions: CampaignChannelOption[] = [
+        { id: 'all', label: 'All connected accounts' },
+        ...payload.channels,
+      ]
+      const dedupedOptions = [
+        ...new Map(nextOptions.map((option) => [option.id, option])).values(),
+      ]
+      const availablePostIdSet = new Set(
+        payload.posts.map((post) => normalizePostId(post.id)).filter(Boolean),
+      )
+      const selectedFromCampaign = campaign.selectedPostIds
+        .map((entry) => normalizePostId(entry))
+        .filter((entry) => availablePostIdSet.has(entry))
+      const preferredChannelId =
+        campaign.selectedChannelId && dedupedOptions.some((option) => option.id === campaign.selectedChannelId)
+          ? campaign.selectedChannelId
+          : dedupedOptions[0]?.id ?? 'all'
+
+      setAvailableConnectedAccounts(payload.accountLabels)
+      setAvailablePosts(payload.posts)
+      setCampaignChannelOptions(dedupedOptions)
+      setSelectedPostIdsDraft([...new Set(selectedFromCampaign)])
+      setSelectedPostChannelId(preferredChannelId)
+    } catch (err) {
+      setManagePostsError(err instanceof Error ? err.message : 'Unable to load available campaign posts.')
+    } finally {
+      setManagePostsLoading(false)
+    }
   }
 
   const closeManagePostsModal = () => {
     if (managePostsSubmitting) return
     setManagePostsCampaign(null)
+    setManagePostsLoading(false)
     setManagePostsError(null)
+    setAvailableConnectedAccounts([])
+    setAvailablePosts([])
+    setCampaignChannelOptions([{ id: 'all', label: 'All connected accounts' }])
     setSelectedPostIdsDraft([])
     setSelectedPostChannelId('all')
   }
@@ -1042,7 +1032,7 @@ export const Campaigns = ({ role }: CampaignsProps) => {
   const handleManagePostsSubmit = async () => {
     if (!managePostsCampaign || managePostsSubmitting) return
     const viewerRole = resolveViewerCampaignRole(managePostsCampaign, viewerUserId)
-    if (viewerRole !== 'admin') return
+    if (viewerRole !== 'admin' && viewerRole !== 'internal') return
     setManagePostsSubmitting(true)
     setManagePostsError(null)
     const deduplicatedPostIds = [...new Set(selectedPostIdsDraft.map((entry) => normalizePostId(entry)).filter(Boolean))]
@@ -1710,12 +1700,37 @@ export const Campaigns = ({ role }: CampaignsProps) => {
             <div className="section-subtitle">{managePostsCampaign.name}</div>
 
             <div style={{ marginTop: '14px', display: 'grid', gap: '12px' }}>
+              <div
+                style={{
+                  border: '1px solid var(--border)',
+                  borderRadius: '10px',
+                  padding: '8px 10px',
+                  fontSize: '13px',
+                  display: 'grid',
+                  gap: '6px',
+                }}
+              >
+                <div className="section-subtitle">Connected accounts</div>
+                {availableConnectedAccounts.length ? (
+                  <div className="check-row">
+                    {availableConnectedAccounts.map((label) => (
+                      <span className="pill" key={label}>
+                        {label}
+                      </span>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="muted">No connected accounts are available for this campaign.</div>
+                )}
+              </div>
+
               <div className="form-field">
                 <label className="section-subtitle">Channel</label>
                 <select
                   className="select"
                   value={selectedPostChannelId}
                   onChange={(event) => setSelectedPostChannelId(sanitizeTokenInput(event.target.value, 300))}
+                  disabled={managePostsLoading}
                 >
                   {campaignChannelOptions.map((option) => (
                     <option key={option.id} value={option.id}>
@@ -1760,8 +1775,8 @@ export const Campaigns = ({ role }: CampaignsProps) => {
                   gap: '8px',
                 }}
               >
-                {youtubeSummaryStatus === 'loading' && !availablePosts.length ? (
-                  <div className="muted">Loading channel posts...</div>
+                {managePostsLoading ? (
+                  <div className="muted">Loading connected posts...</div>
                 ) : visiblePostsForChannel.length ? (
                   visiblePostsForChannel.map((post) => {
                     const postId = normalizePostId(post.id)
@@ -1798,7 +1813,7 @@ export const Campaigns = ({ role }: CampaignsProps) => {
                         <div style={{ display: 'grid', gap: '2px' }}>
                           <span>{post.title || 'Untitled video'}</span>
                           <span className="muted">
-                            {post.platform} · {formatNumber(post.views)} views · {formatPercent(post.engagementRate)}
+                            {post.channelName || post.platform} | {formatNumber(post.views)} views | {formatPercent(post.engagementRate)}
                           </span>
                         </div>
                       </label>
@@ -1808,16 +1823,10 @@ export const Campaigns = ({ role }: CampaignsProps) => {
                   <div className="muted">
                     {availablePosts.length
                       ? 'No posts found for the selected channel.'
-                      : 'No posts are available yet. Refresh YouTube data and try again.'}
+                      : 'No posts are available from connected YouTube accounts yet.'}
                   </div>
                 )}
               </div>
-
-              {youtubeSummaryError ? (
-                <div className="section-subtitle" style={{ color: 'var(--danger)' }}>
-                  {youtubeSummaryError}
-                </div>
-              ) : null}
             </div>
 
             <div className="modal-actions">
@@ -1828,7 +1837,7 @@ export const Campaigns = ({ role }: CampaignsProps) => {
                 className="primary-button"
                 type="button"
                 onClick={() => void handleManagePostsSubmit()}
-                disabled={managePostsSubmitting}
+                disabled={managePostsSubmitting || managePostsLoading}
               >
                 {managePostsSubmitting ? 'Saving...' : 'Save posts'}
               </button>
@@ -2106,7 +2115,7 @@ export const Campaigns = ({ role }: CampaignsProps) => {
                       className="ghost-button"
                       type="button"
                       onClick={() => {
-                        openManagePostsModal(campaign)
+                        void openManagePostsModal(campaign)
                       }}
                       style={{ flex: '1 1 180px' }}
                     >
@@ -2122,3 +2131,4 @@ export const Campaigns = ({ role }: CampaignsProps) => {
     </>
   )
 }
+

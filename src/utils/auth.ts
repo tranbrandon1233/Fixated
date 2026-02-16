@@ -2,11 +2,22 @@ import { resolveAuthBaseUrl } from './baseUrl'
 import type { Role } from '../types/dashboard'
 
 export const getGoogleLoginUrl = () => `${resolveAuthBaseUrl()}/oauth/google`
-export const getYouTubeConnectUrl = () => {
+export interface YouTubeConnectUrlOptions {
+  organizationId?: string
+  path?: string
+}
+
+export const getYouTubeConnectUrl = (options?: YouTubeConnectUrlOptions) => {
   const base = resolveAuthBaseUrl()
   if (typeof window === 'undefined') return `${base}/oauth/youtube`
   const url = new URL(`${base}/oauth/youtube`)
   url.searchParams.set('app_origin', window.location.origin)
+  if (options?.organizationId) {
+    url.searchParams.set('organization_id', options.organizationId)
+  }
+  if (options?.path) {
+    url.searchParams.set('path', options.path)
+  }
   return url.toString()
 }
 

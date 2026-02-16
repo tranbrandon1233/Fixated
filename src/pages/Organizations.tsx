@@ -7,20 +7,26 @@ import {
   type FormEvent,
   type SetStateAction,
 } from 'react'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { SectionHeader } from '../components/ui/SectionHeader'
 import type { CampaignApiItem } from '../utils/campaigns'
+import { getYouTubeConnectUrl } from '../utils/auth'
 import { fetchCampaigns } from '../utils/campaigns'
 import { sanitizeEmailInput, sanitizeTextInput, sanitizeTokenInput } from '../utils/sanitize'
 import type { Role } from '../types/dashboard'
 import {
+  addOrganizationConnection,
   createOrganization,
   deleteOrganization,
   fetchOrganizations,
+  removeOrganizationConnection,
   updateOrganizationDetails,
   updateOrganizationMembers,
   type MemberAccessInput,
   type MemberResolutionItem,
   type MemberResolutionSummary,
+  type OrganizationConnectedAccount,
+  type OrganizationConnectionPlatform,
   type OrganizationApiItem,
   type OrganizationMember,
   type OrganizationMemberRole,
@@ -178,6 +184,13 @@ const canChangeOrganizationMemberRolesByRole = (viewerRole: OrganizationViewerRo
   viewerRole === 'admin'
 
 const canEditOrganizationNameByRole = (viewerRole: OrganizationViewerRole) => viewerRole === 'admin'
+const canManageOrganizationConnectionsByRole = (viewerRole: OrganizationViewerRole) =>
+  viewerRole === 'admin' || viewerRole === 'internal'
+
+const connectionPlatformOptions: OrganizationConnectionPlatform[] = ['Instagram', 'X']
+
+const formatConnectedAccountLabel = (account: OrganizationConnectedAccount) =>
+  `${sanitizeTextInput(account.accountName, { maxLength: 180 }) || 'Unknown account'} [${account.platform}]`
 
 const MemberFeedback = ({
   title,
@@ -245,6 +258,8 @@ const MemberFeedback = ({
 }
 
 export const Organizations = ({ role }: OrganizationsProps) => {
+  const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
   const [organizations, setOrganizations] = useState<OrganizationApiItem[]>([])
   const [viewerUserId, setViewerUserId] = useState('')
   const [campaigns, setCampaigns] = useState<CampaignApiItem[]>([])
@@ -276,6 +291,13 @@ export const Organizations = ({ role }: OrganizationsProps) => {
   const [deleteOrg, setDeleteOrg] = useState<OrganizationApiItem | null>(null)
   const [deleteError, setDeleteError] = useState<string | null>(null)
   const [deleteSubmitting, setDeleteSubmitting] = useState(false)
+  const [connectionsOrg, setConnectionsOrg] = useState<OrganizationApiItem | null>(null)
+  const [connectionPlatform, setConnectionPlatform] = useState<OrganizationConnectionPlatform>('Instagram')
+  const [connectionAccountName, setConnectionAccountName] = useState('')
+  const [connectionsError, setConnectionsError] = useState<string | null>(null)
+  const [connectionsSuccess, setConnectionsSuccess] = useState<string | null>(null)
+  const [connectionsSubmitting, setConnectionsSubmitting] = useState(false)
+  const [removeConnectionIdSubmitting, setRemoveConnectionIdSubmitting] = useState('')
   const [actionSuccess, setActionSuccess] = useState<string | null>(null)
 
   const canCreateOrganizations = role === 'admin'
@@ -323,6 +345,21 @@ export const Organizations = ({ role }: OrganizationsProps) => {
     }
   }, [])
 
+  useEffect(() => {
+    const provider = sanitizeTextInput(searchParams.get('provider'), { maxLength: 32 }).toLowerCase()
+    if (provider !== 'youtube') return
+    const status = sanitizeTextInput(searchParams.get('status'), { maxLength: 16 }).toLowerCase()
+    const message = sanitizeTextInput(searchParams.get('message'), { maxLength: 240 })
+    const organizationId = sanitizeTokenInput(searchParams.get('organizationId'), 80)
+    if (status === 'success') {
+      const prefix = organizationId ? 'YouTube account connected to organization.' : 'YouTube account connected.'
+      setActionSuccess(message || prefix)
+    } else {
+      setLoadError(message || 'YouTube connection failed.')
+    }
+    navigate('/organizations', { replace: true })
+  }, [navigate, searchParams])
+
   const campaignLabelById = useMemo(
     () =>
       new Map(
@@ -353,6 +390,11 @@ export const Organizations = ({ role }: OrganizationsProps) => {
     [editOrg, viewerUserId],
   )
   const canEditNameForEditOrg = canEditOrganizationNameByRole(editViewerRole)
+  const connectionsViewerRole = useMemo(
+    () => (connectionsOrg ? resolveViewerOrganizationRole(connectionsOrg, viewerUserId) : ''),
+    [connectionsOrg, viewerUserId],
+  )
+  const canManageConnectionsForConnectionsOrg = canManageOrganizationConnectionsByRole(connectionsViewerRole)
 
   const toggleCampaign = (campaignId: string) => {
     setSelectedCampaignIds((previous) =>
@@ -438,8 +480,7 @@ export const Organizations = ({ role }: OrganizationsProps) => {
     )
   }
 
-  const handleCreateOrganization = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault()
+  const createOrganizationAndMaybeConnectYouTube = async (connectYouTubeAfterCreate = false) => {
     setCreateError(null)
     setCreateSuccess(null)
     setCreateFeedback(null)
@@ -477,13 +518,25 @@ export const Organizations = ({ role }: OrganizationsProps) => {
       setOrgName('')
       setSelectedCampaignIds([])
       setCreateMemberInputs([createEmptyMemberInput()])
-      setCreateSuccess(`Created organization "${result.organization.name}".`)
+      setCreateSuccess(
+        connectYouTubeAfterCreate
+          ? `Created organization "${result.organization.name}". Redirecting to YouTube...`
+          : `Created organization "${result.organization.name}".`,
+      )
       setCreateFeedback(result.memberResolution)
+      if (connectYouTubeAfterCreate) {
+        window.location.assign(getYouTubeConnectUrl({ organizationId: result.organization.id, path: '/organizations' }))
+      }
     } catch (err) {
       setCreateError(err instanceof Error ? err.message : 'Unable to create organization.')
     } finally {
       setIsSubmitting(false)
     }
+  }
+
+  const handleCreateOrganization = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    void createOrganizationAndMaybeConnectYouTube(false)
   }
 
   const openManageModal = (organization: OrganizationApiItem) => {
@@ -514,7 +567,86 @@ export const Organizations = ({ role }: OrganizationsProps) => {
     setManageOrg((previous) => (previous && previous.id === organization.id ? organization : previous))
     setEditOrg((previous) => (previous && previous.id === organization.id ? organization : previous))
     setDeleteOrg((previous) => (previous && previous.id === organization.id ? organization : previous))
+    setConnectionsOrg((previous) => (previous && previous.id === organization.id ? organization : previous))
     setMemberRoleEdits({})
+  }
+
+  const openConnectionsModal = (organization: OrganizationApiItem) => {
+    const viewerOrganizationRole = resolveViewerOrganizationRole(organization, viewerUserId)
+    if (!viewerOrganizationRole) return
+    setConnectionsOrg(organization)
+    setConnectionPlatform('Instagram')
+    setConnectionAccountName('')
+    setConnectionsError(null)
+    setConnectionsSuccess(null)
+    setConnectionsSubmitting(false)
+    setRemoveConnectionIdSubmitting('')
+  }
+
+  const closeConnectionsModal = () => {
+    if (connectionsSubmitting || removeConnectionIdSubmitting) return
+    setConnectionsOrg(null)
+    setConnectionPlatform('Instagram')
+    setConnectionAccountName('')
+    setConnectionsError(null)
+    setConnectionsSuccess(null)
+    setConnectionsSubmitting(false)
+    setRemoveConnectionIdSubmitting('')
+  }
+
+  const handleConnectYouTube = () => {
+    if (!connectionsOrg || !canManageConnectionsForConnectionsOrg) return
+    window.location.assign(getYouTubeConnectUrl({ organizationId: connectionsOrg.id, path: '/organizations' }))
+  }
+
+  const handleAddConnection = async () => {
+    if (!connectionsOrg) return
+    if (!canManageConnectionsForConnectionsOrg) {
+      setConnectionsError('Brand viewers may view connected accounts but cannot edit them.')
+      return
+    }
+    const accountName = sanitizeTextInput(connectionAccountName, { maxLength: 180 })
+    if (!accountName) {
+      setConnectionsError('Account name is required.')
+      return
+    }
+
+    setConnectionsSubmitting(true)
+    setConnectionsError(null)
+    setConnectionsSuccess(null)
+    try {
+      const result = await addOrganizationConnection(connectionsOrg.id, {
+        platform: connectionPlatform,
+        accountName,
+      })
+      applyOrganizationUpdate(result.organization)
+      setConnectionAccountName('')
+      setConnectionsSuccess(`Connected ${accountName} [${connectionPlatform}].`)
+    } catch (err) {
+      setConnectionsError(err instanceof Error ? err.message : 'Unable to add connected account.')
+    } finally {
+      setConnectionsSubmitting(false)
+    }
+  }
+
+  const handleRemoveConnection = async (connectionId: string) => {
+    if (!connectionsOrg || !connectionId) return
+    if (!canManageConnectionsForConnectionsOrg) {
+      setConnectionsError('Brand viewers may view connected accounts but cannot edit them.')
+      return
+    }
+    setRemoveConnectionIdSubmitting(connectionId)
+    setConnectionsError(null)
+    setConnectionsSuccess(null)
+    try {
+      const result = await removeOrganizationConnection(connectionsOrg.id, connectionId)
+      applyOrganizationUpdate(result.organization)
+      setConnectionsSuccess('Connection removed.')
+    } catch (err) {
+      setConnectionsError(err instanceof Error ? err.message : 'Unable to remove connected account.')
+    } finally {
+      setRemoveConnectionIdSubmitting('')
+    }
   }
 
   const updateMemberRoleEdit = (
@@ -705,6 +837,9 @@ export const Organizations = ({ role }: OrganizationsProps) => {
       if (editOrg?.id === deleteOrg.id) {
         setEditOrg(null)
       }
+      if (connectionsOrg?.id === deleteOrg.id) {
+        setConnectionsOrg(null)
+      }
       setActionSuccess(`Deleted organization "${deleteOrg.name}".`)
       setDeleteOrg(null)
       setDeleteError(null)
@@ -738,7 +873,7 @@ export const Organizations = ({ role }: OrganizationsProps) => {
       ) : null}
 
       {canCreateOrganizations ? (
-        <form className="card" onSubmit={(event) => void handleCreateOrganization(event)}>
+        <form className="card" onSubmit={handleCreateOrganization}>
           <div className="section-title">Create organization</div>
           <div className="section-subtitle">Members are added by email and stored as user UUID role mappings.</div>
 
@@ -864,6 +999,7 @@ export const Organizations = ({ role }: OrganizationsProps) => {
             <button className="primary-button" type="submit" disabled={isSubmitting}>
               {isSubmitting ? 'Creating...' : 'Create organization'}
             </button>
+           
           </div>
         </form>
       ) : (
@@ -899,9 +1035,14 @@ export const Organizations = ({ role }: OrganizationsProps) => {
             const canDeleteOrganization = canDeleteOrganizationByRole(viewerOrganizationRole)
             const canManageOrganizationMembers = canManageOrganizationMembersByRole(viewerOrganizationRole)
             const canEditOrganizationName = canEditOrganizationNameByRole(viewerOrganizationRole)
+            const canManageOrganizationConnections = canManageOrganizationConnectionsByRole(viewerOrganizationRole)
+            const canViewOrganizationConnections = Boolean(viewerOrganizationRole)
+            const connectedAccountLabels = organization.connectedAccounts.map((account) =>
+              formatConnectedAccountLabel(account),
+            )
             return (
               <div key={organization.id} className="card" style={{ position: 'relative' }}>
-                {canEditOrganization || canDeleteOrganization ? (
+                {canDeleteOrganization ? (
                   <div
                     style={{
                       position: 'absolute',
@@ -913,24 +1054,14 @@ export const Organizations = ({ role }: OrganizationsProps) => {
                       gap: '8px',
                     }}
                   >
-                    {canDeleteOrganization ? (
-                      <button
-                        type="button"
-                        className="ghost-button"
-                        style={{ width: '32px', minWidth: '32px', padding: '4px 0' }}
-                        aria-label={`Delete ${organization.name || 'organization'}`}
-                        onClick={() => openDeleteModal(organization)}
-                      >
-                        X
-                      </button>
-                    ) : null}
                     <button
                       type="button"
                       className="ghost-button"
-                      style={{ padding: '6px 10px' }}
-                      onClick={() => openEditModal(organization)}
+                      style={{ width: '32px', minWidth: '32px', padding: '4px 0' }}
+                      aria-label={`Delete ${organization.name || 'organization'}`}
+                      onClick={() => openDeleteModal(organization)}
                     >
-                      {canEditOrganizationName ? 'Edit' : 'Manage campaigns'}
+                      X
                     </button>
                   </div>
                 ) : null}
@@ -1004,15 +1135,52 @@ export const Organizations = ({ role }: OrganizationsProps) => {
                   </div>
                 </div>
 
-                {canManageOrganizationMembers ? (
+                <div style={{ marginTop: '14px' }}>
+                  <div className="section-subtitle">Connected accounts</div>
+                  <div className="grid" style={{ marginTop: '6px', gap: '6px' }}>
+                    {connectedAccountLabels.length ? (
+                      connectedAccountLabels.map((label) => (
+                        <div key={label} style={{ fontSize: '12px' }}>
+                          {label}
+                        </div>
+                      ))
+                    ) : (
+                      <div className="muted" style={{ fontSize: '12px' }}>
+                        No accounts connected.
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {canEditOrganization || canManageOrganizationMembers || canViewOrganizationConnections ? (
                   <div className="modal-actions" style={{ marginTop: '14px' }}>
-                    <button
-                      type="button"
-                      className="ghost-button"
-                      onClick={() => openManageModal(organization)}
-                    >
-                      Manage members
-                    </button>
+                    {canEditOrganization ? (
+                      <button
+                        type="button"
+                        className="ghost-button"
+                        onClick={() => openEditModal(organization)}
+                      >
+                        {canEditOrganizationName ? 'Edit Organization' : 'Manage Campaigns'}
+                      </button>
+                    ) : null}
+                    {canManageOrganizationMembers ? (
+                      <button
+                        type="button"
+                        className="ghost-button"
+                        onClick={() => openManageModal(organization)}
+                      >
+                        Manage members
+                      </button>
+                    ) : null}
+                    {canViewOrganizationConnections ? (
+                      <button
+                        type="button"
+                        className={canManageOrganizationConnections ? 'primary-button' : 'ghost-button'}
+                        onClick={() => openConnectionsModal(organization)}
+                      >
+                        Manage Connections
+                      </button>
+                    ) : null}
                   </div>
                 ) : null}
               </div>
@@ -1262,6 +1430,118 @@ export const Organizations = ({ role }: OrganizationsProps) => {
               </button>
               <button type="button" className="primary-button" onClick={() => void handleAddMembers()} disabled={manageSubmitting}>
                 {manageSubmitting ? 'Saving...' : canChangeMemberRolesForManageOrg ? 'Save member changes' : 'Add members'}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {connectionsOrg ? (
+        <div className="modal-backdrop" role="presentation" onClick={closeConnectionsModal}>
+          <div className="modal-card" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
+            <div className="section-title">Manage Connections</div>
+            <div className="section-subtitle">{connectionsOrg.name}</div>
+            {!canManageConnectionsForConnectionsOrg ? (
+              <div className="section-subtitle" style={{ marginTop: '8px' }}>
+                Read-only access. Brand viewers may view connected accounts but may not edit them.
+              </div>
+            ) : null}
+
+            <div style={{ marginTop: '14px' }}>
+              <div className="section-subtitle">Connected accounts</div>
+              <div className="grid" style={{ marginTop: '8px', gap: '8px' }}>
+                {connectionsOrg.connectedAccounts.length ? (
+                  connectionsOrg.connectedAccounts.map((account) => (
+                    <div key={account.id} className="split member-row" style={{ fontSize: '13px' }}>
+                      <span>{formatConnectedAccountLabel(account)}</span>
+                      {canManageConnectionsForConnectionsOrg ? (
+                        <button
+                          type="button"
+                          className="ghost-button"
+                          onClick={() => void handleRemoveConnection(account.id)}
+                          disabled={Boolean(removeConnectionIdSubmitting)}
+                        >
+                          {removeConnectionIdSubmitting === account.id ? 'Removing...' : 'Disconnect'}
+                        </button>
+                      ) : null}
+                    </div>
+                  ))
+                ) : (
+                  <div className="muted">No accounts connected.</div>
+                )}
+              </div>
+            </div>
+
+            {canManageConnectionsForConnectionsOrg ? (
+              <>
+                <div style={{ marginTop: '16px' }}>
+                  <div className="section-subtitle">Connect YouTube</div>
+                  <div className="filter-bar" style={{ marginTop: '8px' }}>
+                    <button
+                      type="button"
+                      className="primary-button"
+                      onClick={handleConnectYouTube}
+                      disabled={connectionsSubmitting || Boolean(removeConnectionIdSubmitting)}
+                    >
+                      Connect YouTube Account
+                    </button>
+                  </div>
+                </div>
+
+                <div style={{ marginTop: '16px' }}>
+                  <div className="section-subtitle">Add Instagram or X</div>
+                  <div className="split" style={{ marginTop: '8px', gap: '8px' }}>
+                    <select
+                      className="select"
+                      value={connectionPlatform}
+                      onChange={(event) =>
+                        setConnectionPlatform(event.target.value as OrganizationConnectionPlatform)}
+                      disabled={connectionsSubmitting || Boolean(removeConnectionIdSubmitting)}
+                      style={{ minWidth: roleSelectMinWidth }}
+                    >
+                      {connectionPlatformOptions.map((option) => (
+                        <option key={option} value={option}>
+                          {option}
+                        </option>
+                      ))}
+                    </select>
+                    <input
+                      className="input"
+                      type="text"
+                      value={connectionAccountName}
+                      onChange={(event) => setConnectionAccountName(event.target.value)}
+                      placeholder="Account name"
+                      autoComplete="off"
+                      maxLength={180}
+                      disabled={connectionsSubmitting || Boolean(removeConnectionIdSubmitting)}
+                    />
+                    <button
+                      type="button"
+                      className="ghost-button"
+                      onClick={() => void handleAddConnection()}
+                      disabled={connectionsSubmitting || Boolean(removeConnectionIdSubmitting)}
+                    >
+                      {connectionsSubmitting ? 'Saving...' : 'Connect'}
+                    </button>
+                  </div>
+                </div>
+              </>
+            ) : null}
+
+            {connectionsError ? (
+              <div className="section-subtitle" style={{ color: 'var(--danger)', marginTop: '12px' }}>
+                {connectionsError}
+              </div>
+            ) : null}
+            {connectionsSuccess ? (
+              <div className="section-subtitle" style={{ color: 'var(--success)', marginTop: '12px' }}>
+                {connectionsSuccess}
+              </div>
+            ) : null}
+
+            <div className="modal-actions">
+              <button type="button" className="ghost-button" onClick={closeConnectionsModal}>
+                Close
               </button>
             </div>
           </div>

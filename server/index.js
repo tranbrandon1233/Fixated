@@ -76,6 +76,7 @@ const cookieSecure = allowCrossSiteCookies || isProd
 const YOUTUBE_CONNECTIONS_COOKIE = 'youtube_connections'
 const YOUTUBE_SESSION_COOKIE = 'youtube_session_id'
 const APP_REDIRECT_COOKIE = 'app_redirect_origin'
+const YOUTUBE_OAUTH_CONTEXT_COOKIE = 'youtube_oauth_context'
 const SUPABASE_ACCESS_TOKEN_COOKIE = 'sb_access_token'
 const SUPABASE_REFRESH_TOKEN_COOKIE = 'sb_refresh_token'
 const YOUTUBE_AUTO_REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000
@@ -85,6 +86,9 @@ const EXPORT_PREVIEW_MAX_ENTRIES = 64
 const EXPORT_PREVIEW_MAX_BASE64_SIZE = 20 * 1024 * 1024
 const MAX_INPUT_LIST_SIZE = 500
 const exportPreviewStore = new Map()
+const ORGANIZATION_CONNECTION_PLATFORM_YOUTUBE = 'YouTube'
+const ORGANIZATION_CONNECTION_PLATFORM_INSTAGRAM = 'Instagram'
+const ORGANIZATION_CONNECTION_PLATFORM_X = 'X'
 
 const buildAppRedirect = ({
   status,
@@ -104,6 +108,52 @@ const buildAppRedirect = ({
 }
 
 const normalizeChannelName = (value) => String(value ?? '').trim().toLowerCase()
+
+const normalizeOrganizationConnectionPlatform = (value) => {
+  const normalized = normalizeTextInput(value, { maxLength: 24 }).toLowerCase()
+  if (normalized === 'instagram') return ORGANIZATION_CONNECTION_PLATFORM_INSTAGRAM
+  if (normalized === 'x') return ORGANIZATION_CONNECTION_PLATFORM_X
+  return ORGANIZATION_CONNECTION_PLATFORM_YOUTUBE
+}
+
+const buildOrganizationConnectionId = (platform) => {
+  const normalizedPlatform = normalizeOrganizationConnectionPlatform(platform).toLowerCase()
+  return `${normalizedPlatform}:${crypto.randomUUID()}`
+}
+
+const normalizeOrganizationConnectionId = (value) =>
+  normalizeTextInput(value, { maxLength: 180 })
+
+const formatOrganizationConnectedAccountLabel = (account) => {
+  const accountName = normalizeTextInput(account?.accountName, { maxLength: 180 }) || 'Unknown account'
+  const platform = normalizeOrganizationConnectionPlatform(account?.platform)
+  return `${accountName} [${platform}]`
+}
+
+const normalizeOrganizationConnectedAccounts = (value) => {
+  if (!Array.isArray(value)) return []
+  const accountsById = new Map()
+  for (const entry of value.slice(0, MAX_INPUT_LIST_SIZE)) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue
+    const platform = normalizeOrganizationConnectionPlatform(entry.platform)
+    const accountName = normalizeTextInput(entry.accountName, { maxLength: 180 })
+    const channelId = normalizeTextInput(entry.channelId, { maxLength: 300 })
+    const ownerUserId = normalizeTextInput(entry.ownerUserId, { maxLength: 80 })
+    const connectedAt = normalizeTextInput(entry.connectedAt, { maxLength: 64 })
+    const fallbackId = `${platform.toLowerCase()}:${channelId || accountName.toLowerCase().replace(/\s+/g, '-')}`
+    const id = normalizeOrganizationConnectionId(entry.id) || fallbackId
+    if (!id || !accountName) continue
+    accountsById.set(id, {
+      id,
+      platform,
+      accountName,
+      channelId: channelId || undefined,
+      ownerUserId: isUuid(ownerUserId) ? ownerUserId : undefined,
+      connectedAt: connectedAt || undefined,
+    })
+  }
+  return [...accountsById.values()]
+}
 
 const resolveOriginBase = (value) => {
   if (!value || typeof value !== 'string') return ''
@@ -2404,6 +2454,41 @@ const updateCampaignDetails = async (campaignId, input) => {
   return lastResult
 }
 
+const updateCampaignAllowedOrgs = async (campaignId, allowedOrgs) => {
+  const campaignFilter = encodeURIComponent(campaignId)
+  const normalizedAllowedOrgs = normalizeUuidArray(allowedOrgs)
+  const endpoints = buildSupabaseTableEndpoints('Campaigns', `id=eq.${campaignFilter}`)
+
+  let lastResult = { ok: false, status: 500, payload: null, row: null }
+  for (const endpoint of endpoints) {
+    const response = await fetch(endpoint, {
+      method: 'PATCH',
+      headers: {
+        apikey: supabaseSecretKey,
+        Authorization: `Bearer ${supabaseSecretKey}`,
+        'Content-Type': 'application/json',
+        Prefer: 'return=representation',
+      },
+      body: JSON.stringify({
+        allowed_orgs: normalizedAllowedOrgs.length ? normalizedAllowedOrgs : null,
+      }),
+    })
+    const payload = await response.json().catch(() => null)
+    const row = Array.isArray(payload) ? payload[0] ?? null : null
+    const result = {
+      ok: response.ok,
+      status: response.status,
+      payload,
+      row,
+    }
+    if (result.ok) return result
+    lastResult = result
+    if (response.status !== 404) break
+  }
+
+  return lastResult
+}
+
 const deleteCampaignRowById = async (campaignId) => {
   const campaignFilter = encodeURIComponent(campaignId)
   const endpoints = buildSupabaseTableEndpoints('Campaigns', `id=eq.${campaignFilter}`)
@@ -2507,7 +2592,7 @@ const mapCampaignForClient = (row) => {
 }
 
 const listOrganizationRows = async () => {
-  const selectFields = encodeURIComponent('id,created_at,name,campaigns,members,creator')
+  const selectFields = encodeURIComponent('id,created_at,name,campaigns,members,creator,connected_accounts')
   const endpoints = buildSupabaseTableEndpoints(
     'Organizations',
     `select=${selectFields}&order=created_at.desc`,
@@ -2569,7 +2654,7 @@ const insertOrganizationRow = async (row) => {
 }
 
 const fetchOrganizationRowById = async (organizationId) => {
-  const selectFields = encodeURIComponent('id,created_at,name,campaigns,members,creator')
+  const selectFields = encodeURIComponent('id,created_at,name,campaigns,members,creator,connected_accounts')
   const organizationFilter = encodeURIComponent(organizationId)
   const endpoints = buildSupabaseTableEndpoints(
     'Organizations',
@@ -2670,6 +2755,41 @@ const updateOrganizationDetails = async (organizationId, input) => {
   return lastResult
 }
 
+const updateOrganizationConnectedAccounts = async (organizationId, connectedAccounts) => {
+  const organizationFilter = encodeURIComponent(organizationId)
+  const endpoints = buildSupabaseTableEndpoints('Organizations', `id=eq.${organizationFilter}`)
+  const normalizedAccounts = normalizeOrganizationConnectedAccounts(connectedAccounts)
+
+  let lastResult = { ok: false, status: 500, payload: null, row: null }
+  for (const endpoint of endpoints) {
+    const response = await fetch(endpoint, {
+      method: 'PATCH',
+      headers: {
+        apikey: supabaseSecretKey,
+        Authorization: `Bearer ${supabaseSecretKey}`,
+        'Content-Type': 'application/json',
+        Prefer: 'return=representation',
+      },
+      body: JSON.stringify({
+        connected_accounts: normalizedAccounts,
+      }),
+    })
+    const payload = await response.json().catch(() => null)
+    const row = Array.isArray(payload) ? payload[0] ?? null : null
+    const result = {
+      ok: response.ok,
+      status: response.status,
+      payload,
+      row,
+    }
+    if (result.ok) return result
+    lastResult = result
+    if (response.status !== 404) break
+  }
+
+  return lastResult
+}
+
 const deleteOrganizationRowById = async (organizationId) => {
   const organizationFilter = encodeURIComponent(organizationId)
   const endpoints = buildSupabaseTableEndpoints('Organizations', `id=eq.${organizationFilter}`)
@@ -2736,6 +2856,11 @@ const canUserManageOrganizationMembers = (row, userId) => {
   return resolveOrganizationUserRole(row, userId) === ORGANIZATION_MEMBER_ROLE_ADMIN
 }
 
+const canUserManageOrganizationConnections = (row, userId) => {
+  const role = resolveOrganizationUserRole(row, userId)
+  return role === ORGANIZATION_MEMBER_ROLE_ADMIN || role === ORGANIZATION_MEMBER_ROLE_INTERNAL
+}
+
 const canUserChangeOrganizationMemberRoles = (row, userId) =>
   resolveOrganizationUserRole(row, userId) === ORGANIZATION_MEMBER_ROLE_ADMIN
 
@@ -2754,6 +2879,7 @@ const mapOrganizationForClient = (row, userRows = []) => {
   const creator = normalizeTextInput(row?.creator, { maxLength: 80 })
   const members = normalizeOrganizationMemberRoles(row?.members, creator)
   const campaigns = normalizeUuidArray(row?.campaigns)
+  const connectedAccounts = normalizeOrganizationConnectedAccounts(row?.connected_accounts)
   const userEmailById = new Map(
     (Array.isArray(userRows) ? userRows : [])
       .filter((entry) => entry && typeof entry === 'object')
@@ -2771,9 +2897,248 @@ const mapOrganizationForClient = (row, userRows = []) => {
     campaigns,
     members,
     memberDirectory: mapOrganizationMembersForClient(members, userRows),
+    connectedAccounts,
     creator,
     creatorEmail,
   }
+}
+
+const mapOrganizationForClientWithResolvedUsers = async (organizationRow) => {
+  const creatorId = normalizeTextInput(organizationRow?.creator, { maxLength: 80 })
+  const memberRoles = normalizeOrganizationMemberRoles(organizationRow?.members, creatorId)
+  const memberIds = Object.keys(memberRoles)
+  const usersResult = await fetchUsersRowsByIds(memberIds)
+  return mapOrganizationForClient(organizationRow, usersResult.ok ? usersResult.rows : [])
+}
+
+const fetchOrganizationsByIds = async (organizationIds) => {
+  const rows = []
+  for (const organizationId of organizationIds) {
+    const organizationResult = await fetchOrganizationRowById(organizationId)
+    if (!organizationResult.ok || !organizationResult.row) continue
+    rows.push(organizationResult.row)
+  }
+  return rows
+}
+
+const buildAllowedOrgsByCampaignMap = (organizationRows, campaignIdFilter = null) => {
+  const allowedOrgsByCampaignId = new Map()
+  const limitedCampaignIds = campaignIdFilter instanceof Set ? campaignIdFilter : null
+  for (const row of Array.isArray(organizationRows) ? organizationRows : []) {
+    const organizationId = normalizeTextInput(row?.id, { maxLength: 80 })
+    if (!isUuid(organizationId)) continue
+    const campaignIds = normalizeUuidArray(row?.campaigns)
+    for (const campaignId of campaignIds) {
+      if (limitedCampaignIds && !limitedCampaignIds.has(campaignId)) continue
+      const existing = allowedOrgsByCampaignId.get(campaignId) ?? new Set()
+      existing.add(organizationId)
+      allowedOrgsByCampaignId.set(campaignId, existing)
+    }
+  }
+  return allowedOrgsByCampaignId
+}
+
+const syncCampaignAllowedOrgsForCampaignIds = async (campaignIds) => {
+  const normalizedCampaignIds = uniqueValues(normalizeUuidArray(campaignIds))
+  if (!normalizedCampaignIds.length) {
+    return { ok: true, syncedCampaignIds: [], failedCampaigns: [] }
+  }
+
+  const organizationsResult = await listOrganizationRows()
+  if (!organizationsResult.ok) {
+    return {
+      ok: false,
+      error: 'organization_lookup_failed',
+      status: organizationsResult.status || 500,
+      details: organizationsResult.payload,
+      syncedCampaignIds: [],
+      failedCampaigns: normalizedCampaignIds,
+    }
+  }
+
+  const allowedOrgsByCampaignId = buildAllowedOrgsByCampaignMap(
+    organizationsResult.rows,
+    new Set(normalizedCampaignIds),
+  )
+  const failedCampaigns = []
+  const syncedCampaignIds = []
+  for (const campaignId of normalizedCampaignIds) {
+    const allowedOrgs = [...(allowedOrgsByCampaignId.get(campaignId) ?? new Set())]
+    const updateResult = await updateCampaignAllowedOrgs(campaignId, allowedOrgs)
+    if (!updateResult.ok) {
+      failedCampaigns.push(campaignId)
+      continue
+    }
+    syncedCampaignIds.push(campaignId)
+  }
+
+  return {
+    ok: failedCampaigns.length === 0,
+    syncedCampaignIds,
+    failedCampaigns,
+  }
+}
+
+const resolveCampaignAllowedOrganizationIds = async (campaignRow) => {
+  const allowedOrgsFromCampaign = normalizeUuidArray(campaignRow?.allowed_orgs)
+  if (allowedOrgsFromCampaign.length) {
+    return allowedOrgsFromCampaign
+  }
+
+  const campaignId = normalizeTextInput(campaignRow?.id, { maxLength: 80 })
+  if (!isUuid(campaignId)) return []
+  const organizationsResult = await listOrganizationRows()
+  if (!organizationsResult.ok) return []
+
+  const allowedOrgsByCampaignId = buildAllowedOrgsByCampaignMap(
+    organizationsResult.rows,
+    new Set([campaignId]),
+  )
+  const derivedAllowedOrgs = [...(allowedOrgsByCampaignId.get(campaignId) ?? new Set())]
+  if (!derivedAllowedOrgs.length) return []
+
+  // Backfill campaign-level org linkage so future lookups use Campaigns.allowed_orgs directly.
+  await updateCampaignAllowedOrgs(campaignId, derivedAllowedOrgs)
+  return derivedAllowedOrgs
+}
+
+const collectYouTubeAccountsByChannelId = (organizationRows) => {
+  const accountByChannelId = new Map()
+  for (const row of organizationRows) {
+    const accounts = normalizeOrganizationConnectedAccounts(row?.connected_accounts)
+    for (const account of accounts) {
+      if (account.platform !== ORGANIZATION_CONNECTION_PLATFORM_YOUTUBE) continue
+      const channelId = normalizeTextInput(account.channelId, { maxLength: 300 })
+      if (!channelId) continue
+      if (!accountByChannelId.has(channelId)) {
+        accountByChannelId.set(channelId, account)
+      }
+    }
+  }
+  return accountByChannelId
+}
+
+const buildCampaignAvailableContent = async (campaignRow) => {
+  const allowedOrganizationIds = await resolveCampaignAllowedOrganizationIds(campaignRow)
+  if (!allowedOrganizationIds.length) {
+    return { accountLabels: [], channels: [], posts: [] }
+  }
+
+  const organizationRows = await fetchOrganizationsByIds(allowedOrganizationIds)
+  const connectedAccounts = organizationRows.flatMap((row) => {
+    const fallbackOwnerUserId = normalizeTextInput(row?.creator, { maxLength: 80 })
+    return normalizeOrganizationConnectedAccounts(row?.connected_accounts).map((account) => {
+      const ownerUserId = normalizeTextInput(account?.ownerUserId, { maxLength: 80 })
+      return {
+        ...account,
+        ownerUserId: isUuid(ownerUserId)
+          ? ownerUserId
+          : isUuid(fallbackOwnerUserId)
+            ? fallbackOwnerUserId
+            : undefined,
+      }
+    })
+  })
+  const accountLabels = uniqueValues(
+    connectedAccounts.map((account) => formatOrganizationConnectedAccountLabel(account)),
+  )
+  const youtubeAccounts = connectedAccounts.filter(
+    (account) =>
+      normalizeOrganizationConnectionPlatform(account.platform) === ORGANIZATION_CONNECTION_PLATFORM_YOUTUBE,
+  )
+  const youtubeAccountByChannelId = new Map()
+  const channelIdsByOwnerUserId = new Map()
+  for (const account of youtubeAccounts) {
+    const channelId = normalizeTextInput(account.channelId, { maxLength: 300 })
+    if (!channelId) continue
+    if (!youtubeAccountByChannelId.has(channelId)) {
+      youtubeAccountByChannelId.set(channelId, account)
+    }
+    const ownerUserId = normalizeTextInput(account.ownerUserId, { maxLength: 80 })
+    if (!isUuid(ownerUserId)) continue
+    const existing = channelIdsByOwnerUserId.get(ownerUserId) ?? new Set()
+    existing.add(channelId)
+    channelIdsByOwnerUserId.set(ownerUserId, existing)
+  }
+  const channelOptions = [...youtubeAccountByChannelId.entries()]
+    .map(([channelId, account]) => ({
+      id: channelId,
+      label: formatOrganizationConnectedAccountLabel(account),
+    }))
+    .sort((left, right) => left.label.localeCompare(right.label))
+
+  const postsById = new Map()
+  for (const [ownerUserId, channelIdSet] of channelIdsByOwnerUserId.entries()) {
+    const scopedChannelIds = new Set([...channelIdSet.values()])
+    let summary = null
+    const cachedResult = await getCachedYouTubeSummaryByUserId(ownerUserId)
+    if (cachedResult.ok && cachedResult.row?.summary_json) {
+      summary = normalizeCachedSummaryPayload(cachedResult.row.summary_json)
+    }
+    const needsLiveFallback = !summary || !Array.isArray(summary.topPosts) || summary.topPosts.length === 0
+    if (needsLiveFallback) {
+      const connectionResult = await loadSupabaseYouTubeConnections(ownerUserId)
+      if (connectionResult.ok && connectionResult.connections.length) {
+        const scopedConnections = connectionResult.connections.filter((connection) =>
+          scopedChannelIds.has(connection.channelId),
+        )
+        if (scopedConnections.length) {
+          try {
+            const liveSummary = await buildLiveYouTubeSummary({
+              sessionId: `sb-${ownerUserId}`,
+              connections: scopedConnections,
+              resolveAccessToken: (connection) => ensureValidAccessTokenForUser(ownerUserId, connection),
+            })
+            summary = liveSummary
+            await upsertCachedYouTubeSummary({
+              userId: ownerUserId,
+              summary: liveSummary,
+              generatedAt: new Date().toISOString(),
+              refreshJobId: null,
+            })
+          } catch {
+            // Ignore fallback errors so other organizations can still contribute posts.
+          }
+        }
+      }
+    }
+    if (!summary) continue
+    const summaryTopPosts = Array.isArray(summary.topPosts) ? summary.topPosts : []
+    for (const post of summaryTopPosts) {
+      if (!post || typeof post !== 'object') continue
+      const postId = normalizeTextInput(post.id, { maxLength: 300 })
+      const channelId = normalizeTextInput(post.channelId, { maxLength: 300 })
+      if (!postId || !channelId) continue
+      if (!scopedChannelIds.has(channelId)) continue
+      const account = youtubeAccountByChannelId.get(channelId)
+      if (!account) continue
+      if (postsById.has(postId)) continue
+      postsById.set(postId, {
+        id: postId,
+        title: normalizeTextInput(post.title, { maxLength: 300 }) || 'Untitled video',
+        platform: ORGANIZATION_CONNECTION_PLATFORM_YOUTUBE,
+        channelId,
+        channelName: formatOrganizationConnectedAccountLabel(account),
+        views: Math.max(0, toNumber(post.views)),
+        engagementRate: Math.max(0, toNumber(post.engagementRate)),
+      })
+    }
+  }
+
+  const posts = [...postsById.values()].sort((left, right) => right.views - left.views)
+  return {
+    accountLabels,
+    channels: channelOptions,
+    posts,
+  }
+}
+
+const resolveCampaignAllowedYouTubeChannelIds = async (campaignRow) => {
+  const allowedOrganizationIds = await resolveCampaignAllowedOrganizationIds(campaignRow)
+  if (!allowedOrganizationIds.length) return new Set()
+  const organizationRows = await fetchOrganizationsByIds(allowedOrganizationIds)
+  const accountsByChannelId = collectYouTubeAccountsByChannelId(organizationRows)
+  return new Set(accountsByChannelId.keys())
 }
 
 app.get('/api/campaigns', async (req, res) => {
@@ -2887,6 +3252,17 @@ app.post('/api/campaigns', async (req, res) => {
     return
   }
 
+  if (!allowedOrgs.length) {
+    const organizationsResult = await listOrganizationRows()
+    if (organizationsResult.ok) {
+      allowedOrgs = uniqueValues(
+        organizationsResult.rows
+          .filter((row) => canUserSeeOrganization(row, viewer.userId))
+          .map((row) => normalizeTextInput(row?.id, { maxLength: 80 }))
+          .filter((organizationId) => isUuid(organizationId)),
+      )
+    }
+  }
   if (!allowedOrgs.length && viewer.organizationIds.length) {
     allowedOrgs = viewer.organizationIds
   }
@@ -3629,6 +4005,83 @@ app.post('/api/campaigns/:campaignId/members', async (req, res) => {
   })
 })
 
+app.get('/api/campaigns/:campaignId/available-posts', async (req, res) => {
+  const viewer = await resolveAuthedUserContext(req, res)
+  if (!viewer.ok) {
+    res.status(viewer.status || 500).json({
+      error: viewer.error || 'campaign_posts_fetch_failed',
+      message: viewer.message || 'Unable to load campaign posts.',
+      details: viewer.details ?? null,
+      accountLabels: [],
+      channels: [],
+      posts: [],
+    })
+    return
+  }
+
+  const campaignId = typeof req.params?.campaignId === 'string' ? req.params.campaignId.trim() : ''
+  if (!isUuid(campaignId)) {
+    res.status(400).json({
+      error: 'invalid_campaign_id',
+      message: 'Campaign id must be a valid UUID.',
+      accountLabels: [],
+      channels: [],
+      posts: [],
+    })
+    return
+  }
+
+  const campaignResult = await fetchCampaignRowById(campaignId)
+  if (!campaignResult.ok) {
+    res.status(campaignResult.status || 500).json({
+      error: 'campaign_posts_fetch_failed',
+      message: 'Unable to load campaign from Supabase.',
+      details: campaignResult.payload,
+      accountLabels: [],
+      channels: [],
+      posts: [],
+    })
+    return
+  }
+
+  const campaignRow = campaignResult.row
+  if (!campaignRow) {
+    res.status(404).json({
+      error: 'campaign_not_found',
+      message: 'Campaign was not found.',
+      accountLabels: [],
+      channels: [],
+      posts: [],
+    })
+    return
+  }
+
+  if (!canUserSeeCampaign(campaignRow, viewer.userId, viewer.organizationIds, viewer.appRole)) {
+    res.status(403).json({
+      error: 'forbidden',
+      message: 'You do not have access to this campaign.',
+      accountLabels: [],
+      channels: [],
+      posts: [],
+    })
+    return
+  }
+
+  if (!canUserManageCampaignPosts(campaignRow, viewer.userId)) {
+    res.status(403).json({
+      error: 'forbidden',
+      message: 'Only campaign admins and internal members can tag campaign content.',
+      accountLabels: [],
+      channels: [],
+      posts: [],
+    })
+    return
+  }
+
+  const content = await buildCampaignAvailableContent(campaignRow)
+  res.json(content)
+})
+
 app.post('/api/campaigns/:campaignId/posts', async (req, res) => {
   const viewer = await resolveAuthedUserContext(req, res)
   if (!viewer.ok) {
@@ -3698,6 +4151,22 @@ app.post('/api/campaigns/:campaignId/posts', async (req, res) => {
     return
   }
 
+  const allowedChannelIds = await resolveCampaignAllowedYouTubeChannelIds(campaignRow)
+  if (selectedPostIds.length && !allowedChannelIds.size) {
+    res.status(400).json({
+      error: 'invalid_campaign_posts_payload',
+      message: 'No connected YouTube accounts are available for this campaign.',
+    })
+    return
+  }
+  if (selectedChannelId && !allowedChannelIds.has(selectedChannelId)) {
+    res.status(400).json({
+      error: 'invalid_campaign_posts_payload',
+      message: 'Selected channel is not connected to this campaign organization.',
+    })
+    return
+  }
+
   const rawDistributionSources = campaignRow?.distribution_sources
   const existingPostsByChannel = readCampaignPostsByChannel(campaignRow?.posts)
   const existingPosts = flattenCampaignManagedPosts(existingPostsByChannel)
@@ -3710,6 +4179,17 @@ app.post('/api/campaigns/:campaignId/posts', async (req, res) => {
       ...post,
       channelId: post.channelId || selectedChannelId || '',
     }))
+  const hasInvalidChannelPost = nextSelectedPosts.some((post) => {
+    const postChannelId = normalizeTextInput(post?.channelId, { maxLength: 300 })
+    return !postChannelId || !allowedChannelIds.has(postChannelId)
+  })
+  if (hasInvalidChannelPost) {
+    res.status(400).json({
+      error: 'invalid_campaign_posts_payload',
+      message: 'Posts must belong to accounts connected to the campaign organization.',
+    })
+    return
+  }
   const postsByChannelForWrite = buildCampaignPostsByChannel(nextSelectedPosts)
   const nextDistributionSources = readCampaignDistributionObject(rawDistributionSources)
   nextDistributionSources[CAMPAIGN_SELECTED_POST_IDS_KEY] = selectedPostIds
@@ -3953,6 +4433,7 @@ app.post('/api/organizations', async (req, res) => {
     campaigns: campaigns.length ? campaigns : null,
     members: requestedMembers,
     creator: viewer.userId,
+    connected_accounts: [],
   }
 
   const inserted = await insertOrganizationRow(rowToInsert)
@@ -3970,6 +4451,16 @@ app.post('/api/organizations', async (req, res) => {
   }
 
   const createdRow = inserted.row ?? rowToInsert
+  if (campaigns.length) {
+    const campaignSync = await syncCampaignAllowedOrgsForCampaignIds(campaigns)
+    if (!campaignSync.ok) {
+      console.error('Failed to sync campaign allowed_orgs after organization create:', {
+        organizationId: normalizeTextInput(createdRow?.id, { maxLength: 80 }),
+        campaignIds: campaigns,
+        failedCampaignIds: campaignSync.failedCampaigns,
+      })
+    }
+  }
   res.status(201).json({
     organization: mapOrganizationForClient(createdRow, usersResult.rows),
     viewerUserId: viewer.userId,
@@ -4065,6 +4556,7 @@ app.post('/api/organizations/:organizationId/details', async (req, res) => {
     return
   }
 
+  const previousCampaigns = normalizeUuidArray(organizationRow?.campaigns)
   const nextCampaigns = hasCampaigns
     ? normalizeUuidArray(payload.campaigns)
     : normalizeUuidArray(organizationRow?.campaigns)
@@ -4118,6 +4610,17 @@ app.post('/api/organizations/:organizationId/details', async (req, res) => {
     ...organizationRow,
     name: nextName,
     campaigns: nextCampaigns.length ? nextCampaigns : null,
+  }
+  const campaignIdsToSync = uniqueValues([...previousCampaigns, ...nextCampaigns])
+  if (campaignIdsToSync.length) {
+    const campaignSync = await syncCampaignAllowedOrgsForCampaignIds(campaignIdsToSync)
+    if (!campaignSync.ok) {
+      console.error('Failed to sync campaign allowed_orgs after organization update:', {
+        organizationId,
+        campaignIds: campaignIdsToSync,
+        failedCampaignIds: campaignSync.failedCampaigns,
+      })
+    }
   }
   const creatorId = normalizeTextInput(updatedOrganizationRow?.creator, { maxLength: 80 })
   const memberIds = Object.keys(normalizeOrganizationMemberRoles(updatedOrganizationRow?.members, creatorId))
@@ -4188,6 +4691,7 @@ app.delete('/api/organizations/:organizationId', async (req, res) => {
     return
   }
 
+  const campaignIdsToSync = normalizeUuidArray(organizationRow?.campaigns)
   const deleted = await deleteOrganizationRowById(organizationId)
   if (!deleted.ok) {
     console.error('Failed to delete organization:', {
@@ -4204,6 +4708,16 @@ app.delete('/api/organizations/:organizationId', async (req, res) => {
     return
   }
 
+  if (campaignIdsToSync.length) {
+    const campaignSync = await syncCampaignAllowedOrgsForCampaignIds(campaignIdsToSync)
+    if (!campaignSync.ok) {
+      console.error('Failed to sync campaign allowed_orgs after organization delete:', {
+        organizationId,
+        campaignIds: campaignIdsToSync,
+        failedCampaignIds: campaignSync.failedCampaigns,
+      })
+    }
+  }
   res.json({ organizationId })
 })
 
@@ -4543,6 +5057,218 @@ app.post('/api/organizations/:organizationId/members', async (req, res) => {
   })
 })
 
+app.post('/api/organizations/:organizationId/connections', async (req, res) => {
+  const viewer = await resolveAuthedUserContext(req, res)
+  if (!viewer.ok) {
+    res.status(viewer.status || 500).json({
+      error: viewer.error || 'organization_connections_update_failed',
+      message: viewer.message || 'Unable to update organization connections.',
+      details: viewer.details ?? null,
+    })
+    return
+  }
+
+  const organizationId =
+    typeof req.params?.organizationId === 'string' ? req.params.organizationId.trim() : ''
+  if (!isUuid(organizationId)) {
+    res.status(400).json({
+      error: 'invalid_organization_id',
+      message: 'Organization id must be a valid UUID.',
+    })
+    return
+  }
+
+  const organizationResult = await fetchOrganizationRowById(organizationId)
+  if (!organizationResult.ok) {
+    res.status(organizationResult.status || 500).json({
+      error: 'organization_connections_update_failed',
+      message: 'Unable to load organization from Supabase.',
+      details: organizationResult.payload,
+    })
+    return
+  }
+  const organizationRow = organizationResult.row
+  if (!organizationRow) {
+    res.status(404).json({
+      error: 'organization_not_found',
+      message: 'Organization was not found.',
+    })
+    return
+  }
+  if (!canUserSeeOrganization(organizationRow, viewer.userId, viewer.appRole)) {
+    res.status(403).json({
+      error: 'forbidden',
+      message: 'You do not have access to this organization.',
+    })
+    return
+  }
+  if (!canUserManageOrganizationConnections(organizationRow, viewer.userId)) {
+    res.status(403).json({
+      error: 'forbidden',
+      message: 'Brand viewers can view organization connections but cannot edit them.',
+    })
+    return
+  }
+
+  const payload = req.body ?? {}
+  const platform = normalizeOrganizationConnectionPlatform(payload.platform)
+  const accountName = normalizeTextInput(payload.accountName, { maxLength: 180 })
+  if (!accountName) {
+    res.status(400).json({
+      error: 'invalid_organization_connection_payload',
+      message: 'accountName is required.',
+    })
+    return
+  }
+
+  if (platform === ORGANIZATION_CONNECTION_PLATFORM_YOUTUBE) {
+    res.status(400).json({
+      error: 'youtube_oauth_required',
+      message: 'Connect YouTube accounts using the Connect YouTube button.',
+    })
+    return
+  }
+
+  const currentAccounts = normalizeOrganizationConnectedAccounts(organizationRow?.connected_accounts)
+  const existing = currentAccounts.find(
+    (account) =>
+      normalizeOrganizationConnectionPlatform(account.platform) === platform
+      && normalizeChannelName(account.accountName) === normalizeChannelName(accountName),
+  )
+  const connectedAt = new Date().toISOString()
+  const nextConnection = existing
+    ? { ...existing, accountName, connectedAt }
+    : {
+        id: buildOrganizationConnectionId(platform),
+        platform,
+        accountName,
+        connectedAt,
+      }
+  const nextAccounts = existing
+    ? currentAccounts.map((account) => (account.id === existing.id ? nextConnection : account))
+    : [...currentAccounts, nextConnection]
+
+  const updateResult = await updateOrganizationConnectedAccounts(organizationId, nextAccounts)
+  if (!updateResult.ok || !updateResult.row) {
+    res.status(updateResult.status || 500).json({
+      error: 'organization_connections_update_failed',
+      message: 'Unable to update organization connections in Supabase.',
+      details: updateResult.payload,
+    })
+    return
+  }
+
+  const organization = await mapOrganizationForClientWithResolvedUsers(updateResult.row)
+  res.json({ organization })
+})
+
+app.delete('/api/organizations/:organizationId/connections/:connectionId', async (req, res) => {
+  const viewer = await resolveAuthedUserContext(req, res)
+  if (!viewer.ok) {
+    res.status(viewer.status || 500).json({
+      error: viewer.error || 'organization_connections_update_failed',
+      message: viewer.message || 'Unable to update organization connections.',
+      details: viewer.details ?? null,
+    })
+    return
+  }
+
+  const organizationId =
+    typeof req.params?.organizationId === 'string' ? req.params.organizationId.trim() : ''
+  if (!isUuid(organizationId)) {
+    res.status(400).json({
+      error: 'invalid_organization_id',
+      message: 'Organization id must be a valid UUID.',
+    })
+    return
+  }
+
+  const connectionId = normalizeOrganizationConnectionId(req.params?.connectionId)
+  if (!connectionId) {
+    res.status(400).json({
+      error: 'invalid_connection_id',
+      message: 'Connection id is required.',
+    })
+    return
+  }
+
+  const organizationResult = await fetchOrganizationRowById(organizationId)
+  if (!organizationResult.ok) {
+    res.status(organizationResult.status || 500).json({
+      error: 'organization_connections_update_failed',
+      message: 'Unable to load organization from Supabase.',
+      details: organizationResult.payload,
+    })
+    return
+  }
+  const organizationRow = organizationResult.row
+  if (!organizationRow) {
+    res.status(404).json({
+      error: 'organization_not_found',
+      message: 'Organization was not found.',
+    })
+    return
+  }
+  if (!canUserSeeOrganization(organizationRow, viewer.userId, viewer.appRole)) {
+    res.status(403).json({
+      error: 'forbidden',
+      message: 'You do not have access to this organization.',
+    })
+    return
+  }
+  if (!canUserManageOrganizationConnections(organizationRow, viewer.userId)) {
+    res.status(403).json({
+      error: 'forbidden',
+      message: 'Brand viewers can view organization connections but cannot edit them.',
+    })
+    return
+  }
+
+  const currentAccounts = normalizeOrganizationConnectedAccounts(organizationRow?.connected_accounts)
+  const targetAccount = currentAccounts.find((account) => account.id === connectionId)
+  if (!targetAccount) {
+    res.status(404).json({
+      error: 'organization_connection_not_found',
+      message: 'Connection was not found.',
+    })
+    return
+  }
+
+  if (
+    normalizeOrganizationConnectionPlatform(targetAccount.platform) === ORGANIZATION_CONNECTION_PLATFORM_YOUTUBE
+    && targetAccount.channelId
+  ) {
+    const ownerUserId = normalizeTextInput(targetAccount.ownerUserId, { maxLength: 80 })
+      || normalizeTextInput(organizationRow?.creator, { maxLength: 80 })
+    if (isUuid(ownerUserId)) {
+      const deleteResult = await deleteYouTubeConnectionsByIds(ownerUserId, [targetAccount.channelId])
+      if (!deleteResult.ok) {
+        res.status(deleteResult.status || 500).json({
+          error: 'organization_connections_update_failed',
+          message: 'Unable to disconnect YouTube account from Supabase.',
+          details: deleteResult.payload,
+        })
+        return
+      }
+      await deleteCachedYouTubeSummaryByUserId(ownerUserId)
+    }
+  }
+
+  const nextAccounts = currentAccounts.filter((account) => account.id !== connectionId)
+  const updateResult = await updateOrganizationConnectedAccounts(organizationId, nextAccounts)
+  if (!updateResult.ok || !updateResult.row) {
+    res.status(updateResult.status || 500).json({
+      error: 'organization_connections_update_failed',
+      message: 'Unable to update organization connections in Supabase.',
+      details: updateResult.payload,
+    })
+    return
+  }
+
+  const organization = await mapOrganizationForClientWithResolvedUsers(updateResult.row)
+  res.json({ organization })
+})
+
 app.get('/oauth/google', (_req, res) => {
   if (!clientId || !clientSecret || !redirectUri) {
     res.redirect(buildAppRedirect({ status: 'error', message: 'Google OAuth not configured.' }))
@@ -4682,6 +5408,8 @@ app.get('/oauth/google/callback', async (req, res) => {
 app.get('/oauth/youtube', async (req, res) => {
   const requestedOrigin =
     typeof req.query?.app_origin === 'string' ? req.query.app_origin : ''
+  const requestedPath = normalizeTextInput(req.query?.path, { maxLength: 64 })
+  const requestedOrganizationId = normalizeTextInput(req.query?.organization_id, { maxLength: 80 })
   const refererOrigin = typeof req.headers.referer === 'string' ? req.headers.referer : ''
   const requestedOriginBase = resolveOriginBase(requestedOrigin)
   const refererOriginBase = resolveOriginBase(refererOrigin)
@@ -4699,6 +5427,7 @@ app.get('/oauth/youtube', async (req, res) => {
     })
   }
   const redirectBase = appOrigin || resolveAppRedirectBase(req)
+  const redirectPath = requestedPath === '/organizations' ? '/organizations' : '/settings'
 
   const viewer = await resolveAuthedUserContext(req, res)
   if (!viewer.ok) {
@@ -4707,19 +5436,77 @@ app.get('/oauth/youtube', async (req, res) => {
         status: 'error',
         provider: 'youtube',
         message: 'You must be signed in to connect YouTube.',
-        path: '/settings',
+        path: redirectPath,
         baseUrl: redirectBase,
       }),
     )
     return
   }
-  if (!canRoleConnectAccounts(viewer.appRole)) {
+
+  const oauthContext = {
+    path: redirectPath,
+    organizationId: '',
+  }
+
+  if (requestedOrganizationId) {
+    if (!isUuid(requestedOrganizationId)) {
+      res.redirect(
+        buildAppRedirect({
+          status: 'error',
+          provider: 'youtube',
+          message: 'Organization id must be a valid UUID.',
+          path: '/organizations',
+          baseUrl: redirectBase,
+        }),
+      )
+      return
+    }
+    const organizationResult = await fetchOrganizationRowById(requestedOrganizationId)
+    if (!organizationResult.ok || !organizationResult.row) {
+      res.redirect(
+        buildAppRedirect({
+          status: 'error',
+          provider: 'youtube',
+          message: 'Unable to load organization for connection.',
+          path: '/organizations',
+          baseUrl: redirectBase,
+        }),
+      )
+      return
+    }
+    if (!canUserSeeOrganization(organizationResult.row, viewer.userId, viewer.appRole)) {
+      res.redirect(
+        buildAppRedirect({
+          status: 'error',
+          provider: 'youtube',
+          message: 'You do not have access to this organization.',
+          path: '/organizations',
+          baseUrl: redirectBase,
+        }),
+      )
+      return
+    }
+    if (!canUserManageOrganizationConnections(organizationResult.row, viewer.userId)) {
+      res.redirect(
+        buildAppRedirect({
+          status: 'error',
+          provider: 'youtube',
+          message: 'Brand viewers may view connected accounts but cannot edit them.',
+          path: '/organizations',
+          baseUrl: redirectBase,
+        }),
+      )
+      return
+    }
+    oauthContext.organizationId = requestedOrganizationId
+    oauthContext.path = '/organizations'
+  } else if (!canRoleConnectAccounts(viewer.appRole)) {
     res.redirect(
       buildAppRedirect({
         status: 'error',
         provider: 'youtube',
         message: 'Only admins can connect YouTube accounts.',
-        path: '/settings',
+        path: redirectPath,
         baseUrl: redirectBase,
       }),
     )
@@ -4732,7 +5519,7 @@ app.get('/oauth/youtube', async (req, res) => {
         status: 'error',
         provider: 'youtube',
         message: 'YouTube OAuth not configured.',
-        path: '/settings',
+        path: oauthContext.path,
         baseUrl: redirectBase,
       }),
     )
@@ -4741,6 +5528,12 @@ app.get('/oauth/youtube', async (req, res) => {
 
   const state = crypto.randomBytes(16).toString('hex')
   res.cookie('youtube_oauth_state', state, {
+    httpOnly: true,
+    sameSite: cookieSameSite,
+    secure: cookieSecure,
+    maxAge: 10 * 60 * 1000,
+  })
+  res.cookie(YOUTUBE_OAUTH_CONTEXT_COOKIE, JSON.stringify(oauthContext), {
     httpOnly: true,
     sameSite: cookieSameSite,
     secure: cookieSecure,
@@ -4765,15 +5558,39 @@ app.get('/oauth/youtube/callback', async (req, res) => {
   const { code, state, error, error_description: errorDescription } = req.query
   const expectedState = req.cookies.youtube_oauth_state
   const redirectBase = resolveAppRedirectBase(req)
+  const rawOAuthContext = req.cookies?.[YOUTUBE_OAUTH_CONTEXT_COOKIE]
+  let oauthContext = { path: '/settings', organizationId: '' }
+  if (typeof rawOAuthContext === 'string' && rawOAuthContext.trim()) {
+    try {
+      const parsed = JSON.parse(rawOAuthContext)
+      if (parsed && typeof parsed === 'object') {
+        const parsedPath = normalizeTextInput(parsed.path, { maxLength: 64 })
+        const parsedOrganizationId = normalizeTextInput(parsed.organizationId, { maxLength: 80 })
+        oauthContext = {
+          path: parsedPath === '/organizations' ? '/organizations' : '/settings',
+          organizationId: isUuid(parsedOrganizationId) ? parsedOrganizationId : '',
+        }
+      }
+    } catch {
+      oauthContext = { path: '/settings', organizationId: '' }
+    }
+  }
+  const redirectPath = oauthContext.path
+
+  const clearYouTubeOauthCookies = () => {
+    res.clearCookie('youtube_oauth_state')
+    res.clearCookie(APP_REDIRECT_COOKIE)
+    res.clearCookie(YOUTUBE_OAUTH_CONTEXT_COOKIE)
+  }
 
   if (error) {
-    res.clearCookie(APP_REDIRECT_COOKIE)
+    clearYouTubeOauthCookies()
     res.redirect(
       buildAppRedirect({
         status: 'error',
         provider: 'youtube',
         message: typeof errorDescription === 'string' ? errorDescription : 'YouTube connection failed.',
-        path: '/settings',
+        path: redirectPath,
         baseUrl: redirectBase,
       }),
     )
@@ -4781,13 +5598,13 @@ app.get('/oauth/youtube/callback', async (req, res) => {
   }
 
   if (!state || !expectedState || state !== expectedState) {
-    res.clearCookie(APP_REDIRECT_COOKIE)
+    clearYouTubeOauthCookies()
     res.redirect(
       buildAppRedirect({
         status: 'error',
         provider: 'youtube',
         message: 'YouTube connection state mismatch.',
-        path: '/settings',
+        path: redirectPath,
         baseUrl: redirectBase,
       }),
     )
@@ -4795,13 +5612,13 @@ app.get('/oauth/youtube/callback', async (req, res) => {
   }
 
   if (!code || typeof code !== 'string') {
-    res.clearCookie(APP_REDIRECT_COOKIE)
+    clearYouTubeOauthCookies()
     res.redirect(
       buildAppRedirect({
         status: 'error',
         provider: 'youtube',
         message: 'Missing authorization code.',
-        path: '/settings',
+        path: redirectPath,
         baseUrl: redirectBase,
       }),
     )
@@ -4811,12 +5628,28 @@ app.get('/oauth/youtube/callback', async (req, res) => {
   try {
     const viewer = await resolveAuthedUserContext(req, res)
     if (!viewer.ok) {
-      throw new Error('You must be signed in as an admin before connecting YouTube.')
+      throw new Error('You must be signed in before connecting YouTube.')
     }
-    if (!canRoleConnectAccounts(viewer.appRole)) {
+    const connectionOwnerUserId = viewer.userId
+    let connectedOrganizationId = ''
+    let connectedOrganizationRow = null
+
+    if (oauthContext.organizationId) {
+      const organizationResult = await fetchOrganizationRowById(oauthContext.organizationId)
+      if (!organizationResult.ok || !organizationResult.row) {
+        throw new Error('Unable to load organization for YouTube connection.')
+      }
+      if (!canUserSeeOrganization(organizationResult.row, viewer.userId, viewer.appRole)) {
+        throw new Error('You do not have access to this organization.')
+      }
+      if (!canUserManageOrganizationConnections(organizationResult.row, viewer.userId)) {
+        throw new Error('Brand viewers may view connected accounts but cannot edit them.')
+      }
+      connectedOrganizationId = oauthContext.organizationId
+      connectedOrganizationRow = organizationResult.row
+    } else if (!canRoleConnectAccounts(viewer.appRole)) {
       throw new Error('Only admins can connect YouTube accounts.')
     }
-    const userId = viewer.userId
 
     const tokenParams = new URLSearchParams({
       client_id: youtubeClientId,
@@ -4843,12 +5676,13 @@ app.get('/oauth/youtube/callback', async (req, res) => {
         tokenPayload?.error_description ||
         tokenPayload?.error ||
         'YouTube token exchange failed.'
+      clearYouTubeOauthCookies()
       res.redirect(
         buildAppRedirect({
           status: 'error',
           provider: 'youtube',
           message,
-          path: '/settings',
+          path: redirectPath,
           baseUrl: redirectBase,
         }),
       )
@@ -4866,21 +5700,20 @@ app.get('/oauth/youtube/callback', async (req, res) => {
           ? channelInfo.errorMessage.trim()
           : 'Unable to load YouTube channel details.'
       console.error('YouTube connect failed while loading channel details:', channelErrorMessage)
-      res.clearCookie('youtube_oauth_state')
-      res.clearCookie(APP_REDIRECT_COOKIE)
+      clearYouTubeOauthCookies()
       res.redirect(
         buildAppRedirect({
           status: 'error',
           provider: 'youtube',
           message: channelErrorMessage,
-          path: '/settings',
+          path: redirectPath,
           baseUrl: redirectBase,
         }),
       )
       return
     }
 
-    const existingConnectionsResult = await listYouTubeConnectionRowsByUserId(userId)
+    const existingConnectionsResult = await listYouTubeConnectionRowsByUserId(connectionOwnerUserId)
     const existingRows = existingConnectionsResult.ok ? existingConnectionsResult.rows : []
     const existing = existingRows
       .map(mapYouTubeConnectionRow)
@@ -4895,7 +5728,7 @@ app.get('/oauth/youtube/callback', async (req, res) => {
       connectedAt: existing?.connectedAt ?? new Date().toISOString(),
     }
     const upsertResult = await upsertYouTubeConnectionRow({
-      user_id: userId,
+      user_id: connectionOwnerUserId,
       channel_id: nextConnection.channelId,
       channel_name: nextConnection.channelName,
       access_token: nextConnection.accessToken,
@@ -4910,25 +5743,59 @@ app.get('/oauth/youtube/callback', async (req, res) => {
       throw new Error('Unable to save YouTube connection.')
     }
 
-    res.clearCookie('youtube_oauth_state')
-    res.clearCookie(APP_REDIRECT_COOKIE)
+    if (connectedOrganizationId && connectedOrganizationRow) {
+      const currentAccounts = normalizeOrganizationConnectedAccounts(connectedOrganizationRow.connected_accounts)
+      const connectedAt = nextConnection.connectedAt || new Date().toISOString()
+      const nextAccount = {
+        id: `youtube:${nextConnection.channelId}`,
+        platform: ORGANIZATION_CONNECTION_PLATFORM_YOUTUBE,
+        accountName: nextConnection.channelName,
+        channelId: nextConnection.channelId,
+        ownerUserId: connectionOwnerUserId,
+        connectedAt,
+      }
+      const existingByIdOrChannel = currentAccounts.find(
+        (account) =>
+          account.id === nextAccount.id
+          || (
+            normalizeOrganizationConnectionPlatform(account.platform) === ORGANIZATION_CONNECTION_PLATFORM_YOUTUBE
+            && normalizeTextInput(account.channelId, { maxLength: 300 }) === nextConnection.channelId
+          ),
+      )
+      const nextAccounts = existingByIdOrChannel
+        ? currentAccounts.map((account) =>
+            account.id === existingByIdOrChannel.id ? nextAccount : account)
+        : [...currentAccounts, nextAccount]
+      const updateOrganizationResult = await updateOrganizationConnectedAccounts(
+        connectedOrganizationId,
+        nextAccounts,
+      )
+      if (!updateOrganizationResult.ok) {
+        throw new Error('Unable to save organization connected accounts.')
+      }
+    }
+
+    clearYouTubeOauthCookies()
     res.redirect(
       buildAppRedirect({
         status: 'success',
         provider: 'youtube',
-        path: '/settings',
-        extraParams: { youtube_channel_name: connectedDisplayName },
+        path: redirectPath,
+        extraParams: {
+          youtube_channel_name: connectedDisplayName,
+          organizationId: connectedOrganizationId || undefined,
+        },
         baseUrl: redirectBase,
       }),
     )
   } catch (err) {
-    res.clearCookie(APP_REDIRECT_COOKIE)
+    clearYouTubeOauthCookies()
     res.redirect(
       buildAppRedirect({
         status: 'error',
         provider: 'youtube',
         message: err instanceof Error && err.message ? err.message : 'YouTube connection failed.',
-        path: '/settings',
+        path: redirectPath,
         baseUrl: redirectBase,
       }),
     )
@@ -7027,6 +7894,7 @@ app.post('/auth/logout', async (req, res) => {
   }
   res.clearCookie('google_oauth_state')
   res.clearCookie('youtube_oauth_state')
+  res.clearCookie(YOUTUBE_OAUTH_CONTEXT_COOKIE)
   res.clearCookie(YOUTUBE_SESSION_COOKIE)
   res.clearCookie(YOUTUBE_CONNECTIONS_COOKIE)
   clearSupabaseSessionCookies(res)
