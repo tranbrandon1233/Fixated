@@ -1,10 +1,12 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { Navigate, Route, Routes } from 'react-router-dom'
 import { AppLayout } from './components/layout/AppLayout'
 import { Campaigns } from './pages/Campaigns'
 import { Channel } from './pages/Channel'
+import { ExportPreview } from './pages/ExportPreview'
 import { Login } from './pages/Login'
 import { Portfolio } from './pages/Portfolio'
+import { Organizations } from './pages/Organizations'
 import { ReportBuilder } from './pages/ReportBuilder'
 import { ReportViewer } from './pages/ReportViewer'
 import { Settings } from './pages/Settings'
@@ -12,8 +14,6 @@ import type { Role } from './types/dashboard'
 import { useTheme } from './theme/useTheme'
 import { fetchSessionStatus, logout } from './utils/auth'
 import { persistLastDataRefreshAt, readLastDataRefreshAt } from './utils/refresh'
-
-const roleOptions: Role[] = ['admin', 'internal', 'brand']
 
 const App = () => {
   const [isAuthed, setIsAuthed] = useState(() => {
@@ -35,17 +35,13 @@ const App = () => {
   const [isSessionChecking, setIsSessionChecking] = useState(() =>
     localStorage.getItem('auth_provider') === 'google',
   )
-  const [role, setRole] = useState<Role>('internal')
+  const [role, setRole] = useState<Role>('admin')
   const [lastDataRefreshAt, setLastDataRefreshAt] = useState<number | null>(() =>
     readLastDataRefreshAt(),
   )
   const { mode, toggle } = useTheme()
-
-  const roleLabel = useMemo(() => {
-    if (role === 'admin') return 'Admin'
-    if (role === 'brand') return 'Brand Viewer'
-    return 'Internal'
-  }, [role])
+  const isBrandViewer = role === 'brand'
+  const defaultAuthedPath = isBrandViewer ? '/report-view' : '/portfolio'
 
   const handleLogin = (provider: 'google') => {
     localStorage.setItem('auth_provider', provider)
@@ -58,6 +54,7 @@ const App = () => {
     localStorage.removeItem('auth_provider')
     setIsAuthed(false)
     setIsSessionChecking(false)
+    setRole('admin')
   }
 
   const handleDataRefreshed = useCallback((timestamp?: number) => {
@@ -80,6 +77,9 @@ const App = () => {
       if (!status.authenticated) {
         localStorage.removeItem('auth_provider')
         setIsAuthed(false)
+        setRole('admin')
+      } else {
+        setRole(status.role ?? 'admin')
       }
       setIsSessionChecking(false)
     }
@@ -89,6 +89,49 @@ const App = () => {
       cancelled = true
     }
   }, [])
+
+  useEffect(() => {
+    if (!isAuthed || localStorage.getItem('auth_provider') !== 'google') return
+
+    let cancelled = false
+
+    const checkForSessionTimeout = async () => {
+      const status = await fetchSessionStatus()
+      if (cancelled) return
+      if (!status.authenticated) {
+        localStorage.removeItem('auth_provider')
+        setIsAuthed(false)
+        setRole('admin')
+        setIsSessionChecking(false)
+        return
+      }
+      setRole(status.role ?? 'admin')
+    }
+
+    const intervalId = window.setInterval(() => {
+      void checkForSessionTimeout()
+    }, 30_000)
+
+    const handleWindowFocus = () => {
+      void checkForSessionTimeout()
+    }
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        void checkForSessionTimeout()
+      }
+    }
+
+    window.addEventListener('focus', handleWindowFocus)
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+
+    return () => {
+      cancelled = true
+      window.clearInterval(intervalId)
+      window.removeEventListener('focus', handleWindowFocus)
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+    }
+  }, [isAuthed])
 
   if (isSessionChecking) {
     return (
@@ -105,22 +148,23 @@ const App = () => {
       <Route
         path="/login"
         element={
-          isAuthed ? <Navigate to="/portfolio" replace /> : <Login onLogin={handleLogin} />
+          isAuthed ? <Navigate to={defaultAuthedPath} replace /> : <Login onLogin={handleLogin} />
         }
       />
       <Route
         element={
           isAuthed ? (
-            <AppLayout
-              role={role}
-              roleLabel={roleLabel}
-              roleOptions={roleOptions}
-              onRoleChange={setRole}
-              lastDataRefreshAt={lastDataRefreshAt}
-              themeMode={mode}
-              onToggleTheme={toggle}
-              onLogout={handleLogout}
-            />
+            isBrandViewer ? (
+              <Navigate to="/report-view" replace />
+            ) : (
+              <AppLayout
+                role={role}
+                lastDataRefreshAt={lastDataRefreshAt}
+                themeMode={mode}
+                onToggleTheme={toggle}
+                onLogout={handleLogout}
+              />
+            )
           ) : (
             <Navigate to="/login" replace />
           )
@@ -129,23 +173,33 @@ const App = () => {
         <Route index element={<Navigate to="/portfolio" replace />} />
         <Route path="/portfolio" element={<Portfolio />} />
         <Route path="/channels" element={<Channel />} />
-        <Route path="/campaigns" element={<Campaigns />} />
-        <Route path="/reports" element={<ReportBuilder />} />
+        <Route path="/campaigns" element={<Campaigns role={role} />} />
+        <Route path="/organizations" element={<Organizations role={role} />} />
+        <Route path="/reports" element={<ReportBuilder role={role} />} />
         <Route
           path="/settings"
           element={
-            <Settings
-              lastDataRefreshAt={lastDataRefreshAt}
-              onDataRefreshed={handleDataRefreshed}
-            />
+            role === 'admin'
+              ? (
+                  <Settings
+                    role={role}
+                    lastDataRefreshAt={lastDataRefreshAt}
+                    onDataRefreshed={handleDataRefreshed}
+                  />
+                )
+              : <Navigate to="/portfolio" replace />
           }
         />
       </Route>
       <Route
         path="/report-view"
-        element={isAuthed ? <ReportViewer /> : <Navigate to="/login" replace />}
+        element={isAuthed ? <ReportViewer onLogout={handleLogout} /> : <Navigate to="/login" replace />}
       />
-      <Route path="*" element={<Navigate to={isAuthed ? '/portfolio' : '/login'} replace />} />
+      <Route
+        path="/exports/preview"
+        element={isAuthed ? <ExportPreview /> : <Navigate to="/login" replace />}
+      />
+      <Route path="*" element={<Navigate to={isAuthed ? defaultAuthedPath : '/login'} replace />} />
     </Routes>
   )
 }

@@ -80,6 +80,11 @@ const SUPABASE_ACCESS_TOKEN_COOKIE = 'sb_access_token'
 const SUPABASE_REFRESH_TOKEN_COOKIE = 'sb_refresh_token'
 const YOUTUBE_AUTO_REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000
 const YOUTUBE_AUTO_REFRESH_RETRY_COOLDOWN_MS = 10 * 60 * 1000
+const EXPORT_PREVIEW_TTL_MS = 30 * 60 * 1000
+const EXPORT_PREVIEW_MAX_ENTRIES = 64
+const EXPORT_PREVIEW_MAX_BASE64_SIZE = 20 * 1024 * 1024
+const MAX_INPUT_LIST_SIZE = 500
+const exportPreviewStore = new Map()
 
 const buildAppRedirect = ({
   status,
@@ -110,6 +115,30 @@ const resolveOriginBase = (value) => {
   } catch {
     return ''
   }
+}
+
+const trustedRequestOrigins = new Set(
+  [resolveOriginBase(appBaseUrl), resolveOriginBase(serverBaseUrl)].filter(Boolean),
+)
+
+const isTrustedRequestSource = (req) => {
+  const originHeader = typeof req.headers?.origin === 'string' ? req.headers.origin : ''
+  const refererHeader = typeof req.headers?.referer === 'string' ? req.headers.referer : ''
+  const fetchSiteHeader = typeof req.headers?.['sec-fetch-site'] === 'string'
+    ? req.headers['sec-fetch-site'].trim().toLowerCase()
+    : ''
+  const originBase = resolveOriginBase(originHeader)
+  const refererBase = resolveOriginBase(refererHeader)
+  if (originBase && trustedRequestOrigins.has(originBase)) return true
+  if (refererBase && trustedRequestOrigins.has(refererBase)) return true
+  if (fetchSiteHeader) {
+    if (fetchSiteHeader === 'cross-site') return false
+    if (fetchSiteHeader === 'same-origin' || fetchSiteHeader === 'same-site' || fetchSiteHeader === 'none') {
+      return true
+    }
+  }
+  if (!isProd && !originBase && !refererBase) return true
+  return false
 }
 
 const resolveAppRedirectBase = (req) => {
@@ -253,6 +282,16 @@ const ensureValidAccessToken = async (sessionId, connection, options = {}) => {
 const buildSupabaseTableUrl = (tableName, query = '') => {
   const suffix = query ? `?${query}` : ''
   return `${supabaseUrl}/rest/v1/${tableName}${suffix}`
+}
+
+const buildSupabaseTableEndpoints = (tableName, query = '') => {
+  const normalizedTableName = typeof tableName === 'string' ? tableName.trim() : ''
+  if (!normalizedTableName) return []
+  const suffix = query ? `?${query}` : ''
+  const encodedTableName = encodeURIComponent(normalizedTableName)
+  const encodedLowercaseTableName = encodeURIComponent(normalizedTableName.toLowerCase())
+  const pathParts = [`%22${encodedTableName}%22`, encodedTableName, encodedLowercaseTableName]
+  return [...new Set(pathParts)].map((pathPart) => `${supabaseUrl}/rest/v1/${pathPart}${suffix}`)
 }
 
 const requestSupabaseTable = async (tableName, { method = 'GET', query = '', body, prefer = '' } = {}) => {
@@ -605,10 +644,7 @@ const resolveSupabaseUserEmail = (sessionPayload) => {
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 const tryInsertUsersRow = async (userId, email) => {
-  const candidates = [
-    `${supabaseUrl}/rest/v1/%22Users%22?on_conflict=id`,
-    `${supabaseUrl}/rest/v1/Users?on_conflict=id`,
-  ]
+  const candidates = buildSupabaseTableEndpoints('Users', 'on_conflict=id')
   let lastResult = {
     ok: false,
     status: 500,
@@ -728,7 +764,7 @@ const extractGoogleApiErrorMessage = (payload, status) => {
 const fetchYouTubeChannelInfo = async (accessToken, channelId) => {
   try {
     const params = new URLSearchParams({
-      part: 'snippet,statistics',
+      part: 'snippet,statistics,contentDetails',
       maxResults: '1',
     })
     if (channelId) {
@@ -745,6 +781,7 @@ const fetchYouTubeChannelInfo = async (accessToken, channelId) => {
         id: '',
         title: '',
         statistics: {},
+        uploadsPlaylistId: '',
         errorMessage: extractGoogleApiErrorMessage(payload, response.status),
       }
     }
@@ -754,6 +791,7 @@ const fetchYouTubeChannelInfo = async (accessToken, channelId) => {
         id: '',
         title: '',
         statistics: {},
+        uploadsPlaylistId: '',
         errorMessage: 'No YouTube channel was found for this Google account.',
       }
     }
@@ -761,6 +799,10 @@ const fetchYouTubeChannelInfo = async (accessToken, channelId) => {
       id: typeof channel.id === 'string' ? channel.id : '',
       title: typeof channel?.snippet?.title === 'string' ? channel.snippet.title.trim() : '',
       statistics: channel.statistics ?? {},
+      uploadsPlaylistId:
+        typeof channel?.contentDetails?.relatedPlaylists?.uploads === 'string'
+          ? channel.contentDetails.relatedPlaylists.uploads.trim()
+          : '',
       errorMessage: '',
     }
   } catch (_err) {
@@ -768,6 +810,7 @@ const fetchYouTubeChannelInfo = async (accessToken, channelId) => {
       id: '',
       title: '',
       statistics: {},
+      uploadsPlaylistId: '',
       errorMessage: 'Unable to reach YouTube API. Please try again.',
     }
   }
@@ -789,20 +832,65 @@ const fetchGoogleProfileName = async (accessToken) => {
 }
 
 app.use(cookieParser())
-app.use(express.json())
+app.use(express.json({ limit: '25mb' }))
 app.use((req, res, next) => {
   const requestOrigin = typeof req.headers.origin === 'string' ? req.headers.origin : ''
-  const allowOrigin = !isProd && requestOrigin ? requestOrigin : appBaseUrl
+  const normalizedRequestOrigin = resolveOriginBase(requestOrigin)
+  const defaultAllowedOrigin = resolveOriginBase(appBaseUrl) || appBaseUrl
+  const allowOrigin = !isProd
+    ? normalizedRequestOrigin || defaultAllowedOrigin
+    : normalizedRequestOrigin && trustedRequestOrigins.has(normalizedRequestOrigin)
+      ? normalizedRequestOrigin
+      : defaultAllowedOrigin
   res.setHeader('Access-Control-Allow-Origin', allowOrigin)
   res.setHeader('Vary', 'Origin')
   res.setHeader('Access-Control-Allow-Credentials', 'true')
-  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,DELETE,OPTIONS')
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS')
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+  res.setHeader('X-Content-Type-Options', 'nosniff')
+  res.setHeader('X-Frame-Options', 'DENY')
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin')
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()')
+  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin')
+  res.setHeader('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'; base-uri 'none';")
+  if (isProd) {
+    res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains')
+  }
   if (req.method === 'OPTIONS') {
     res.sendStatus(204)
     return
   }
   next()
+})
+
+app.use((req, res, next) => {
+  if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS') {
+    next()
+    return
+  }
+  if (isTrustedRequestSource(req)) {
+    next()
+    return
+  }
+  res.status(403).json({
+    error: 'forbidden',
+    message: 'Untrusted request origin.',
+  })
+})
+
+app.use('/api', (req, res, next) => {
+  if (req.method === 'OPTIONS') {
+    next()
+    return
+  }
+  if (isTrustedRequestSource(req)) {
+    next()
+    return
+  }
+  res.status(403).json({
+    error: 'forbidden',
+    message: 'Untrusted API request source.',
+  })
 })
 
 app.get('/health', (_req, res) => {
@@ -830,6 +918,7 @@ app.get('/auth/session', async (req, res) => {
     authenticated: true,
     userId: viewer.userId,
     email: viewer.email || '',
+    role: viewer.appRole,
   })
 })
 
@@ -848,6 +937,22 @@ app.post('/api/refresh-counter/bump', async (req, res) => {
     res.status(401).json({
       error: 'not_authenticated',
       message: 'Missing Supabase session token.',
+    })
+    return
+  }
+  const viewer = await resolveAuthedUserContext(req, res)
+  if (!viewer.ok) {
+    res.status(viewer.status || 500).json({
+      error: viewer.error || 'refresh_count_update_failed',
+      message: viewer.message || 'Unable to verify user role.',
+      details: viewer.details ?? null,
+    })
+    return
+  }
+  if (!canRoleConnectAccounts(viewer.appRole)) {
+    res.status(403).json({
+      error: 'forbidden',
+      message: 'Only admins can refresh connected account data.',
     })
     return
   }
@@ -881,6 +986,161 @@ app.post('/api/refresh-counter/bump', async (req, res) => {
   })
 })
 
+app.post('/api/exports/preview', async (req, res) => {
+  const viewer = await resolveAuthedUserContext(req, res)
+  if (!viewer.ok) {
+    res.status(viewer.status || 500).json({
+      error: viewer.error || 'export_preview_create_failed',
+      message: viewer.message || 'Unable to authorize export preview.',
+      details: viewer.details ?? null,
+    })
+    return
+  }
+
+  const payload = req.body ?? {}
+  const campaignId = normalizeTextInput(payload.campaignId, { maxLength: 80 })
+  const type = normalizeExportPreviewType(payload.type)
+  const dataBase64 = typeof payload.dataBase64 === 'string' ? payload.dataBase64.trim() : ''
+  const fileName = sanitizeFileName(
+    typeof payload.fileName === 'string' ? payload.fileName : '',
+    type === 'pdf' ? 'report.pdf' : 'report.csv',
+  )
+
+  if (!isUuid(campaignId) || !type || !dataBase64) {
+    res.status(400).json({
+      error: 'invalid_export_preview_payload',
+      message: 'campaignId, type, and dataBase64 are required.',
+    })
+    return
+  }
+
+  const campaignResult = await fetchCampaignRowById(campaignId)
+  if (!campaignResult.ok) {
+    res.status(campaignResult.status || 500).json({
+      error: 'export_preview_create_failed',
+      message: 'Unable to load campaign from Supabase.',
+      details: campaignResult.payload,
+    })
+    return
+  }
+  if (!campaignResult.row) {
+    res.status(404).json({
+      error: 'campaign_not_found',
+      message: 'Campaign was not found.',
+    })
+    return
+  }
+
+  const campaignRole = resolveCampaignUserRole(campaignResult.row, viewer.userId)
+  if (!campaignRole) {
+    res.status(403).json({
+      error: 'forbidden',
+      message: 'You must be a campaign member to generate export previews.',
+    })
+    return
+  }
+  if (
+    campaignRole !== CAMPAIGN_MEMBER_ROLE_ADMIN &&
+    campaignRole !== CAMPAIGN_MEMBER_ROLE_INTERNAL
+  ) {
+    res.status(403).json({
+      error: 'forbidden',
+      message: 'Only campaign admins and internal members can generate export previews.',
+    })
+    return
+  }
+  if (dataBase64.length > EXPORT_PREVIEW_MAX_BASE64_SIZE) {
+    res.status(413).json({
+      error: 'export_preview_too_large',
+      message: 'Export preview payload is too large.',
+    })
+    return
+  }
+
+  let decoded
+  try {
+    decoded = Buffer.from(dataBase64, 'base64')
+  } catch {
+    res.status(400).json({
+      error: 'invalid_export_preview_payload',
+      message: 'dataBase64 must be valid base64.',
+    })
+    return
+  }
+  if (!decoded || !decoded.length) {
+    res.status(400).json({
+      error: 'invalid_export_preview_payload',
+      message: 'Export preview payload is empty.',
+    })
+    return
+  }
+
+  pruneExpiredExportPreviews()
+  const id = crypto.randomUUID()
+  exportPreviewStore.set(id, {
+    id,
+    userId: viewer.userId,
+    campaignId,
+    type,
+    fileName,
+    contentType: type === 'pdf' ? 'application/pdf' : 'text/csv; charset=utf-8',
+    dataBase64,
+    createdAt: Date.now(),
+  })
+  pruneExpiredExportPreviews()
+
+  res.status(201).json({
+    id,
+    type,
+    fileName,
+    expiresInMs: EXPORT_PREVIEW_TTL_MS,
+  })
+})
+
+app.get('/api/exports/preview/:previewId', async (req, res) => {
+  const viewer = await resolveAuthedUserContext(req, res)
+  if (!viewer.ok) {
+    res.status(viewer.status || 401).json({
+      error: viewer.error || 'not_authenticated',
+      message: viewer.message || 'Unable to authorize export preview.',
+    })
+    return
+  }
+
+  pruneExpiredExportPreviews()
+  const previewId = normalizeTextInput(req.params?.previewId, { maxLength: 80 })
+  const entry = previewId ? exportPreviewStore.get(previewId) : null
+  if (!entry) {
+    res.status(404).json({
+      error: 'export_preview_not_found',
+      message: 'Export preview not found or expired.',
+    })
+    return
+  }
+  if (!entry.userId || entry.userId !== viewer.userId) {
+    res.status(404).json({
+      error: 'export_preview_not_found',
+      message: 'Export preview not found or expired.',
+    })
+    return
+  }
+
+  const payloadBuffer = Buffer.from(entry.dataBase64, 'base64')
+  if (!payloadBuffer.length) {
+    exportPreviewStore.delete(entry.id)
+    res.status(404).json({
+      error: 'export_preview_not_found',
+      message: 'Export preview not found or expired.',
+    })
+    return
+  }
+
+  res.setHeader('Content-Type', entry.contentType || 'application/octet-stream')
+  res.setHeader('Content-Disposition', `inline; filename="${sanitizeFileName(entry.fileName)}"`)
+  res.setHeader('Cache-Control', 'no-store')
+  res.status(200).send(payloadBuffer)
+})
+
 const uuidRegex =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
@@ -888,10 +1148,53 @@ const isUuid = (value) => typeof value === 'string' && uuidRegex.test(value.trim
 
 const uniqueValues = (values) => [...new Set(values)]
 
+const stripControlChars = (value) => {
+  if (typeof value !== 'string') return ''
+  let sanitized = ''
+  for (const char of value) {
+    const code = char.charCodeAt(0)
+    const isControl =
+      (code >= 0 && code <= 8) ||
+      code === 11 ||
+      code === 12 ||
+      (code >= 14 && code <= 31) ||
+      code === 127
+    if (!isControl) {
+      sanitized += char
+    }
+  }
+  return sanitized
+}
+
+const normalizeTextInput = (
+  value,
+  {
+    maxLength = 256,
+    allowNewLines = false,
+    trim = true,
+  } = {},
+) => {
+  if (typeof value !== 'string') return ''
+  let normalized = value.replace(/\r\n?/g, '\n')
+  normalized = stripControlChars(normalized)
+  normalized = normalized.replace(/[<>]/g, '')
+  if (allowNewLines) {
+    normalized = normalized.replace(/[^\S\n]+/g, ' ')
+  } else {
+    normalized = normalized.replace(/[\n\t]+/g, ' ')
+    normalized = normalized.replace(/\s+/g, ' ')
+  }
+  if (trim) {
+    normalized = normalized.trim()
+  }
+  return normalized.slice(0, Math.max(0, maxLength))
+}
+
 const normalizeUuidArray = (value) => {
   if (Array.isArray(value)) {
     return uniqueValues(
       value
+        .slice(0, MAX_INPUT_LIST_SIZE)
         .map((entry) => (typeof entry === 'string' ? entry.trim() : ''))
         .filter((entry) => isUuid(entry)),
     )
@@ -928,21 +1231,68 @@ const normalizeStringArray = (value) => {
   if (!Array.isArray(value)) return []
   return uniqueValues(
     value
-      .map((entry) => (typeof entry === 'string' ? entry.trim() : ''))
+      .slice(0, MAX_INPUT_LIST_SIZE)
+      .map((entry) => normalizeTextInput(entry, { maxLength: 300 }))
       .filter((entry) => entry.length > 0),
   )
 }
 
+const APP_ROLE_ADMIN = 'admin'
+const APP_ROLE_INTERNAL = 'internal'
+const APP_ROLE_BRAND = 'brand'
+
+const normalizeAppRole = (value) => {
+  if (typeof value !== 'string') return APP_ROLE_ADMIN
+  const normalized = value.trim().toLowerCase()
+  if (!normalized) return APP_ROLE_ADMIN
+  if (normalized.includes('admin')) return APP_ROLE_ADMIN
+  if (normalized.includes('brand')) return APP_ROLE_BRAND
+  if (normalized.includes('internal')) return APP_ROLE_INTERNAL
+  return APP_ROLE_ADMIN
+}
+
+const canRoleConnectAccounts = (role) => normalizeAppRole(role) === APP_ROLE_ADMIN
+const canRoleCreateCampaigns = (role) => normalizeAppRole(role) === APP_ROLE_ADMIN
+const canRoleCreateOrganizations = (role) => normalizeAppRole(role) === APP_ROLE_ADMIN
+const canRoleManageCampaignDetails = (role) => normalizeAppRole(role) === APP_ROLE_ADMIN
+const canRoleManageCampaignMembers = (role) => normalizeAppRole(role) === APP_ROLE_ADMIN
+const canRoleTagCampaignContent = (role) => {
+  const normalized = normalizeAppRole(role)
+  return normalized === APP_ROLE_ADMIN || normalized === APP_ROLE_INTERNAL
+}
+const canRoleGenerateReports = canRoleTagCampaignContent
+
 const CAMPAIGN_MEMBER_ROLE_ADMIN = 'admin'
-const CAMPAIGN_MEMBER_ROLE_MEMBER = 'member'
+const CAMPAIGN_MEMBER_ROLE_INTERNAL = 'internal'
+const CAMPAIGN_MEMBER_ROLE_BRAND_VIEWER = 'brand viewer'
 const CAMPAIGN_SELECTED_POST_IDS_KEY = 'selected_post_ids'
 const CAMPAIGN_SELECTED_CHANNEL_ID_KEY = 'selected_channel_id'
+const ORGANIZATION_MEMBER_ROLE_ADMIN = 'admin'
+const ORGANIZATION_MEMBER_ROLE_INTERNAL = 'internal'
+const ORGANIZATION_MEMBER_ROLE_BRAND_VIEWER = 'brand viewer'
 
 const normalizeCampaignMemberRole = (value) => {
-  if (typeof value !== 'string') return CAMPAIGN_MEMBER_ROLE_MEMBER
-  return value.trim().toLowerCase() === CAMPAIGN_MEMBER_ROLE_ADMIN
-    ? CAMPAIGN_MEMBER_ROLE_ADMIN
-    : CAMPAIGN_MEMBER_ROLE_MEMBER
+  if (typeof value !== 'string') return CAMPAIGN_MEMBER_ROLE_INTERNAL
+  const normalized = value.trim().toLowerCase()
+  if (!normalized) return CAMPAIGN_MEMBER_ROLE_INTERNAL
+  if (normalized === CAMPAIGN_MEMBER_ROLE_ADMIN || normalized.includes('admin')) {
+    return CAMPAIGN_MEMBER_ROLE_ADMIN
+  }
+  if (
+    normalized === CAMPAIGN_MEMBER_ROLE_BRAND_VIEWER ||
+    normalized === 'brand-viewer' ||
+    normalized === 'brand_viewer' ||
+    normalized === 'brand' ||
+    normalized.includes('brand')
+  ) {
+    return CAMPAIGN_MEMBER_ROLE_BRAND_VIEWER
+  }
+  if (normalized === CAMPAIGN_MEMBER_ROLE_INTERNAL || normalized.includes('internal')) {
+    return CAMPAIGN_MEMBER_ROLE_INTERNAL
+  }
+  // Backward compatibility with legacy campaign role values.
+  if (normalized === 'member') return CAMPAIGN_MEMBER_ROLE_INTERNAL
+  return CAMPAIGN_MEMBER_ROLE_INTERNAL
 }
 
 const normalizeCampaignMemberRoles = (value, creatorId = '') => {
@@ -950,7 +1300,7 @@ const normalizeCampaignMemberRoles = (value, creatorId = '') => {
 
   if (Array.isArray(value)) {
     for (const userId of normalizeUuidArray(value)) {
-      roleByUserId[userId] = CAMPAIGN_MEMBER_ROLE_MEMBER
+      roleByUserId[userId] = CAMPAIGN_MEMBER_ROLE_INTERNAL
     }
   } else if (value && typeof value === 'object') {
     for (const [rawUserId, rawRole] of Object.entries(value)) {
@@ -961,7 +1311,7 @@ const normalizeCampaignMemberRoles = (value, creatorId = '') => {
   } else if (typeof value === 'string') {
     const trimmed = value.trim()
     if (isUuid(trimmed)) {
-      roleByUserId[trimmed] = CAMPAIGN_MEMBER_ROLE_MEMBER
+      roleByUserId[trimmed] = CAMPAIGN_MEMBER_ROLE_INTERNAL
     } else if (
       (trimmed.startsWith('[') && trimmed.endsWith(']')) ||
       (trimmed.startsWith('{') && trimmed.endsWith('}'))
@@ -972,7 +1322,7 @@ const normalizeCampaignMemberRoles = (value, creatorId = '') => {
         Object.assign(roleByUserId, parsedRoles)
       } catch {
         for (const userId of normalizeUuidArray(trimmed)) {
-          roleByUserId[userId] = CAMPAIGN_MEMBER_ROLE_MEMBER
+          roleByUserId[userId] = CAMPAIGN_MEMBER_ROLE_INTERNAL
         }
       }
     }
@@ -985,13 +1335,103 @@ const normalizeCampaignMemberRoles = (value, creatorId = '') => {
   return roleByUserId
 }
 
+const normalizeOrganizationMemberRole = (value) => {
+  if (typeof value !== 'string') return ORGANIZATION_MEMBER_ROLE_INTERNAL
+  const normalized = value.trim().toLowerCase()
+  if (!normalized) return ORGANIZATION_MEMBER_ROLE_INTERNAL
+  if (normalized === ORGANIZATION_MEMBER_ROLE_ADMIN || normalized.includes('admin')) {
+    return ORGANIZATION_MEMBER_ROLE_ADMIN
+  }
+  if (
+    normalized === ORGANIZATION_MEMBER_ROLE_BRAND_VIEWER ||
+    normalized === 'brand-viewer' ||
+    normalized === 'brand_viewer' ||
+    normalized === 'brand' ||
+    normalized.includes('brand')
+  ) {
+    return ORGANIZATION_MEMBER_ROLE_BRAND_VIEWER
+  }
+  return ORGANIZATION_MEMBER_ROLE_INTERNAL
+}
+
+const normalizeOrganizationMemberRoles = (value, creatorId = '') => {
+  const roleByUserId = {}
+
+  if (Array.isArray(value)) {
+    for (const userId of normalizeUuidArray(value)) {
+      roleByUserId[userId] = ORGANIZATION_MEMBER_ROLE_INTERNAL
+    }
+  } else if (value && typeof value === 'object') {
+    for (const [rawUserId, rawRole] of Object.entries(value)) {
+      const userId = typeof rawUserId === 'string' ? rawUserId.trim() : ''
+      if (!isUuid(userId)) continue
+      roleByUserId[userId] = normalizeOrganizationMemberRole(rawRole)
+    }
+  } else if (typeof value === 'string') {
+    const trimmed = value.trim()
+    if (isUuid(trimmed)) {
+      roleByUserId[trimmed] = ORGANIZATION_MEMBER_ROLE_INTERNAL
+    } else if (
+      (trimmed.startsWith('[') && trimmed.endsWith(']')) ||
+      (trimmed.startsWith('{') && trimmed.endsWith('}'))
+    ) {
+      try {
+        const parsed = JSON.parse(trimmed)
+        const parsedRoles = normalizeOrganizationMemberRoles(parsed)
+        Object.assign(roleByUserId, parsedRoles)
+      } catch {
+        for (const userId of normalizeUuidArray(trimmed)) {
+          roleByUserId[userId] = ORGANIZATION_MEMBER_ROLE_INTERNAL
+        }
+      }
+    }
+  }
+
+  if (isUuid(creatorId)) {
+    roleByUserId[creatorId] = ORGANIZATION_MEMBER_ROLE_ADMIN
+  }
+
+  return roleByUserId
+}
+
 const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
 const normalizeEmail = (value) => {
-  if (typeof value !== 'string') return ''
-  const trimmed = value.trim().toLowerCase()
+  const trimmed = normalizeTextInput(value, { maxLength: 320 }).replace(/\s+/g, '').toLowerCase()
   if (!trimmed || !emailRegex.test(trimmed)) return ''
   return trimmed
+}
+
+const sanitizeFileName = (value, fallback = 'export') => {
+  if (typeof value !== 'string') return fallback
+  const trimmed = value.trim()
+  if (!trimmed) return fallback
+  const sanitized = trimmed.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 180)
+  return sanitized || fallback
+}
+
+const normalizeExportPreviewType = (value) => {
+  if (value === 'pdf') return 'pdf'
+  if (value === 'csv') return 'csv'
+  return ''
+}
+
+const pruneExpiredExportPreviews = () => {
+  const now = Date.now()
+  for (const [id, entry] of exportPreviewStore.entries()) {
+    if (!entry || now - entry.createdAt > EXPORT_PREVIEW_TTL_MS) {
+      exportPreviewStore.delete(id)
+    }
+  }
+
+  if (exportPreviewStore.size <= EXPORT_PREVIEW_MAX_ENTRIES) return
+  const ordered = [...exportPreviewStore.values()].sort((left, right) => left.createdAt - right.createdAt)
+  const overflow = exportPreviewStore.size - EXPORT_PREVIEW_MAX_ENTRIES
+  for (let index = 0; index < overflow; index += 1) {
+    const entry = ordered[index]
+    if (!entry) continue
+    exportPreviewStore.delete(entry.id)
+  }
 }
 
 const normalizeEmailInputArray = (value) => {
@@ -1001,9 +1441,9 @@ const normalizeEmailInputArray = (value) => {
   const seenValid = new Set()
   const seenInvalid = new Set()
 
-  for (const entry of value) {
+  for (const entry of value.slice(0, MAX_INPUT_LIST_SIZE)) {
     if (typeof entry !== 'string') continue
-    const trimmed = entry.trim().toLowerCase()
+    const trimmed = normalizeTextInput(entry, { maxLength: 320 }).replace(/\s+/g, '').toLowerCase()
     if (!trimmed) continue
     if (emailRegex.test(trimmed)) {
       if (!seenValid.has(trimmed)) {
@@ -1027,7 +1467,7 @@ const normalizeMemberInviteInputArray = (value) => {
   const invalidEmails = []
   const seenInvalid = new Set()
 
-  for (const entry of value) {
+  for (const entry of value.slice(0, MAX_INPUT_LIST_SIZE)) {
     const rawEmail =
       typeof entry === 'string'
         ? entry
@@ -1037,10 +1477,12 @@ const normalizeMemberInviteInputArray = (value) => {
     const rawRole =
       entry && typeof entry === 'object' && !Array.isArray(entry)
         ? normalizeCampaignMemberRole(entry.role)
-        : CAMPAIGN_MEMBER_ROLE_MEMBER
+        : CAMPAIGN_MEMBER_ROLE_INTERNAL
     const normalizedEmail = normalizeEmail(rawEmail)
     if (!normalizedEmail) {
-      const trimmedRawEmail = typeof rawEmail === 'string' ? rawEmail.trim().toLowerCase() : ''
+      const trimmedRawEmail = normalizeTextInput(rawEmail, { maxLength: 320 })
+        .replace(/\s+/g, '')
+        .toLowerCase()
       if (trimmedRawEmail && !seenInvalid.has(trimmedRawEmail)) {
         seenInvalid.add(trimmedRawEmail)
         invalidEmails.push(trimmedRawEmail)
@@ -1049,7 +1491,60 @@ const normalizeMemberInviteInputArray = (value) => {
     }
 
     const existingRole = roleByEmail.get(normalizedEmail)
-    if (!existingRole || rawRole === CAMPAIGN_MEMBER_ROLE_ADMIN) {
+    if (!existingRole || campaignMemberRolePriority(rawRole) > campaignMemberRolePriority(existingRole)) {
+      roleByEmail.set(normalizedEmail, rawRole)
+    }
+  }
+
+  const validMembers = [...roleByEmail.entries()].map(([email, role]) => ({ email, role }))
+  return { validMembers, invalidEmails }
+}
+
+const campaignMemberRolePriority = (role) => {
+  const normalized = normalizeCampaignMemberRole(role)
+  if (normalized === CAMPAIGN_MEMBER_ROLE_ADMIN) return 3
+  if (normalized === CAMPAIGN_MEMBER_ROLE_INTERNAL) return 2
+  return 1
+}
+
+const organizationMemberRolePriority = (role) => {
+  const normalized = normalizeOrganizationMemberRole(role)
+  if (normalized === ORGANIZATION_MEMBER_ROLE_ADMIN) return 3
+  if (normalized === ORGANIZATION_MEMBER_ROLE_INTERNAL) return 2
+  return 1
+}
+
+const normalizeOrganizationMemberInviteInputArray = (value) => {
+  if (!Array.isArray(value)) return { validMembers: [], invalidEmails: [] }
+  const roleByEmail = new Map()
+  const invalidEmails = []
+  const seenInvalid = new Set()
+
+  for (const entry of value.slice(0, MAX_INPUT_LIST_SIZE)) {
+    const rawEmail =
+      typeof entry === 'string'
+        ? entry
+        : entry && typeof entry === 'object' && typeof entry.email === 'string'
+          ? entry.email
+          : ''
+    const rawRole =
+      entry && typeof entry === 'object' && !Array.isArray(entry)
+        ? normalizeOrganizationMemberRole(entry.role)
+        : ORGANIZATION_MEMBER_ROLE_INTERNAL
+    const normalizedEmail = normalizeEmail(rawEmail)
+    if (!normalizedEmail) {
+      const trimmedRawEmail = normalizeTextInput(rawEmail, { maxLength: 320 })
+        .replace(/\s+/g, '')
+        .toLowerCase()
+      if (trimmedRawEmail && !seenInvalid.has(trimmedRawEmail)) {
+        seenInvalid.add(trimmedRawEmail)
+        invalidEmails.push(trimmedRawEmail)
+      }
+      continue
+    }
+
+    const existingRole = roleByEmail.get(normalizedEmail)
+    if (!existingRole || organizationMemberRolePriority(rawRole) > organizationMemberRolePriority(existingRole)) {
       roleByEmail.set(normalizedEmail, rawRole)
     }
   }
@@ -1064,10 +1559,10 @@ const normalizeMemberRoleUpdateInputArray = (value) => {
   const invalidUserIds = []
   const seenInvalid = new Set()
 
-  for (const entry of value) {
+  for (const entry of value.slice(0, MAX_INPUT_LIST_SIZE)) {
     const rawUserId =
       entry && typeof entry === 'object' && typeof entry.userId === 'string' ? entry.userId : ''
-    const userId = typeof rawUserId === 'string' ? rawUserId.trim() : ''
+    const userId = normalizeTextInput(rawUserId, { maxLength: 80 })
     if (!isUuid(userId)) {
       if (userId && !seenInvalid.has(userId)) {
         seenInvalid.add(userId)
@@ -1079,11 +1574,37 @@ const normalizeMemberRoleUpdateInputArray = (value) => {
     const role =
       entry && typeof entry === 'object' && !Array.isArray(entry)
         ? normalizeCampaignMemberRole(entry.role)
-        : CAMPAIGN_MEMBER_ROLE_MEMBER
-    const existingRole = roleByUserId.get(userId)
-    if (!existingRole || role === CAMPAIGN_MEMBER_ROLE_ADMIN) {
-      roleByUserId.set(userId, role)
+        : CAMPAIGN_MEMBER_ROLE_INTERNAL
+    roleByUserId.set(userId, role)
+  }
+
+  const validUpdates = [...roleByUserId.entries()].map(([userId, role]) => ({ userId, role }))
+  return { validUpdates, invalidUserIds }
+}
+
+const normalizeOrganizationMemberRoleUpdateInputArray = (value) => {
+  if (!Array.isArray(value)) return { validUpdates: [], invalidUserIds: [] }
+  const roleByUserId = new Map()
+  const invalidUserIds = []
+  const seenInvalid = new Set()
+
+  for (const entry of value.slice(0, MAX_INPUT_LIST_SIZE)) {
+    const rawUserId =
+      entry && typeof entry === 'object' && typeof entry.userId === 'string' ? entry.userId : ''
+    const userId = normalizeTextInput(rawUserId, { maxLength: 80 })
+    if (!isUuid(userId)) {
+      if (userId && !seenInvalid.has(userId)) {
+        seenInvalid.add(userId)
+        invalidUserIds.push(userId)
+      }
+      continue
     }
+
+    const role =
+      entry && typeof entry === 'object' && !Array.isArray(entry)
+        ? normalizeOrganizationMemberRole(entry.role)
+        : ORGANIZATION_MEMBER_ROLE_INTERNAL
+    roleByUserId.set(userId, role)
   }
 
   const validUpdates = [...roleByUserId.entries()].map(([userId, role]) => ({ userId, role }))
@@ -1092,11 +1613,32 @@ const normalizeMemberRoleUpdateInputArray = (value) => {
 
 const resolveCampaignUserRole = (row, userId) => {
   if (!isUuid(userId)) return ''
-  const creator = typeof row?.creator === 'string' ? row.creator.trim() : ''
+  const creator = normalizeTextInput(row?.creator, { maxLength: 80 })
   if (creator && creator === userId) return CAMPAIGN_MEMBER_ROLE_ADMIN
   const allowedMemberRoles = normalizeCampaignMemberRoles(row?.allowed_members, creator)
   return allowedMemberRoles[userId] || ''
 }
+
+const canUserManageCampaignDetails = (row, userId) => {
+  return resolveCampaignUserRole(row, userId) === CAMPAIGN_MEMBER_ROLE_ADMIN
+}
+
+const canUserManageCampaignPosts = (row, userId) => {
+  const role = resolveCampaignUserRole(row, userId)
+  return role === CAMPAIGN_MEMBER_ROLE_ADMIN || role === CAMPAIGN_MEMBER_ROLE_INTERNAL
+}
+
+const canUserDeleteCampaign = (row, userId) =>
+  resolveCampaignUserRole(row, userId) === CAMPAIGN_MEMBER_ROLE_ADMIN
+
+const canUserManageCampaignMembers = (row, userId) => {
+  return resolveCampaignUserRole(row, userId) === CAMPAIGN_MEMBER_ROLE_ADMIN
+}
+
+const canUserViewCampaignMembers = (row, userId) => Boolean(resolveCampaignUserRole(row, userId))
+
+const canUserChangeCampaignMemberRoles = (row, userId) =>
+  resolveCampaignUserRole(row, userId) === CAMPAIGN_MEMBER_ROLE_ADMIN
 
 const hasIntersection = (left, right) => {
   if (!left.length || !right.length) return false
@@ -1105,8 +1647,7 @@ const hasIntersection = (left, right) => {
 }
 
 const normalizeDateOnly = (value) => {
-  if (typeof value !== 'string') return ''
-  const trimmed = value.trim()
+  const trimmed = normalizeTextInput(value, { maxLength: 32 })
   if (!/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return ''
   const parsed = Date.parse(`${trimmed}T00:00:00Z`)
   if (Number.isNaN(parsed)) return ''
@@ -1169,7 +1710,134 @@ const readCampaignSelectedPostIds = (distributionSources) =>
 
 const readCampaignSelectedChannelId = (distributionSources) => {
   const rawValue = distributionSources?.[CAMPAIGN_SELECTED_CHANNEL_ID_KEY]
-  return typeof rawValue === 'string' ? rawValue.trim() : ''
+  return normalizeTextInput(rawValue, { maxLength: 300 })
+}
+
+const normalizeCampaignManagedPostObject = (value, fallbackId = '') => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const source = value
+  const id = normalizeTextInput(source.id, { maxLength: 300 }) || normalizeTextInput(fallbackId, { maxLength: 300 })
+  if (!id) return null
+  const title = normalizeTextInput(source.title, { maxLength: 300 }) || 'Untitled post'
+  const platform = normalizeTextInput(source.platform, { maxLength: 64 }) || 'YouTube'
+  const channelId = normalizeTextInput(source.channelId, { maxLength: 300 })
+  const channelName = normalizeTextInput(source.channelName, { maxLength: 180 })
+  const views = Math.max(0, toNumber(source.views))
+  const engagementRate = Math.max(0, toNumber(source.engagementRate))
+  return {
+    id,
+    title,
+    platform,
+    channelId,
+    channelName,
+    views,
+    engagementRate,
+  }
+}
+
+const readCampaignPostsByChannel = (value) => {
+  const parseArray = (input) => {
+    if (Array.isArray(input)) return input
+    if (typeof input === 'string') {
+      const trimmed = input.trim()
+      if (!trimmed) return []
+      try {
+        const parsed = JSON.parse(trimmed)
+        return Array.isArray(parsed) ? parsed : []
+      } catch {
+        return []
+      }
+    }
+    return []
+  }
+
+  const groups = parseArray(value)
+    .map((entry) => {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null
+      const channelId = normalizeTextInput(entry.channelId, { maxLength: 300 })
+      const channelName = normalizeTextInput(entry.channelName, { maxLength: 180 })
+      const platform = normalizeTextInput(entry.platform, { maxLength: 64 }) || 'YouTube'
+      const postsSource = entry.posts
+      if (!postsSource || typeof postsSource !== 'object' || Array.isArray(postsSource)) return null
+      const posts = {}
+      Object.entries(postsSource).forEach(([postId, postValue]) => {
+        const normalizedPost = normalizeCampaignManagedPostObject(postValue, postId)
+        if (!normalizedPost) return
+        posts[normalizedPost.id] = normalizedPost
+      })
+      if (!Object.keys(posts).length) return null
+      return {
+        channelId,
+        channelName,
+        platform,
+        posts,
+      }
+    })
+    .filter(Boolean)
+
+  return groups
+}
+
+const flattenCampaignManagedPosts = (groups) => {
+  if (!Array.isArray(groups)) return []
+  const byId = new Map()
+  groups.forEach((group) => {
+    if (!group || typeof group !== 'object' || Array.isArray(group)) return
+    const channelId = normalizeTextInput(group.channelId, { maxLength: 300 })
+    const channelName = normalizeTextInput(group.channelName, { maxLength: 180 })
+    const platform = normalizeTextInput(group.platform, { maxLength: 64 }) || 'YouTube'
+    const postsSource = group.posts
+    if (!postsSource || typeof postsSource !== 'object' || Array.isArray(postsSource)) return
+    Object.entries(postsSource).forEach(([postId, postValue]) => {
+      const normalizedPost = normalizeCampaignManagedPostObject(
+        {
+          ...(postValue && typeof postValue === 'object' && !Array.isArray(postValue) ? postValue : {}),
+          channelId,
+          channelName,
+          platform,
+        },
+        postId,
+      )
+      if (!normalizedPost) return
+      byId.set(normalizedPost.id, normalizedPost)
+    })
+  })
+  return [...byId.values()]
+}
+
+const normalizeCampaignManagedPostsInput = (value) => {
+  if (!Array.isArray(value)) return []
+  const byId = new Map()
+  value.slice(0, MAX_INPUT_LIST_SIZE).forEach((entry) => {
+    const normalizedPost = normalizeCampaignManagedPostObject(entry)
+    if (!normalizedPost) return
+    byId.set(normalizedPost.id, normalizedPost)
+  })
+  return [...byId.values()]
+}
+
+const buildCampaignPostsByChannel = (posts) => {
+  if (!Array.isArray(posts) || !posts.length) return []
+  const channelKeyToGroup = new Map()
+  posts.forEach((post) => {
+    const normalizedPost = normalizeCampaignManagedPostObject(post)
+    if (!normalizedPost) return
+    const channelId = normalizedPost.channelId || ''
+    const channelName = normalizedPost.channelName || ''
+    const platform = normalizedPost.platform || 'YouTube'
+    const groupKey = `${channelId}::${channelName}::${platform}`
+    if (!channelKeyToGroup.has(groupKey)) {
+      channelKeyToGroup.set(groupKey, {
+        channelId,
+        channelName,
+        platform,
+        posts: {},
+      })
+    }
+    const group = channelKeyToGroup.get(groupKey)
+    group.posts[normalizedPost.id] = normalizedPost
+  })
+  return [...channelKeyToGroup.values()].filter((group) => Object.keys(group.posts).length)
 }
 
 const formatCampaignDistributionValueForWrite = (distributionObject, currentRawValue) => {
@@ -1219,12 +1887,9 @@ const fetchSupabaseAuthUser = async (accessToken) => {
 }
 
 const fetchUsersRowById = async (userId) => {
-  const selectFields = encodeURIComponent('id,organization_ids,email')
+  const selectFields = encodeURIComponent('*')
   const userFilter = encodeURIComponent(userId)
-  const endpoints = [
-    `${supabaseUrl}/rest/v1/%22Users%22?select=${selectFields}&id=eq.${userFilter}&limit=1`,
-    `${supabaseUrl}/rest/v1/Users?select=${selectFields}&id=eq.${userFilter}&limit=1`,
-  ]
+  const endpoints = buildSupabaseTableEndpoints('Users', `select=${selectFields}&id=eq.${userFilter}&limit=1`)
 
   let lastResult = { ok: false, status: 500, payload: null, row: null }
   for (const endpoint of endpoints) {
@@ -1253,10 +1918,10 @@ const fetchUsersRowById = async (userId) => {
 const fetchUsersRowByEmail = async (email) => {
   const selectFields = encodeURIComponent('id,email')
   const emailFilter = encodeURIComponent(email)
-  const endpoints = [
-    `${supabaseUrl}/rest/v1/%22Users%22?select=${selectFields}&email=ilike.${emailFilter}&limit=1`,
-    `${supabaseUrl}/rest/v1/Users?select=${selectFields}&email=ilike.${emailFilter}&limit=1`,
-  ]
+  const endpoints = buildSupabaseTableEndpoints(
+    'Users',
+    `select=${selectFields}&email=ilike.${emailFilter}&limit=1`,
+  )
 
   let lastResult = { ok: false, status: 500, payload: null, row: null }
   for (const endpoint of endpoints) {
@@ -1295,10 +1960,7 @@ const fetchUsersRowsByIds = async (userIds) => {
 
   const selectFields = encodeURIComponent('id,email')
   const idFilter = encodeURIComponent(`in.(${normalizedIds.join(',')})`)
-  const endpoints = [
-    `${supabaseUrl}/rest/v1/%22Users%22?select=${selectFields}&id=${idFilter}`,
-    `${supabaseUrl}/rest/v1/Users?select=${selectFields}&id=${idFilter}`,
-  ]
+  const endpoints = buildSupabaseTableEndpoints('Users', `select=${selectFields}&id=${idFilter}`)
 
   let lastResult = { ok: false, status: 500, payload: null, rows: [] }
   for (const endpoint of endpoints) {
@@ -1349,7 +2011,7 @@ const resolveMemberIdsFromEmails = async (members) => {
       continue
     }
 
-    const userId = typeof lookupResult.row?.id === 'string' ? lookupResult.row.id.trim() : ''
+    const userId = normalizeTextInput(lookupResult.row?.id, { maxLength: 80 })
     if (!isUuid(userId)) {
       resolution.failed.push({
         action: 'add',
@@ -1361,7 +2023,10 @@ const resolveMemberIdsFromEmails = async (members) => {
     }
 
     const existingMember = resolvedMembersByUserId.get(userId)
-    if (!existingMember || role === CAMPAIGN_MEMBER_ROLE_ADMIN) {
+    if (
+      !existingMember ||
+      campaignMemberRolePriority(role) > campaignMemberRolePriority(existingMember.role)
+    ) {
       resolvedMembersByUserId.set(userId, {
         userId,
         role,
@@ -1373,6 +2038,61 @@ const resolveMemberIdsFromEmails = async (members) => {
       email,
       userId,
       message: `User added to campaign members as ${role}.`,
+    })
+  }
+
+  return {
+    resolvedMembers: [...resolvedMembersByUserId.values()],
+    resolution,
+  }
+}
+
+const resolveOrganizationMemberIdsFromEmails = async (members) => {
+  const resolution = buildEmptyMemberResolution()
+  const resolvedMembersByUserId = new Map()
+
+  for (const member of members) {
+    const email = normalizeEmail(member?.email)
+    const role = normalizeOrganizationMemberRole(member?.role)
+    if (!email) continue
+    const lookupResult = await fetchUsersRowByEmail(email)
+    if (!lookupResult.ok) {
+      resolution.failed.push({
+        action: 'add',
+        email,
+        error: 'lookup_failed',
+        message: 'Unable to verify this email right now.',
+      })
+      continue
+    }
+
+    const userId = normalizeTextInput(lookupResult.row?.id, { maxLength: 80 })
+    if (!isUuid(userId)) {
+      resolution.failed.push({
+        action: 'add',
+        email,
+        error: 'user_not_found',
+        message: 'No matching user was found for this email.',
+      })
+      continue
+    }
+
+    const existingMember = resolvedMembersByUserId.get(userId)
+    if (
+      !existingMember ||
+      organizationMemberRolePriority(role) > organizationMemberRolePriority(existingMember.role)
+    ) {
+      resolvedMembersByUserId.set(userId, {
+        userId,
+        role,
+      })
+    }
+
+    resolution.added.push({
+      action: 'add',
+      email,
+      userId,
+      message: `User added to organization members as ${role}.`,
     })
   }
 
@@ -1467,23 +2187,22 @@ const resolveAuthedUserContext = async (req, res) => {
   }
 
   const organizationIds = normalizeUuidArray(appUserResult.row?.organization_ids)
+  const appRole = APP_ROLE_ADMIN
   return {
     ok: true,
     userId,
     email,
     accessToken: resolvedAccessToken,
     organizationIds,
+    appRole,
   }
 }
 
 const listCampaignRows = async () => {
   const selectFields = encodeURIComponent(
-    'id,created_at,campaign_name,brand,start_date,end_date,views_delivered,guaranteed,engagement_rate,allowed_orgs,distribution_sources,allowed_members,creator',
+    'id,created_at,campaign_name,brand,start_date,end_date,views_delivered,guaranteed,engagement_rate,allowed_orgs,distribution_sources,posts,allowed_members,creator',
   )
-  const endpoints = [
-    `${supabaseUrl}/rest/v1/%22Campaigns%22?select=${selectFields}&order=created_at.desc`,
-    `${supabaseUrl}/rest/v1/Campaigns?select=${selectFields}&order=created_at.desc`,
-  ]
+  const endpoints = buildSupabaseTableEndpoints('Campaigns', `select=${selectFields}&order=created_at.desc`)
 
   let lastResult = { ok: false, status: 500, payload: null, rows: [] }
   for (const endpoint of endpoints) {
@@ -1510,10 +2229,7 @@ const listCampaignRows = async () => {
 }
 
 const insertCampaignRow = async (row) => {
-  const endpoints = [
-    `${supabaseUrl}/rest/v1/%22Campaigns%22`,
-    `${supabaseUrl}/rest/v1/Campaigns`,
-  ]
+  const endpoints = buildSupabaseTableEndpoints('Campaigns')
 
   let lastResult = { ok: false, status: 500, payload: null, row: null }
   for (const endpoint of endpoints) {
@@ -1545,13 +2261,13 @@ const insertCampaignRow = async (row) => {
 
 const fetchCampaignRowById = async (campaignId) => {
   const selectFields = encodeURIComponent(
-    'id,created_at,campaign_name,brand,start_date,end_date,views_delivered,guaranteed,engagement_rate,allowed_members,allowed_orgs,distribution_sources,creator',
+    'id,created_at,campaign_name,brand,start_date,end_date,views_delivered,guaranteed,engagement_rate,allowed_members,allowed_orgs,distribution_sources,posts,creator',
   )
   const campaignFilter = encodeURIComponent(campaignId)
-  const endpoints = [
-    `${supabaseUrl}/rest/v1/%22Campaigns%22?select=${selectFields}&id=eq.${campaignFilter}&limit=1`,
-    `${supabaseUrl}/rest/v1/Campaigns?select=${selectFields}&id=eq.${campaignFilter}&limit=1`,
-  ]
+  const endpoints = buildSupabaseTableEndpoints(
+    'Campaigns',
+    `select=${selectFields}&id=eq.${campaignFilter}&limit=1`,
+  )
 
   let lastResult = { ok: false, status: 500, payload: null, row: null }
   for (const endpoint of endpoints) {
@@ -1580,10 +2296,7 @@ const fetchCampaignRowById = async (campaignId) => {
 const updateCampaignAllowedMembers = async (campaignId, allowedMemberRoles, creatorId = '') => {
   const normalizedAllowedMembers = normalizeCampaignMemberRoles(allowedMemberRoles, creatorId)
   const campaignFilter = encodeURIComponent(campaignId)
-  const endpoints = [
-    `${supabaseUrl}/rest/v1/%22Campaigns%22?id=eq.${campaignFilter}`,
-    `${supabaseUrl}/rest/v1/Campaigns?id=eq.${campaignFilter}`,
-  ]
+  const endpoints = buildSupabaseTableEndpoints('Campaigns', `id=eq.${campaignFilter}`)
 
   let lastResult = { ok: false, status: 500, payload: null, row: null }
   for (const endpoint of endpoints) {
@@ -1617,10 +2330,7 @@ const updateCampaignAllowedMembers = async (campaignId, allowedMemberRoles, crea
 
 const updateCampaignPostsAndMetrics = async (campaignId, input) => {
   const campaignFilter = encodeURIComponent(campaignId)
-  const endpoints = [
-    `${supabaseUrl}/rest/v1/%22Campaigns%22?id=eq.${campaignFilter}`,
-    `${supabaseUrl}/rest/v1/Campaigns?id=eq.${campaignFilter}`,
-  ]
+  const endpoints = buildSupabaseTableEndpoints('Campaigns', `id=eq.${campaignFilter}`)
 
   let lastResult = { ok: false, status: 500, payload: null, row: null }
   for (const endpoint of endpoints) {
@@ -1636,6 +2346,7 @@ const updateCampaignPostsAndMetrics = async (campaignId, input) => {
         views_delivered: Math.max(0, toNumber(input.viewsDelivered)),
         engagement_rate: Math.max(0, toNumber(input.engagementRate)),
         distribution_sources: input.distributionSources,
+        posts: Array.isArray(input.posts) ? input.posts : [],
       }),
     })
     const payload = await response.json().catch(() => null)
@@ -1656,10 +2367,7 @@ const updateCampaignPostsAndMetrics = async (campaignId, input) => {
 
 const updateCampaignDetails = async (campaignId, input) => {
   const campaignFilter = encodeURIComponent(campaignId)
-  const endpoints = [
-    `${supabaseUrl}/rest/v1/%22Campaigns%22?id=eq.${campaignFilter}`,
-    `${supabaseUrl}/rest/v1/Campaigns?id=eq.${campaignFilter}`,
-  ]
+  const endpoints = buildSupabaseTableEndpoints('Campaigns', `id=eq.${campaignFilter}`)
 
   let lastResult = { ok: false, status: 500, payload: null, row: null }
   for (const endpoint of endpoints) {
@@ -1698,10 +2406,7 @@ const updateCampaignDetails = async (campaignId, input) => {
 
 const deleteCampaignRowById = async (campaignId) => {
   const campaignFilter = encodeURIComponent(campaignId)
-  const endpoints = [
-    `${supabaseUrl}/rest/v1/%22Campaigns%22?id=eq.${campaignFilter}`,
-    `${supabaseUrl}/rest/v1/Campaigns?id=eq.${campaignFilter}`,
-  ]
+  const endpoints = buildSupabaseTableEndpoints('Campaigns', `id=eq.${campaignFilter}`)
 
   let lastResult = { ok: false, status: 500, payload: null }
   for (const endpoint of endpoints) {
@@ -1734,7 +2439,7 @@ const canUserSeeCampaign = (row, userId, organizationIds) => {
 }
 
 const buildCampaignMemberIds = (row) => {
-  const creatorId = typeof row?.creator === 'string' ? row.creator.trim() : ''
+  const creatorId = normalizeTextInput(row?.creator, { maxLength: 80 })
   const allowedMemberRoles = normalizeCampaignMemberRoles(row?.allowed_members, creatorId)
   return Object.keys(allowedMemberRoles)
 }
@@ -1744,8 +2449,8 @@ const mapCampaignMembersForClient = (memberIds, userRows, memberRoles = {}) => {
     (Array.isArray(userRows) ? userRows : [])
       .filter((row) => row && typeof row === 'object')
       .map((row) => {
-        const id = typeof row.id === 'string' ? row.id.trim() : ''
-        const email = typeof row.email === 'string' ? row.email.trim() : ''
+        const id = normalizeTextInput(row.id, { maxLength: 80 })
+        const email = normalizeEmail(row.email)
         return [id, email]
       }),
   )
@@ -1758,18 +2463,25 @@ const mapCampaignMembersForClient = (memberIds, userRows, memberRoles = {}) => {
 }
 
 const mapCampaignForClient = (row) => {
-  const creator = typeof row?.creator === 'string' ? row.creator : ''
-  const id = typeof row?.id === 'string' ? row.id : ''
-  const createdAt = typeof row?.created_at === 'string' ? row.created_at : ''
-  const campaignName = typeof row?.campaign_name === 'string' ? row.campaign_name.trim() : ''
-  const brand = typeof row?.brand === 'string' ? row.brand.trim() : ''
-  const startDate = typeof row?.start_date === 'string' ? row.start_date : ''
-  const endDate = typeof row?.end_date === 'string' ? row.end_date : ''
+  const creator = normalizeTextInput(row?.creator, { maxLength: 80 })
+  const id = normalizeTextInput(row?.id, { maxLength: 80 })
+  const createdAt = normalizeTextInput(row?.created_at, { maxLength: 64 })
+  const campaignName = normalizeTextInput(row?.campaign_name, { maxLength: 140 })
+  const brand = normalizeTextInput(row?.brand, { maxLength: 140 })
+  const startDate = normalizeDateOnly(row?.start_date)
+  const endDate = normalizeDateOnly(row?.end_date)
   const viewsDelivered = toNumber(row?.views_delivered)
   const guaranteed = toNumber(row?.guaranteed)
   const engagementRate = toNumber(row?.engagement_rate)
   const distributionSources = readCampaignDistributionObject(row?.distribution_sources)
-  const selectedPostIds = readCampaignSelectedPostIds(distributionSources)
+  const posts = readCampaignPostsByChannel(row?.posts)
+  const selectedPostIdsFromPosts = flattenCampaignManagedPosts(posts).map((post) => post.id)
+  const selectedPostIdsFromDistribution = readCampaignSelectedPostIds(distributionSources)
+  const selectedPostIds = uniqueValues(
+    [...selectedPostIdsFromPosts, ...selectedPostIdsFromDistribution]
+      .map((value) => normalizeTextInput(value, { maxLength: 300 }))
+      .filter((value) => value.length > 0),
+  )
   const selectedChannelId = readCampaignSelectedChannelId(distributionSources)
   const allowedMemberRoles = normalizeCampaignMemberRoles(row?.allowed_members, creator)
 
@@ -1786,10 +2498,281 @@ const mapCampaignForClient = (row) => {
     allowedOrgs: normalizeUuidArray(row?.allowed_orgs),
     distributionSources,
     selectedPostIds,
-    selectedChannelId,
+    selectedChannelId: selectedChannelId || posts[0]?.channelId || '',
+    posts,
     allowedMembers: Object.keys(allowedMemberRoles),
     allowedMemberRoles,
     creator,
+  }
+}
+
+const listOrganizationRows = async () => {
+  const selectFields = encodeURIComponent('id,created_at,name,campaigns,members,creator')
+  const endpoints = buildSupabaseTableEndpoints(
+    'Organizations',
+    `select=${selectFields}&order=created_at.desc`,
+  )
+
+  let lastResult = { ok: false, status: 500, payload: null, rows: [] }
+  for (const endpoint of endpoints) {
+    const response = await fetch(endpoint, {
+      headers: {
+        apikey: supabaseSecretKey,
+        Authorization: `Bearer ${supabaseSecretKey}`,
+      },
+    })
+    const payload = await response.json().catch(() => null)
+    const rows = Array.isArray(payload) ? payload : []
+    const result = {
+      ok: response.ok,
+      status: response.status,
+      payload,
+      rows,
+    }
+    if (result.ok) return result
+    lastResult = result
+    if (response.status !== 404) break
+  }
+
+  return lastResult
+}
+
+const insertOrganizationRow = async (row) => {
+  const endpoints = buildSupabaseTableEndpoints('Organizations')
+
+  let lastResult = { ok: false, status: 500, payload: null, row: null }
+  for (const endpoint of endpoints) {
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        apikey: supabaseSecretKey,
+        Authorization: `Bearer ${supabaseSecretKey}`,
+        'Content-Type': 'application/json',
+        Prefer: 'return=representation',
+      },
+      body: JSON.stringify([row]),
+    })
+    const payload = await response.json().catch(() => null)
+    const returnedRow = Array.isArray(payload) ? payload[0] ?? null : null
+    const result = {
+      ok: response.ok,
+      status: response.status,
+      payload,
+      row: returnedRow,
+    }
+    if (result.ok) return result
+    lastResult = result
+    if (response.status !== 404) break
+  }
+
+  return lastResult
+}
+
+const fetchOrganizationRowById = async (organizationId) => {
+  const selectFields = encodeURIComponent('id,created_at,name,campaigns,members,creator')
+  const organizationFilter = encodeURIComponent(organizationId)
+  const endpoints = buildSupabaseTableEndpoints(
+    'Organizations',
+    `select=${selectFields}&id=eq.${organizationFilter}&limit=1`,
+  )
+
+  let lastResult = { ok: false, status: 500, payload: null, row: null }
+  for (const endpoint of endpoints) {
+    const response = await fetch(endpoint, {
+      headers: {
+        apikey: supabaseSecretKey,
+        Authorization: `Bearer ${supabaseSecretKey}`,
+      },
+    })
+    const payload = await response.json().catch(() => null)
+    const row = Array.isArray(payload) ? payload[0] ?? null : null
+    const result = {
+      ok: response.ok,
+      status: response.status,
+      payload,
+      row,
+    }
+    if (result.ok) return result
+    lastResult = result
+    if (response.status !== 404) break
+  }
+
+  return lastResult
+}
+
+const updateOrganizationMembers = async (organizationId, memberRoles, creatorId = '') => {
+  const normalizedMemberRoles = normalizeOrganizationMemberRoles(memberRoles, creatorId)
+  const organizationFilter = encodeURIComponent(organizationId)
+  const endpoints = buildSupabaseTableEndpoints('Organizations', `id=eq.${organizationFilter}`)
+
+  let lastResult = { ok: false, status: 500, payload: null, row: null }
+  for (const endpoint of endpoints) {
+    const response = await fetch(endpoint, {
+      method: 'PATCH',
+      headers: {
+        apikey: supabaseSecretKey,
+        Authorization: `Bearer ${supabaseSecretKey}`,
+        'Content-Type': 'application/json',
+        Prefer: 'return=representation',
+      },
+      body: JSON.stringify({
+        members: normalizedMemberRoles,
+      }),
+    })
+    const payload = await response.json().catch(() => null)
+    const row = Array.isArray(payload) ? payload[0] ?? null : null
+    const result = {
+      ok: response.ok,
+      status: response.status,
+      payload,
+      row,
+    }
+    if (result.ok) return result
+    lastResult = result
+    if (response.status !== 404) break
+  }
+
+  return lastResult
+}
+
+const updateOrganizationDetails = async (organizationId, input) => {
+  const organizationFilter = encodeURIComponent(organizationId)
+  const endpoints = buildSupabaseTableEndpoints('Organizations', `id=eq.${organizationFilter}`)
+
+  let lastResult = { ok: false, status: 500, payload: null, row: null }
+  for (const endpoint of endpoints) {
+    const response = await fetch(endpoint, {
+      method: 'PATCH',
+      headers: {
+        apikey: supabaseSecretKey,
+        Authorization: `Bearer ${supabaseSecretKey}`,
+        'Content-Type': 'application/json',
+        Prefer: 'return=representation',
+      },
+      body: JSON.stringify({
+        name: input.name,
+        campaigns: input.campaigns,
+      }),
+    })
+    const payload = await response.json().catch(() => null)
+    const row = Array.isArray(payload) ? payload[0] ?? null : null
+    const result = {
+      ok: response.ok,
+      status: response.status,
+      payload,
+      row,
+    }
+    if (result.ok) return result
+    lastResult = result
+    if (response.status !== 404) break
+  }
+
+  return lastResult
+}
+
+const deleteOrganizationRowById = async (organizationId) => {
+  const organizationFilter = encodeURIComponent(organizationId)
+  const endpoints = buildSupabaseTableEndpoints('Organizations', `id=eq.${organizationFilter}`)
+
+  let lastResult = { ok: false, status: 500, payload: null }
+  for (const endpoint of endpoints) {
+    const response = await fetch(endpoint, {
+      method: 'DELETE',
+      headers: {
+        apikey: supabaseSecretKey,
+        Authorization: `Bearer ${supabaseSecretKey}`,
+      },
+    })
+    const payload = await response.json().catch(() => null)
+    const result = {
+      ok: response.ok,
+      status: response.status,
+      payload,
+    }
+    if (result.ok) return result
+    lastResult = result
+    if (response.status !== 404) break
+  }
+
+  return lastResult
+}
+
+const mapOrganizationMembersForClient = (memberRoles, userRows = []) => {
+  const emailByUserId = new Map(
+    (Array.isArray(userRows) ? userRows : [])
+      .filter((row) => row && typeof row === 'object')
+      .map((row) => {
+        const id = normalizeTextInput(row.id, { maxLength: 80 })
+        const email = normalizeEmail(row.email)
+        return [id, email]
+      }),
+  )
+
+  return Object.entries(memberRoles).map(([userId, role]) => ({
+    id: userId,
+    email: emailByUserId.get(userId) || '',
+    role: normalizeOrganizationMemberRole(role),
+  }))
+}
+
+const resolveOrganizationUserRole = (row, userId) => {
+  if (!isUuid(userId)) return ''
+  const creator = normalizeTextInput(row?.creator, { maxLength: 80 })
+  if (creator && creator === userId) return ORGANIZATION_MEMBER_ROLE_ADMIN
+  const memberRoles = normalizeOrganizationMemberRoles(row?.members, creator)
+  const role = memberRoles[userId]
+  return role ? normalizeOrganizationMemberRole(role) : ''
+}
+
+const canUserManageOrganizationDetails = (row, userId) =>
+  [ORGANIZATION_MEMBER_ROLE_ADMIN, ORGANIZATION_MEMBER_ROLE_INTERNAL].includes(
+    resolveOrganizationUserRole(row, userId),
+  )
+
+const canUserDeleteOrganization = (row, userId) =>
+  resolveOrganizationUserRole(row, userId) === ORGANIZATION_MEMBER_ROLE_ADMIN
+
+const canUserManageOrganizationMembers = (row, userId) => {
+  return resolveOrganizationUserRole(row, userId) === ORGANIZATION_MEMBER_ROLE_ADMIN
+}
+
+const canUserChangeOrganizationMemberRoles = (row, userId) =>
+  resolveOrganizationUserRole(row, userId) === ORGANIZATION_MEMBER_ROLE_ADMIN
+
+const canUserSeeOrganization = (row, userId) => {
+  if (!isUuid(userId)) return false
+  const creator = normalizeTextInput(row?.creator, { maxLength: 80 })
+  if (creator && creator === userId) return true
+  const memberRoles = normalizeOrganizationMemberRoles(row?.members, creator)
+  return Boolean(memberRoles[userId])
+}
+
+const mapOrganizationForClient = (row, userRows = []) => {
+  const id = normalizeTextInput(row?.id, { maxLength: 80 })
+  const createdAt = normalizeTextInput(row?.created_at, { maxLength: 64 })
+  const name = normalizeTextInput(row?.name, { maxLength: 140 })
+  const creator = normalizeTextInput(row?.creator, { maxLength: 80 })
+  const members = normalizeOrganizationMemberRoles(row?.members, creator)
+  const campaigns = normalizeUuidArray(row?.campaigns)
+  const userEmailById = new Map(
+    (Array.isArray(userRows) ? userRows : [])
+      .filter((entry) => entry && typeof entry === 'object')
+      .map((entry) => {
+        const userId = normalizeTextInput(entry.id, { maxLength: 80 })
+        const email = normalizeEmail(entry.email)
+        return [userId, email]
+      }),
+  )
+  const creatorEmail = userEmailById.get(creator) || ''
+  return {
+    id,
+    createdAt,
+    name,
+    campaigns,
+    members,
+    memberDirectory: mapOrganizationMembersForClient(members, userRows),
+    creator,
+    creatorEmail,
   }
 }
 
@@ -1815,7 +2798,7 @@ app.get('/api/campaigns', async (req, res) => {
   }
 
   const visibleCampaigns = campaignsResult.rows
-    .filter((row) => canUserSeeCampaign(row, viewer.userId, viewer.organizationIds))
+    .filter((row) => canUserSeeCampaign(row, viewer.userId, viewer.organizationIds, viewer.appRole))
     .map((row) => mapCampaignForClient(row))
   res.json({ campaigns: visibleCampaigns, viewerUserId: viewer.userId })
 })
@@ -1830,15 +2813,20 @@ app.post('/api/campaigns', async (req, res) => {
     })
     return
   }
+  if (!canRoleCreateCampaigns(viewer.appRole)) {
+    res.status(403).json({
+      error: 'forbidden',
+      message: 'Only admins can create campaigns.',
+    })
+    return
+  }
 
   const payload = req.body ?? {}
-  const campaignName = typeof payload.campaignName === 'string' ? payload.campaignName.trim() : ''
-  const payloadBrand = typeof payload.brand === 'string' ? payload.brand.trim() : ''
+  const campaignName = normalizeTextInput(payload.campaignName, { maxLength: 140 })
+  const payloadBrand = normalizeTextInput(payload.brand, { maxLength: 140 })
   const fallbackDistributionBrand =
     payload?.distributionSources && typeof payload.distributionSources === 'object'
-      ? typeof payload.distributionSources.brand === 'string'
-        ? payload.distributionSources.brand.trim()
-        : ''
+      ? normalizeTextInput(payload.distributionSources.brand, { maxLength: 140 })
       : ''
   const brand = payloadBrand || fallbackDistributionBrand
   const startDate = normalizeDateOnly(payload.startDate)
@@ -1859,7 +2847,7 @@ app.post('/api/campaigns', async (req, res) => {
   }
   for (const email of requestedEmailInputs.validEmails) {
     if (!requestedMemberInviteByEmail.has(email)) {
-      requestedMemberInviteByEmail.set(email, CAMPAIGN_MEMBER_ROLE_MEMBER)
+      requestedMemberInviteByEmail.set(email, CAMPAIGN_MEMBER_ROLE_INTERNAL)
     }
   }
   const creatorEmail = normalizeEmail(viewer.email)
@@ -1916,7 +2904,7 @@ app.post('/api/campaigns', async (req, res) => {
   }
   for (const userId of requestedMembers) {
     if (!requestedRoleByUserId[userId]) {
-      requestedRoleByUserId[userId] = CAMPAIGN_MEMBER_ROLE_MEMBER
+      requestedRoleByUserId[userId] = CAMPAIGN_MEMBER_ROLE_INTERNAL
     }
   }
   for (const email of requestedRoleEmailInputs.invalidEmails) {
@@ -1944,7 +2932,10 @@ app.post('/api/campaigns', async (req, res) => {
   }
   for (const member of resolvedEmailMembers) {
     const existingRole = requestedRoleByUserId[member.userId]
-    if (!existingRole || member.role === CAMPAIGN_MEMBER_ROLE_ADMIN) {
+    if (
+      !existingRole ||
+      campaignMemberRolePriority(member.role) > campaignMemberRolePriority(existingRole)
+    ) {
       requestedRoleByUserId[member.userId] = member.role
     }
   }
@@ -1961,6 +2952,7 @@ app.post('/api/campaigns', async (req, res) => {
     engagement_rate: engagementRate,
     allowed_orgs: allowedOrgs.length ? allowedOrgs : null,
     distribution_sources: distributionSources,
+    posts: [],
     allowed_members: allowedMemberRoles,
     creator: viewer.userId,
   }
@@ -2008,8 +3000,8 @@ app.post('/api/campaigns/:campaignId/details', async (req, res) => {
   }
 
   const payload = req.body ?? {}
-  const campaignName = typeof payload.campaignName === 'string' ? payload.campaignName.trim() : ''
-  const brand = typeof payload.brand === 'string' ? payload.brand.trim() : ''
+  const campaignName = normalizeTextInput(payload.campaignName, { maxLength: 140 })
+  const brand = normalizeTextInput(payload.brand, { maxLength: 140 })
   const startDate = normalizeDateOnly(payload.startDate)
   const endDate = normalizeDateOnly(payload.endDate)
   const guaranteed = toNumber(payload.guaranteed)
@@ -2063,7 +3055,7 @@ app.post('/api/campaigns/:campaignId/details', async (req, res) => {
     return
   }
 
-  if (!canUserSeeCampaign(campaignRow, viewer.userId, viewer.organizationIds)) {
+  if (!canUserSeeCampaign(campaignRow, viewer.userId, viewer.organizationIds, viewer.appRole)) {
     res.status(403).json({
       error: 'forbidden',
       message: 'You do not have access to this campaign.',
@@ -2071,8 +3063,7 @@ app.post('/api/campaigns/:campaignId/details', async (req, res) => {
     return
   }
 
-  const viewerRole = resolveCampaignUserRole(campaignRow, viewer.userId)
-  if (viewerRole !== CAMPAIGN_MEMBER_ROLE_ADMIN) {
+  if (!canUserManageCampaignDetails(campaignRow, viewer.userId)) {
     res.status(403).json({
       error: 'forbidden',
       message: 'Only campaign admins can edit campaign details.',
@@ -2123,11 +3114,11 @@ app.delete('/api/campaigns/:campaignId', async (req, res) => {
     return
   }
 
-  const campaignId = typeof req.params?.campaignId === 'string' ? req.params.campaignId.trim() : ''
-  if (!campaignId) {
+  const campaignId = normalizeTextInput(req.params?.campaignId, { maxLength: 80 })
+  if (!isUuid(campaignId)) {
     res.status(400).json({
       error: 'invalid_campaign_id',
-      message: 'Campaign id is required.',
+      message: 'Campaign id must be a valid UUID.',
     })
     return
   }
@@ -2151,11 +3142,18 @@ app.delete('/api/campaigns/:campaignId', async (req, res) => {
     return
   }
 
-  const creatorId = typeof campaignRow.creator === 'string' ? campaignRow.creator.trim() : ''
-  if (!creatorId || creatorId !== viewer.userId) {
+  if (!canUserSeeCampaign(campaignRow, viewer.userId, viewer.organizationIds, viewer.appRole)) {
     res.status(403).json({
       error: 'forbidden',
-      message: 'Only the campaign creator can delete this campaign.',
+      message: 'You do not have access to this campaign.',
+    })
+    return
+  }
+
+  if (!canUserDeleteCampaign(campaignRow, viewer.userId)) {
+    res.status(403).json({
+      error: 'forbidden',
+      message: 'Only campaign admins can delete campaigns.',
     })
     return
   }
@@ -2212,10 +3210,17 @@ app.get('/api/campaigns/:campaignId/members', async (req, res) => {
     return
   }
 
-  if (!canUserSeeCampaign(campaignRow, viewer.userId, viewer.organizationIds)) {
+  if (!canUserSeeCampaign(campaignRow, viewer.userId, viewer.organizationIds, viewer.appRole)) {
     res.status(403).json({
       error: 'forbidden',
       message: 'You do not have access to this campaign.',
+    })
+    return
+  }
+  if (!canUserViewCampaignMembers(campaignRow, viewer.userId)) {
+    res.status(403).json({
+      error: 'forbidden',
+      message: 'Only invited campaign members can view campaign members.',
     })
     return
   }
@@ -2230,10 +3235,9 @@ app.get('/api/campaigns/:campaignId/members', async (req, res) => {
     })
   }
 
-  const creator = typeof campaignRow.creator === 'string' ? campaignRow.creator.trim() : ''
+  const creator = normalizeTextInput(campaignRow.creator, { maxLength: 80 })
   const allowedMemberRoles = normalizeCampaignMemberRoles(campaignRow?.allowed_members, creator)
-  const campaignName =
-    typeof campaignRow.campaign_name === 'string' ? campaignRow.campaign_name.trim() : ''
+  const campaignName = normalizeTextInput(campaignRow.campaign_name, { maxLength: 140 })
 
   res.json({
     campaignId,
@@ -2278,7 +3282,7 @@ app.post('/api/campaigns/:campaignId/members', async (req, res) => {
   }
   for (const email of addEmailInputs.validEmails) {
     if (!addMemberByEmail.has(email)) {
-      addMemberByEmail.set(email, CAMPAIGN_MEMBER_ROLE_MEMBER)
+      addMemberByEmail.set(email, CAMPAIGN_MEMBER_ROLE_INTERNAL)
     }
   }
   const addMembers = [...addMemberByEmail.entries()].map(([email, role]) => ({ email, role }))
@@ -2322,7 +3326,7 @@ app.post('/api/campaigns/:campaignId/members', async (req, res) => {
     return
   }
 
-  if (!canUserSeeCampaign(campaignRow, viewer.userId, viewer.organizationIds)) {
+  if (!canUserSeeCampaign(campaignRow, viewer.userId, viewer.organizationIds, viewer.appRole)) {
     res.status(403).json({
       error: 'forbidden',
       message: 'You do not have access to this campaign.',
@@ -2330,31 +3334,20 @@ app.post('/api/campaigns/:campaignId/members', async (req, res) => {
     return
   }
 
-  const creatorId = typeof campaignRow.creator === 'string' ? campaignRow.creator.trim() : ''
-  const viewerRole = resolveCampaignUserRole(campaignRow, viewer.userId)
-  const isCreator = Boolean(creatorId && viewer.userId === creatorId)
-  if (viewerRole !== CAMPAIGN_MEMBER_ROLE_ADMIN) {
+  if (!canUserManageCampaignMembers(campaignRow, viewer.userId)) {
     res.status(403).json({
       error: 'forbidden',
       message: 'Only campaign admins can manage members.',
     })
     return
   }
+  const creatorId = normalizeTextInput(campaignRow.creator, { maxLength: 80 })
+  const canChangeRoles = canUserChangeCampaignMemberRoles(campaignRow, viewer.userId)
   const hasRoleMutations = Boolean(roleUpdates.length || roleUpdateInputs.invalidUserIds.length)
-  if (!isCreator && hasRoleMutations) {
+  if (!canChangeRoles && hasRoleMutations) {
     res.status(403).json({
       error: 'forbidden',
-      message: 'Only the campaign creator can change member roles.',
-    })
-    return
-  }
-  const hasRemoveMutations = Boolean(
-    removeEmails.length || removeEmailInputs.invalidEmails.length || removeUserIds.length,
-  )
-  if (!isCreator && hasRemoveMutations) {
-    res.status(403).json({
-      error: 'forbidden',
-      message: 'Only the campaign creator can remove members.',
+      message: 'Only campaign admins can change member roles.',
     })
     return
   }
@@ -2400,9 +3393,9 @@ app.post('/api/campaigns/:campaignId/members', async (req, res) => {
 
   for (const member of addMembers) {
     const email = member.email
-    const role = isCreator
+    const role = canChangeRoles
       ? normalizeCampaignMemberRole(member.role)
-      : CAMPAIGN_MEMBER_ROLE_MEMBER
+      : CAMPAIGN_MEMBER_ROLE_INTERNAL
     const lookupResult = await fetchUsersRowByEmail(email)
     if (!lookupResult.ok) {
       updateResult.failed.push({
@@ -2414,7 +3407,7 @@ app.post('/api/campaigns/:campaignId/members', async (req, res) => {
       continue
     }
 
-    const userId = typeof lookupResult.row?.id === 'string' ? lookupResult.row.id.trim() : ''
+    const userId = normalizeTextInput(lookupResult.row?.id, { maxLength: 80 })
     if (!isUuid(userId)) {
       updateResult.failed.push({
         action: 'add',
@@ -2426,16 +3419,17 @@ app.post('/api/campaigns/:campaignId/members', async (req, res) => {
     }
 
     if (memberRoleByUserId[userId]) {
+      const currentRole = normalizeCampaignMemberRole(memberRoleByUserId[userId])
       if (
-        role === CAMPAIGN_MEMBER_ROLE_ADMIN &&
-        normalizeCampaignMemberRole(memberRoleByUserId[userId]) !== CAMPAIGN_MEMBER_ROLE_ADMIN
+        canChangeRoles &&
+        campaignMemberRolePriority(role) > campaignMemberRolePriority(currentRole)
       ) {
-        memberRoleByUserId[userId] = CAMPAIGN_MEMBER_ROLE_ADMIN
+        memberRoleByUserId[userId] = role
         updateResult.added.push({
           action: 'add',
           email,
           userId,
-          message: 'User role updated to admin.',
+          message: `User role updated to ${role}.`,
         })
         continue
       }
@@ -2470,7 +3464,7 @@ app.post('/api/campaigns/:campaignId/members', async (req, res) => {
       continue
     }
 
-    const userId = typeof lookupResult.row?.id === 'string' ? lookupResult.row.id.trim() : ''
+    const userId = normalizeTextInput(lookupResult.row?.id, { maxLength: 80 })
     if (!isUuid(userId)) {
       updateResult.failed.push({
         action: 'remove',
@@ -2518,8 +3512,8 @@ app.post('/api/campaigns/:campaignId/members', async (req, res) => {
     : { ok: true, rows: [] }
   const userLabelById = new Map(
     (usersLookup.ok && Array.isArray(usersLookup.rows) ? usersLookup.rows : []).map((row) => {
-      const id = typeof row?.id === 'string' ? row.id.trim() : ''
-      const email = typeof row?.email === 'string' ? row.email.trim() : ''
+      const id = normalizeTextInput(row?.id, { maxLength: 80 })
+      const email = normalizeEmail(row?.email)
       return [id, email]
     }),
   )
@@ -2657,8 +3651,8 @@ app.post('/api/campaigns/:campaignId/posts', async (req, res) => {
 
   const payload = req.body ?? {}
   const selectedPostIds = normalizeStringArray(payload.selectedPostIds)
-  const selectedChannelId =
-    typeof payload.selectedChannelId === 'string' ? payload.selectedChannelId.trim() : ''
+  const selectedPostsInput = normalizeCampaignManagedPostsInput(payload.selectedPosts)
+  const selectedChannelId = normalizeTextInput(payload.selectedChannelId, { maxLength: 300 })
   const viewsDelivered = toNumber(payload.viewsDelivered)
   const engagementRate = toNumber(payload.engagementRate)
 
@@ -2689,24 +3683,34 @@ app.post('/api/campaigns/:campaignId/posts', async (req, res) => {
     return
   }
 
-  if (!canUserSeeCampaign(campaignRow, viewer.userId, viewer.organizationIds)) {
+  if (!canUserSeeCampaign(campaignRow, viewer.userId, viewer.organizationIds, viewer.appRole)) {
     res.status(403).json({
       error: 'forbidden',
       message: 'You do not have access to this campaign.',
     })
     return
   }
-
-  const viewerRole = resolveCampaignUserRole(campaignRow, viewer.userId)
-  if (viewerRole !== CAMPAIGN_MEMBER_ROLE_ADMIN) {
+  if (!canUserManageCampaignPosts(campaignRow, viewer.userId)) {
     res.status(403).json({
       error: 'forbidden',
-      message: 'Only campaign admins can manage campaign posts.',
+      message: 'Only campaign admins and internal members can tag campaign content.',
     })
     return
   }
 
   const rawDistributionSources = campaignRow?.distribution_sources
+  const existingPostsByChannel = readCampaignPostsByChannel(campaignRow?.posts)
+  const existingPosts = flattenCampaignManagedPosts(existingPostsByChannel)
+  const existingPostById = new Map(existingPosts.map((post) => [post.id, post]))
+  const incomingPostById = new Map(selectedPostsInput.map((post) => [post.id, post]))
+  const nextSelectedPosts = selectedPostIds
+    .map((postId) => incomingPostById.get(postId) || existingPostById.get(postId))
+    .filter(Boolean)
+    .map((post) => ({
+      ...post,
+      channelId: post.channelId || selectedChannelId || '',
+    }))
+  const postsByChannelForWrite = buildCampaignPostsByChannel(nextSelectedPosts)
   const nextDistributionSources = readCampaignDistributionObject(rawDistributionSources)
   nextDistributionSources[CAMPAIGN_SELECTED_POST_IDS_KEY] = selectedPostIds
   if (selectedChannelId) {
@@ -2723,6 +3727,7 @@ app.post('/api/campaigns/:campaignId/posts', async (req, res) => {
     viewsDelivered,
     engagementRate,
     distributionSources: distributionSourcesForWrite,
+    posts: postsByChannelForWrite,
   })
   if (!updateResult.ok) {
     console.error('Campaign post update failed:', {
@@ -2744,10 +3749,797 @@ app.post('/api/campaigns/:campaignId/posts', async (req, res) => {
     views_delivered: viewsDelivered,
     engagement_rate: engagementRate,
     distribution_sources: distributionSourcesForWrite,
+    posts: postsByChannelForWrite,
   }
 
   res.json({
     campaign: mapCampaignForClient(updatedCampaignRow),
+  })
+})
+
+app.get('/api/organizations', async (req, res) => {
+  const viewer = await resolveAuthedUserContext(req, res)
+  if (!viewer.ok) {
+    res.status(viewer.status || 500).json({
+      error: viewer.error || 'organizations_fetch_failed',
+      message: viewer.message || 'Unable to load organizations.',
+      details: viewer.details ?? null,
+    })
+    return
+  }
+
+  const organizationsResult = await listOrganizationRows()
+  if (!organizationsResult.ok) {
+    res.status(organizationsResult.status || 500).json({
+      error: 'organizations_fetch_failed',
+      message: 'Unable to load organizations from Supabase.',
+      details: organizationsResult.payload,
+    })
+    return
+  }
+
+  const visibleOrganizations = organizationsResult.rows
+    .filter((row) => canUserSeeOrganization(row, viewer.userId, viewer.appRole))
+  const memberIds = uniqueValues(
+    visibleOrganizations.flatMap((row) => {
+      const creator = normalizeTextInput(row?.creator, { maxLength: 80 })
+      return Object.keys(normalizeOrganizationMemberRoles(row?.members, creator))
+    }),
+  )
+  const usersResult = await fetchUsersRowsByIds(memberIds)
+  if (!usersResult.ok) {
+    console.error('Unable to resolve organization member emails:', {
+      status: usersResult.status,
+      details: usersResult.payload,
+    })
+  }
+
+  res.json({
+    organizations: visibleOrganizations.map((row) =>
+      mapOrganizationForClient(row, usersResult.ok ? usersResult.rows : []),
+    ),
+    viewerUserId: viewer.userId,
+  })
+})
+
+app.post('/api/organizations', async (req, res) => {
+  const viewer = await resolveAuthedUserContext(req, res)
+  if (!viewer.ok) {
+    res.status(viewer.status || 500).json({
+      error: viewer.error || 'organization_create_failed',
+      message: viewer.message || 'Unable to create organization.',
+      details: viewer.details ?? null,
+    })
+    return
+  }
+  if (!canRoleCreateOrganizations(viewer.appRole)) {
+    res.status(403).json({
+      error: 'forbidden',
+      message: 'Only admins can create organizations.',
+    })
+    return
+  }
+
+  const payload = req.body ?? {}
+  const name = normalizeTextInput(payload.name, { maxLength: 140 })
+  const campaigns = normalizeUuidArray(payload.campaigns)
+  const requestedRoleByUserId = normalizeOrganizationMemberRoles(payload.members)
+  const requestedRoleEmailInputs = normalizeOrganizationMemberInviteInputArray(payload.memberAccess)
+  const requestedEmailInputs = normalizeEmailInputArray(payload.memberEmails)
+  const requestedMemberInviteByEmail = new Map()
+  for (const member of requestedRoleEmailInputs.validMembers) {
+    requestedMemberInviteByEmail.set(member.email, member.role)
+  }
+  for (const email of requestedEmailInputs.validEmails) {
+    if (!requestedMemberInviteByEmail.has(email)) {
+      requestedMemberInviteByEmail.set(email, ORGANIZATION_MEMBER_ROLE_INTERNAL)
+    }
+  }
+  let memberResolution = buildEmptyMemberResolution()
+  const creatorEmail = normalizeEmail(viewer.email)
+  const creatorEmailWasRequested = Boolean(
+    creatorEmail && requestedMemberInviteByEmail.has(creatorEmail),
+  )
+  if (creatorEmailWasRequested) {
+    requestedMemberInviteByEmail.delete(creatorEmail)
+    memberResolution.failed.push({
+      action: 'add',
+      email: creatorEmail,
+      error: 'cannot_add_creator',
+      message: 'Organization creator is added automatically and cannot be invited as a member.',
+    })
+  }
+  for (const email of requestedRoleEmailInputs.invalidEmails) {
+    memberResolution.failed.push({
+      action: 'add',
+      email,
+      error: 'invalid_email',
+      message: 'Email format is invalid.',
+    })
+  }
+  for (const email of requestedEmailInputs.invalidEmails) {
+    memberResolution.failed.push({
+      action: 'add',
+      email,
+      error: 'invalid_email',
+      message: 'Email format is invalid.',
+    })
+  }
+
+  if (!name) {
+    res.status(400).json({
+      error: 'invalid_organization_payload',
+      message: 'name is required.',
+    })
+    return
+  }
+
+  const campaignsResult = await listCampaignRows()
+  if (!campaignsResult.ok) {
+    res.status(campaignsResult.status || 500).json({
+      error: 'organization_create_failed',
+      message: 'Unable to verify campaign access.',
+      details: campaignsResult.payload,
+    })
+    return
+  }
+
+  const visibleCampaignIds = new Set(
+    campaignsResult.rows
+      .filter((row) => canUserSeeCampaign(row, viewer.userId, viewer.organizationIds, viewer.appRole))
+      .map((row) => normalizeTextInput(row?.id, { maxLength: 80 }))
+      .filter((id) => isUuid(id)),
+  )
+  const invalidCampaignIds = campaigns.filter((campaignId) => !visibleCampaignIds.has(campaignId))
+  if (invalidCampaignIds.length) {
+    res.status(400).json({
+      error: 'invalid_organization_payload',
+      message: 'One or more selected campaigns are invalid or inaccessible.',
+      invalidCampaignIds,
+    })
+    return
+  }
+
+  const requestedMemberInvites = [...requestedMemberInviteByEmail.entries()].map(([email, role]) => ({
+    email,
+    role,
+  }))
+  if (requestedMemberInvites.length) {
+    const resolvedMembers = await resolveOrganizationMemberIdsFromEmails(requestedMemberInvites)
+    memberResolution.added.push(...resolvedMembers.resolution.added)
+    memberResolution.removed.push(...resolvedMembers.resolution.removed)
+    memberResolution.failed.push(...resolvedMembers.resolution.failed)
+    for (const member of resolvedMembers.resolvedMembers) {
+      const existingRole = requestedRoleByUserId[member.userId]
+      if (
+        !existingRole ||
+        organizationMemberRolePriority(member.role) > organizationMemberRolePriority(existingRole)
+      ) {
+        requestedRoleByUserId[member.userId] = member.role
+      }
+    }
+  }
+
+  const requestedMembers = normalizeOrganizationMemberRoles(requestedRoleByUserId, viewer.userId)
+  const memberIds = Object.keys(requestedMembers)
+  const usersResult = await fetchUsersRowsByIds(memberIds)
+  if (!usersResult.ok) {
+    res.status(usersResult.status || 500).json({
+      error: 'organization_create_failed',
+      message: 'Unable to validate organization members.',
+      details: usersResult.payload,
+    })
+    return
+  }
+
+  const foundUserIds = new Set(
+    usersResult.rows
+      .map((row) => normalizeTextInput(row?.id, { maxLength: 80 }))
+      .filter((id) => isUuid(id)),
+  )
+  const invalidMemberIds = memberIds.filter((memberId) => !foundUserIds.has(memberId))
+  if (invalidMemberIds.length) {
+    res.status(400).json({
+      error: 'invalid_organization_payload',
+      message: 'One or more member UUIDs do not exist in Users.',
+      invalidMemberIds,
+    })
+    return
+  }
+
+  const rowToInsert = {
+    id: crypto.randomUUID(),
+    name,
+    campaigns: campaigns.length ? campaigns : null,
+    members: requestedMembers,
+    creator: viewer.userId,
+  }
+
+  const inserted = await insertOrganizationRow(rowToInsert)
+  if (!inserted.ok) {
+    console.error('Failed to insert organization:', {
+      status: inserted.status,
+      details: inserted.payload,
+    })
+    res.status(inserted.status || 500).json({
+      error: 'organization_create_failed',
+      message: 'Unable to create organization in Supabase.',
+      details: inserted.payload,
+    })
+    return
+  }
+
+  const createdRow = inserted.row ?? rowToInsert
+  res.status(201).json({
+    organization: mapOrganizationForClient(createdRow, usersResult.rows),
+    viewerUserId: viewer.userId,
+    memberResolution,
+  })
+})
+
+app.post('/api/organizations/:organizationId/details', async (req, res) => {
+  const viewer = await resolveAuthedUserContext(req, res)
+  if (!viewer.ok) {
+    res.status(viewer.status || 500).json({
+      error: viewer.error || 'organization_update_failed',
+      message: viewer.message || 'Unable to update organization.',
+      details: viewer.details ?? null,
+    })
+    return
+  }
+
+  const organizationId =
+    typeof req.params?.organizationId === 'string' ? req.params.organizationId.trim() : ''
+  if (!isUuid(organizationId)) {
+    res.status(400).json({
+      error: 'invalid_organization_id',
+      message: 'Organization id must be a valid UUID.',
+    })
+    return
+  }
+
+  const organizationResult = await fetchOrganizationRowById(organizationId)
+  if (!organizationResult.ok) {
+    res.status(organizationResult.status || 500).json({
+      error: 'organization_update_failed',
+      message: 'Unable to load organization from Supabase.',
+      details: organizationResult.payload,
+    })
+    return
+  }
+  const organizationRow = organizationResult.row
+  if (!organizationRow) {
+    res.status(404).json({
+      error: 'organization_not_found',
+      message: 'Organization was not found.',
+    })
+    return
+  }
+  if (!canUserSeeOrganization(organizationRow, viewer.userId, viewer.appRole)) {
+    res.status(403).json({
+      error: 'forbidden',
+      message: 'You do not have access to this organization.',
+    })
+    return
+  }
+  if (!canUserManageOrganizationDetails(organizationRow, viewer.userId)) {
+    res.status(403).json({
+      error: 'forbidden',
+      message: 'Only organization admin and internal members can edit organizations.',
+    })
+    return
+  }
+
+  const payload = req.body ?? {}
+  const hasName = Object.prototype.hasOwnProperty.call(payload, 'name')
+  const hasCampaigns = Object.prototype.hasOwnProperty.call(payload, 'campaigns')
+  if (!hasName && !hasCampaigns) {
+    res.status(400).json({
+      error: 'invalid_organization_payload',
+      message: 'Provide at least one field to update: name or campaigns.',
+    })
+    return
+  }
+
+  const nextName = hasName
+    ? normalizeTextInput(payload.name, { maxLength: 140 })
+    : normalizeTextInput(organizationRow?.name, { maxLength: 140 })
+  const currentName = normalizeTextInput(organizationRow?.name, { maxLength: 140 })
+  const viewerOrganizationRole = resolveOrganizationUserRole(organizationRow, viewer.userId)
+  if (
+    viewerOrganizationRole === ORGANIZATION_MEMBER_ROLE_INTERNAL &&
+    hasName &&
+    nextName !== currentName
+  ) {
+    res.status(403).json({
+      error: 'forbidden',
+      message: 'Internal organization members can update campaign access but cannot edit organization name.',
+    })
+    return
+  }
+  if (!nextName) {
+    res.status(400).json({
+      error: 'invalid_organization_payload',
+      message: 'Organization name is required.',
+    })
+    return
+  }
+
+  const nextCampaigns = hasCampaigns
+    ? normalizeUuidArray(payload.campaigns)
+    : normalizeUuidArray(organizationRow?.campaigns)
+
+  const campaignsResult = await listCampaignRows()
+  if (!campaignsResult.ok) {
+    res.status(campaignsResult.status || 500).json({
+      error: 'organization_update_failed',
+      message: 'Unable to verify campaign access.',
+      details: campaignsResult.payload,
+    })
+    return
+  }
+
+  const visibleCampaignIds = new Set(
+    campaignsResult.rows
+      .filter((row) => canUserSeeCampaign(row, viewer.userId, viewer.organizationIds, viewer.appRole))
+      .map((row) => normalizeTextInput(row?.id, { maxLength: 80 }))
+      .filter((id) => isUuid(id)),
+  )
+  const invalidCampaignIds = nextCampaigns.filter((campaignId) => !visibleCampaignIds.has(campaignId))
+  if (invalidCampaignIds.length) {
+    res.status(400).json({
+      error: 'invalid_organization_payload',
+      message: 'One or more selected campaigns are invalid or inaccessible.',
+      invalidCampaignIds,
+    })
+    return
+  }
+
+  const updateResult = await updateOrganizationDetails(organizationId, {
+    name: nextName,
+    campaigns: nextCampaigns.length ? nextCampaigns : null,
+  })
+  if (!updateResult.ok) {
+    console.error('Failed to update organization details:', {
+      organizationId,
+      viewerUserId: viewer.userId,
+      status: updateResult.status,
+      details: updateResult.payload,
+    })
+    res.status(updateResult.status || 500).json({
+      error: 'organization_update_failed',
+      message: 'Unable to update organization details in Supabase.',
+      details: updateResult.payload,
+    })
+    return
+  }
+
+  const updatedOrganizationRow = updateResult.row ?? {
+    ...organizationRow,
+    name: nextName,
+    campaigns: nextCampaigns.length ? nextCampaigns : null,
+  }
+  const creatorId = normalizeTextInput(updatedOrganizationRow?.creator, { maxLength: 80 })
+  const memberIds = Object.keys(normalizeOrganizationMemberRoles(updatedOrganizationRow?.members, creatorId))
+  const usersResult = await fetchUsersRowsByIds(memberIds)
+  if (!usersResult.ok) {
+    console.error('Unable to load organization member emails after details update:', {
+      organizationId,
+      status: usersResult.status,
+      details: usersResult.payload,
+    })
+  }
+
+  res.json({
+    organization: mapOrganizationForClient(updatedOrganizationRow, usersResult.ok ? usersResult.rows : []),
+  })
+})
+
+app.delete('/api/organizations/:organizationId', async (req, res) => {
+  const viewer = await resolveAuthedUserContext(req, res)
+  if (!viewer.ok) {
+    res.status(viewer.status || 500).json({
+      error: viewer.error || 'organization_delete_failed',
+      message: viewer.message || 'Unable to delete organization.',
+      details: viewer.details ?? null,
+    })
+    return
+  }
+
+  const organizationId =
+    typeof req.params?.organizationId === 'string' ? req.params.organizationId.trim() : ''
+  if (!isUuid(organizationId)) {
+    res.status(400).json({
+      error: 'invalid_organization_id',
+      message: 'Organization id must be a valid UUID.',
+    })
+    return
+  }
+
+  const organizationResult = await fetchOrganizationRowById(organizationId)
+  if (!organizationResult.ok) {
+    res.status(organizationResult.status || 500).json({
+      error: 'organization_delete_failed',
+      message: 'Unable to load organization from Supabase.',
+      details: organizationResult.payload,
+    })
+    return
+  }
+  const organizationRow = organizationResult.row
+  if (!organizationRow) {
+    res.status(404).json({
+      error: 'organization_not_found',
+      message: 'Organization was not found.',
+    })
+    return
+  }
+  if (!canUserSeeOrganization(organizationRow, viewer.userId, viewer.appRole)) {
+    res.status(403).json({
+      error: 'forbidden',
+      message: 'You do not have access to this organization.',
+    })
+    return
+  }
+  if (!canUserDeleteOrganization(organizationRow, viewer.userId)) {
+    res.status(403).json({
+      error: 'forbidden',
+      message: 'Only organization admin members can delete organizations.',
+    })
+    return
+  }
+
+  const deleted = await deleteOrganizationRowById(organizationId)
+  if (!deleted.ok) {
+    console.error('Failed to delete organization:', {
+      organizationId,
+      viewerUserId: viewer.userId,
+      status: deleted.status,
+      details: deleted.payload,
+    })
+    res.status(deleted.status || 500).json({
+      error: 'organization_delete_failed',
+      message: 'Unable to delete organization in Supabase.',
+      details: deleted.payload,
+    })
+    return
+  }
+
+  res.json({ organizationId })
+})
+
+app.post('/api/organizations/:organizationId/members', async (req, res) => {
+  const viewer = await resolveAuthedUserContext(req, res)
+  if (!viewer.ok) {
+    res.status(viewer.status || 500).json({
+      error: viewer.error || 'organization_members_update_failed',
+      message: viewer.message || 'Unable to update organization members.',
+      details: viewer.details ?? null,
+    })
+    return
+  }
+
+  const organizationId =
+    typeof req.params?.organizationId === 'string' ? req.params.organizationId.trim() : ''
+  if (!isUuid(organizationId)) {
+    res.status(400).json({
+      error: 'invalid_organization_id',
+      message: 'Organization id must be a valid UUID.',
+    })
+    return
+  }
+
+  const payload = req.body ?? {}
+  const addMemberInputs = normalizeOrganizationMemberInviteInputArray(payload.addMembers)
+  const addEmailInputs = normalizeEmailInputArray(payload.addEmails)
+  const removeEmailInputs = normalizeEmailInputArray(payload.removeEmails)
+  const removeUserIds = normalizeUuidArray(payload.removeUserIds)
+  const roleUpdateInputs = normalizeOrganizationMemberRoleUpdateInputArray(payload.roleUpdates)
+  const hasInput =
+    addMemberInputs.validMembers.length ||
+    addMemberInputs.invalidEmails.length ||
+    addEmailInputs.validEmails.length ||
+    addEmailInputs.invalidEmails.length ||
+    removeEmailInputs.validEmails.length ||
+    removeEmailInputs.invalidEmails.length ||
+    removeUserIds.length ||
+    roleUpdateInputs.validUpdates.length ||
+    roleUpdateInputs.invalidUserIds.length
+  if (!hasInput) {
+    res.status(400).json({
+      error: 'invalid_organization_member_payload',
+      message:
+        'Provide at least one valid member in addMembers, roleUpdates, addEmails, removeEmails, or removeUserIds.',
+    })
+    return
+  }
+
+  const organizationResult = await fetchOrganizationRowById(organizationId)
+  if (!organizationResult.ok) {
+    res.status(organizationResult.status || 500).json({
+      error: 'organization_members_update_failed',
+      message: 'Unable to load organization from Supabase.',
+      details: organizationResult.payload,
+    })
+    return
+  }
+  const organizationRow = organizationResult.row
+  if (!organizationRow) {
+    res.status(404).json({
+      error: 'organization_not_found',
+      message: 'Organization was not found.',
+    })
+    return
+  }
+  if (!canUserSeeOrganization(organizationRow, viewer.userId, viewer.appRole)) {
+    res.status(403).json({
+      error: 'forbidden',
+      message: 'You do not have access to this organization.',
+    })
+    return
+  }
+  if (!canUserManageOrganizationMembers(organizationRow, viewer.userId)) {
+    res.status(403).json({
+      error: 'forbidden',
+      message: 'Only organization admin members can manage organization members.',
+    })
+    return
+  }
+
+  const canChangeRoles = canUserChangeOrganizationMemberRoles(organizationRow, viewer.userId)
+  const addMembersContainRoleMutations = addMemberInputs.validMembers.some(
+    (member) => normalizeOrganizationMemberRole(member.role) !== ORGANIZATION_MEMBER_ROLE_INTERNAL,
+  )
+  const hasRoleMutations = Boolean(
+    roleUpdateInputs.validUpdates.length ||
+    roleUpdateInputs.invalidUserIds.length ||
+    addMembersContainRoleMutations,
+  )
+  if (!canChangeRoles && hasRoleMutations) {
+    res.status(403).json({
+      error: 'forbidden',
+      message: 'Only organization admin members can change member roles.',
+    })
+    return
+  }
+
+  const creatorId = normalizeTextInput(organizationRow?.creator, { maxLength: 80 })
+  const memberRoleByUserId = normalizeOrganizationMemberRoles(organizationRow?.members, creatorId)
+  const roleUpdates = canChangeRoles ? roleUpdateInputs.validUpdates : []
+  const memberUpdateResult = buildEmptyMemberResolution()
+  const addMemberByEmail = new Map()
+
+  for (const member of addMemberInputs.validMembers) {
+    addMemberByEmail.set(member.email, member.role)
+  }
+  for (const email of addEmailInputs.validEmails) {
+    if (!addMemberByEmail.has(email)) {
+      addMemberByEmail.set(email, ORGANIZATION_MEMBER_ROLE_INTERNAL)
+    }
+  }
+  const creatorEmail = normalizeEmail(viewer.email)
+  if (creatorEmail && addMemberByEmail.has(creatorEmail)) {
+    addMemberByEmail.delete(creatorEmail)
+    memberUpdateResult.failed.push({
+      action: 'add',
+      email: creatorEmail,
+      error: 'cannot_add_creator',
+      message: 'Organization creator is added automatically and cannot be invited as a member.',
+    })
+  }
+  for (const email of addMemberInputs.invalidEmails) {
+    memberUpdateResult.failed.push({
+      action: 'add',
+      email,
+      error: 'invalid_email',
+      message: 'Email format is invalid.',
+    })
+  }
+  for (const email of addEmailInputs.invalidEmails) {
+    memberUpdateResult.failed.push({
+      action: 'add',
+      email,
+      error: 'invalid_email',
+      message: 'Email format is invalid.',
+    })
+  }
+  for (const email of removeEmailInputs.invalidEmails) {
+    memberUpdateResult.failed.push({
+      action: 'remove',
+      email,
+      error: 'invalid_email',
+      message: 'Email format is invalid.',
+    })
+  }
+  for (const userId of roleUpdateInputs.invalidUserIds) {
+    memberUpdateResult.failed.push({
+      email: userId,
+      userId,
+      error: 'invalid_user_id',
+      message: 'User id must be a valid UUID.',
+    })
+  }
+
+  const addMembers = [...addMemberByEmail.entries()].map(([email, role]) => ({ email, role }))
+  if (addMembers.length) {
+    const resolvedMembers = await resolveOrganizationMemberIdsFromEmails(addMembers)
+    memberUpdateResult.added.push(...resolvedMembers.resolution.added)
+    memberUpdateResult.removed.push(...resolvedMembers.resolution.removed)
+    memberUpdateResult.failed.push(...resolvedMembers.resolution.failed)
+    for (const member of resolvedMembers.resolvedMembers) {
+      if (member.userId === creatorId) continue
+      const existingRole = memberRoleByUserId[member.userId]
+      if (
+        !existingRole ||
+        organizationMemberRolePriority(member.role) > organizationMemberRolePriority(existingRole)
+      ) {
+        memberRoleByUserId[member.userId] = member.role
+      }
+    }
+  }
+
+  for (const email of removeEmailInputs.validEmails) {
+    const lookupResult = await fetchUsersRowByEmail(email)
+    if (!lookupResult.ok) {
+      memberUpdateResult.failed.push({
+        action: 'remove',
+        email,
+        error: 'lookup_failed',
+        message: 'Unable to verify this email right now.',
+      })
+      continue
+    }
+    const userId = normalizeTextInput(lookupResult.row?.id, { maxLength: 80 })
+    if (!isUuid(userId)) {
+      memberUpdateResult.failed.push({
+        action: 'remove',
+        email,
+        error: 'user_not_found',
+        message: 'No matching user was found for this email.',
+      })
+      continue
+    }
+    if (userId === creatorId) {
+      memberUpdateResult.failed.push({
+        action: 'remove',
+        email,
+        error: 'cannot_remove_creator',
+        message: 'Organization creator cannot be removed.',
+      })
+      continue
+    }
+    if (!memberRoleByUserId[userId]) {
+      memberUpdateResult.failed.push({
+        action: 'remove',
+        email,
+        error: 'not_member',
+        message: 'User is not currently a member of this organization.',
+      })
+      continue
+    }
+    delete memberRoleByUserId[userId]
+    memberUpdateResult.removed.push({
+      action: 'remove',
+      email,
+      userId,
+      message: 'User removed from organization members.',
+    })
+  }
+
+  const lookupUserIds = uniqueValues([...removeUserIds, ...roleUpdates.map((entry) => entry.userId)])
+  const usersLookup = lookupUserIds.length
+    ? await fetchUsersRowsByIds(lookupUserIds)
+    : { ok: true, rows: [] }
+  const userLabelById = new Map(
+    (usersLookup.ok && Array.isArray(usersLookup.rows) ? usersLookup.rows : []).map((row) => {
+      const id = normalizeTextInput(row?.id, { maxLength: 80 })
+      const email = normalizeEmail(row?.email)
+      return [id, email]
+    }),
+  )
+
+  for (const userId of removeUserIds) {
+    const displayEmail = userLabelById.get(userId) || userId
+    if (userId === creatorId) {
+      memberUpdateResult.failed.push({
+        action: 'remove',
+        email: displayEmail,
+        userId,
+        error: 'cannot_remove_creator',
+        message: 'Organization creator cannot be removed.',
+      })
+      continue
+    }
+    if (!memberRoleByUserId[userId]) {
+      memberUpdateResult.failed.push({
+        action: 'remove',
+        email: displayEmail,
+        userId,
+        error: 'not_member',
+        message: 'User is not currently a member of this organization.',
+      })
+      continue
+    }
+    delete memberRoleByUserId[userId]
+    memberUpdateResult.removed.push({
+      action: 'remove',
+      email: displayEmail,
+      userId,
+      message: 'User removed from organization members.',
+    })
+  }
+
+  for (const update of roleUpdates) {
+    const userId = update.userId
+    const role = normalizeOrganizationMemberRole(update.role)
+    const label = userLabelById.get(userId) || userId
+    if (userId === creatorId) {
+      memberUpdateResult.failed.push({
+        email: label,
+        userId,
+        error: 'cannot_change_creator_role',
+        message: 'The organization creator role cannot be changed.',
+      })
+      continue
+    }
+
+    if (!memberRoleByUserId[userId]) {
+      memberUpdateResult.failed.push({
+        email: label,
+        userId,
+        error: 'not_member',
+        message: 'User is not currently a member of this organization.',
+      })
+      continue
+    }
+
+    const currentRole = normalizeOrganizationMemberRole(memberRoleByUserId[userId])
+    if (currentRole === role) {
+      continue
+    }
+
+    memberRoleByUserId[userId] = role
+    memberUpdateResult.added.push({
+      action: 'add',
+      email: label,
+      userId,
+      message: `User role updated to ${role}.`,
+    })
+  }
+
+  const nextMemberRoles = normalizeOrganizationMemberRoles(memberRoleByUserId, creatorId)
+  const updateMembersResult = await updateOrganizationMembers(organizationId, nextMemberRoles, creatorId)
+  if (!updateMembersResult.ok) {
+    console.error('Failed to update organization members:', {
+      organizationId,
+      viewerUserId: viewer.userId,
+      status: updateMembersResult.status,
+      details: updateMembersResult.payload,
+    })
+    res.status(updateMembersResult.status || 500).json({
+      error: 'organization_members_update_failed',
+      message: 'Unable to update organization members in Supabase.',
+      details: updateMembersResult.payload,
+    })
+    return
+  }
+
+  const updatedOrganizationRow = updateMembersResult.row ?? {
+    ...organizationRow,
+    members: nextMemberRoles,
+  }
+  const memberIds = Object.keys(nextMemberRoles)
+  const usersResult = await fetchUsersRowsByIds(memberIds)
+  if (!usersResult.ok) {
+    console.error('Unable to load organization member emails after update:', {
+      organizationId,
+      status: usersResult.status,
+      details: usersResult.payload,
+    })
+  }
+
+  res.json({
+    organization: mapOrganizationForClient(updatedOrganizationRow, usersResult.ok ? usersResult.rows : []),
+    updateResult: memberUpdateResult,
   })
 })
 
@@ -2887,23 +4679,17 @@ app.get('/oauth/google/callback', async (req, res) => {
   }
 })
 
-app.get('/oauth/youtube', (req, res) => {
-  if (!youtubeClientId || !youtubeClientSecret || !youtubeRedirectUri) {
-    res.redirect(
-      buildAppRedirect({
-        status: 'error',
-        provider: 'youtube',
-        message: 'YouTube OAuth not configured.',
-        path: '/settings',
-      }),
-    )
-    return
-  }
-
+app.get('/oauth/youtube', async (req, res) => {
   const requestedOrigin =
     typeof req.query?.app_origin === 'string' ? req.query.app_origin : ''
   const refererOrigin = typeof req.headers.referer === 'string' ? req.headers.referer : ''
-  const appOrigin = resolveOriginBase(requestedOrigin) || resolveOriginBase(refererOrigin)
+  const requestedOriginBase = resolveOriginBase(requestedOrigin)
+  const refererOriginBase = resolveOriginBase(refererOrigin)
+  const appOriginCandidate = requestedOriginBase || refererOriginBase
+  const appOrigin =
+    appOriginCandidate && trustedRequestOrigins.has(appOriginCandidate)
+      ? appOriginCandidate
+      : ''
   if (appOrigin) {
     res.cookie(APP_REDIRECT_COOKIE, appOrigin, {
       httpOnly: true,
@@ -2911,6 +4697,46 @@ app.get('/oauth/youtube', (req, res) => {
       secure: cookieSecure,
       maxAge: 10 * 60 * 1000,
     })
+  }
+  const redirectBase = appOrigin || resolveAppRedirectBase(req)
+
+  const viewer = await resolveAuthedUserContext(req, res)
+  if (!viewer.ok) {
+    res.redirect(
+      buildAppRedirect({
+        status: 'error',
+        provider: 'youtube',
+        message: 'You must be signed in to connect YouTube.',
+        path: '/settings',
+        baseUrl: redirectBase,
+      }),
+    )
+    return
+  }
+  if (!canRoleConnectAccounts(viewer.appRole)) {
+    res.redirect(
+      buildAppRedirect({
+        status: 'error',
+        provider: 'youtube',
+        message: 'Only admins can connect YouTube accounts.',
+        path: '/settings',
+        baseUrl: redirectBase,
+      }),
+    )
+    return
+  }
+
+  if (!youtubeClientId || !youtubeClientSecret || !youtubeRedirectUri) {
+    res.redirect(
+      buildAppRedirect({
+        status: 'error',
+        provider: 'youtube',
+        message: 'YouTube OAuth not configured.',
+        path: '/settings',
+        baseUrl: redirectBase,
+      }),
+    )
+    return
   }
 
   const state = crypto.randomBytes(16).toString('hex')
@@ -2983,6 +4809,15 @@ app.get('/oauth/youtube/callback', async (req, res) => {
   }
 
   try {
+    const viewer = await resolveAuthedUserContext(req, res)
+    if (!viewer.ok) {
+      throw new Error('You must be signed in as an admin before connecting YouTube.')
+    }
+    if (!canRoleConnectAccounts(viewer.appRole)) {
+      throw new Error('Only admins can connect YouTube accounts.')
+    }
+    const userId = viewer.userId
+
     const tokenParams = new URLSearchParams({
       client_id: youtubeClientId,
       client_secret: youtubeClientSecret,
@@ -3045,11 +4880,6 @@ app.get('/oauth/youtube/callback', async (req, res) => {
       return
     }
 
-    const viewerResult = await resolveYouTubeViewer(req, res)
-    if (!viewerResult.ok) {
-      throw new Error('You must be signed in before connecting YouTube.')
-    }
-    const userId = viewerResult.viewer.userId
     const existingConnectionsResult = await listYouTubeConnectionRowsByUserId(userId)
     const existingRows = existingConnectionsResult.ok ? existingConnectionsResult.rows : []
     const existing = existingRows
@@ -3157,6 +4987,75 @@ const fetchYouTubeVideos = async (accessToken, videoIds) => {
   }
 }
 
+const normalizeIsoDateOnly = (value) => {
+  if (typeof value !== 'string' || !value.trim()) return ''
+  const parsed = Date.parse(value)
+  if (!Number.isFinite(parsed)) return ''
+  return new Date(parsed).toISOString().slice(0, 10)
+}
+
+const fetchOldestUploadedVideoDate = async (accessToken, uploadsPlaylistId) => {
+  if (!uploadsPlaylistId) return ''
+  let oldestUploadDate = ''
+  const todayIso = new Date().toISOString().slice(0, 10)
+  let nextPageToken = ''
+  let pageCount = 0
+
+  while (pageCount < 200) {
+    const params = new URLSearchParams({
+      part: 'contentDetails,snippet,status',
+      playlistId: uploadsPlaylistId,
+      maxResults: '50',
+    })
+    if (nextPageToken) {
+      params.set('pageToken', nextPageToken)
+    }
+
+    try {
+      const response = await fetch(`https://www.googleapis.com/youtube/v3/playlistItems?${params.toString()}`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      })
+      if (!response.ok) break
+
+      const payload = await response.json().catch(() => ({}))
+      const items = Array.isArray(payload?.items) ? payload.items : []
+      items.forEach((item) => {
+        const privacyStatus =
+          typeof item?.status?.privacyStatus === 'string'
+            ? item.status.privacyStatus.trim().toLowerCase()
+            : ''
+        if (privacyStatus !== 'public') return
+        const title =
+          typeof item?.snippet?.title === 'string'
+            ? item.snippet.title.trim().toLowerCase()
+            : ''
+        if (title === 'private video' || title === 'deleted video') return
+        const uploadDate = normalizeIsoDateOnly(
+          typeof item?.contentDetails?.videoPublishedAt === 'string'
+            ? item.contentDetails.videoPublishedAt
+            : typeof item?.snippet?.publishedAt === 'string'
+              ? item.snippet.publishedAt
+              : '',
+        )
+        if (!uploadDate || uploadDate > todayIso) return
+        if (!oldestUploadDate || uploadDate < oldestUploadDate) {
+          oldestUploadDate = uploadDate
+        }
+      })
+
+      const token =
+        typeof payload?.nextPageToken === 'string' ? payload.nextPageToken.trim() : ''
+      if (!token) break
+      nextPageToken = token
+      pageCount += 1
+    } catch {
+      break
+    }
+  }
+
+  return oldestUploadDate
+}
+
 const buildEngagementRate = (videos) => {
   const totals = videos.reduce(
     (acc, video) => {
@@ -3169,24 +5068,44 @@ const buildEngagementRate = (videos) => {
   return totals.views ? (totals.engagements / totals.views) * 100 : 0
 }
 
+const createTimeSeriesAccumulator = (date = '') => ({
+  date,
+  views: 0,
+  engagements: 0,
+  posts: 0,
+  watchTimeHours: 0,
+  followersNetChange: 0,
+})
+
+const createTimeSeriesByChannelAccumulator = (channelId = '', date = '') => ({
+  channelId,
+  date,
+  views: 0,
+  engagements: 0,
+  posts: 0,
+  watchTimeHours: 0,
+  followersNetChange: 0,
+})
+
 const buildTimeSeries = (videos) => {
   const buckets = new Map()
   videos.forEach((video) => {
     if (!video.publishedAt) return
     const isoDate = video.publishedAt.slice(0, 10)
-    const current = buckets.get(isoDate) ?? { date: isoDate, views: 0, engagements: 0, posts: 0 }
+    const current = buckets.get(isoDate) ?? createTimeSeriesAccumulator(isoDate)
     current.views += video.views
     current.engagements += video.likes + video.comments
     current.posts += 1
     buckets.set(isoDate, current)
   })
   const ordered = [...buckets.values()].sort((a, b) => a.date.localeCompare(b.date))
-  const trimmed = ordered.slice(-8)
-  return trimmed.map((point) => ({
-    date: formatDateLabel(point.date),
+  return ordered.map((point) => ({
+    date: point.date,
     views: point.views,
     engagements: point.engagements,
     posts: point.posts,
+    watchTimeHours: point.watchTimeHours,
+    followersNetChange: point.followersNetChange,
   }))
 }
 
@@ -3240,15 +5159,20 @@ const buildAnalyticsSummary = async (sessionId, connections, options = {}) => {
       ? options.resolveAccessToken
       : (connection) => ensureValidAccessToken(sessionId, connection)
   const timeSeriesMap = new Map()
+  const timeSeriesByChannelMap = new Map()
   const ageMap = new Map()
+  const ageMapByChannel = new Map()
   const genderMap = new Map()
+  const genderMapByChannel = new Map()
   const geoMap = new Map()
+  const geoMapByChannel = new Map()
   const { startDate, endDate } = buildAnalyticsDateRange(365)
   const audienceRanges = [365, 90, 28].map((days) => buildAnalyticsDateRange(days))
 
   for (const connection of connections) {
     const { accessToken } = await resolveAccessToken(connection)
     if (!accessToken) continue
+    const normalizedChannelId = normalizeTextInput(connection.channelId, { maxLength: 300 })
     let ageRowsCount = 0
     let genderRowsCount = 0
     let geoRowsCount = 0
@@ -3309,11 +5233,64 @@ const buildAnalyticsSummary = async (sessionId, connections, options = {}) => {
     const timeRows = parseAnalyticsRows(timePayload)
     timeRows.forEach((row) => {
       if (!row.day) return
-      const current =
-        timeSeriesMap.get(row.day) ?? { date: row.day, views: 0, engagements: 0, posts: 0 }
+      const current = timeSeriesMap.get(row.day) ?? createTimeSeriesAccumulator(row.day)
       current.views += toNumber(row.views)
       current.engagements += toNumber(row.likes) + toNumber(row.comments)
       timeSeriesMap.set(row.day, current)
+      if (normalizedChannelId) {
+        const key = `${normalizedChannelId}::${row.day}`
+        const currentByChannel =
+          timeSeriesByChannelMap.get(key)
+          ?? createTimeSeriesByChannelAccumulator(normalizedChannelId, row.day)
+        currentByChannel.views += toNumber(row.views)
+        currentByChannel.engagements += toNumber(row.likes) + toNumber(row.comments)
+        timeSeriesByChannelMap.set(key, currentByChannel)
+      }
+    })
+
+    const watchTimePayload = await fetchForConnection({
+      metrics: 'estimatedMinutesWatched',
+      dimensions: 'day',
+      sort: 'day',
+    })
+    const watchTimeRows = parseAnalyticsRows(watchTimePayload)
+    watchTimeRows.forEach((row) => {
+      if (!row.day) return
+      const current = timeSeriesMap.get(row.day) ?? createTimeSeriesAccumulator(row.day)
+      const watchedMinutes = toNumber(row.estimatedMinutesWatched)
+      current.watchTimeHours += watchedMinutes / 60
+      timeSeriesMap.set(row.day, current)
+      if (normalizedChannelId) {
+        const key = `${normalizedChannelId}::${row.day}`
+        const currentByChannel =
+          timeSeriesByChannelMap.get(key)
+          ?? createTimeSeriesByChannelAccumulator(normalizedChannelId, row.day)
+        currentByChannel.watchTimeHours += watchedMinutes / 60
+        timeSeriesByChannelMap.set(key, currentByChannel)
+      }
+    })
+
+    const followerDeltaPayload = await fetchForConnection({
+      metrics: 'subscribersGained,subscribersLost',
+      dimensions: 'day',
+      sort: 'day',
+    })
+    const followerDeltaRows = parseAnalyticsRows(followerDeltaPayload)
+    followerDeltaRows.forEach((row) => {
+      if (!row.day) return
+      const current = timeSeriesMap.get(row.day) ?? createTimeSeriesAccumulator(row.day)
+      const gained = toNumber(row.subscribersGained)
+      const lost = toNumber(row.subscribersLost)
+      current.followersNetChange += gained - lost
+      timeSeriesMap.set(row.day, current)
+      if (normalizedChannelId) {
+        const key = `${normalizedChannelId}::${row.day}`
+        const currentByChannel =
+          timeSeriesByChannelMap.get(key)
+          ?? createTimeSeriesByChannelAccumulator(normalizedChannelId, row.day)
+        currentByChannel.followersNetChange += gained - lost
+        timeSeriesByChannelMap.set(key, currentByChannel)
+      }
     })
 
     const demographicRows = await fetchRowsForConnection([
@@ -3324,6 +5301,13 @@ const buildAnalyticsSummary = async (sessionId, connections, options = {}) => {
       if (!label) return
       const value = resolveAudienceMetricValue(row)
       ageMap.set(label, (ageMap.get(label) ?? 0) + value)
+      if (normalizedChannelId) {
+        if (!ageMapByChannel.has(normalizedChannelId)) {
+          ageMapByChannel.set(normalizedChannelId, new Map())
+        }
+        const currentByChannel = ageMapByChannel.get(normalizedChannelId)
+        currentByChannel.set(label, (currentByChannel.get(label) ?? 0) + value)
+      }
       ageRowsCount += 1
     })
     demographicRows.forEach((row) => {
@@ -3331,6 +5315,13 @@ const buildAnalyticsSummary = async (sessionId, connections, options = {}) => {
       if (!label) return
       const value = resolveAudienceMetricValue(row)
       genderMap.set(label, (genderMap.get(label) ?? 0) + value)
+      if (normalizedChannelId) {
+        if (!genderMapByChannel.has(normalizedChannelId)) {
+          genderMapByChannel.set(normalizedChannelId, new Map())
+        }
+        const currentByChannel = genderMapByChannel.get(normalizedChannelId)
+        currentByChannel.set(label, (currentByChannel.get(label) ?? 0) + value)
+      }
       genderRowsCount += 1
     })
 
@@ -3343,6 +5334,13 @@ const buildAnalyticsSummary = async (sessionId, connections, options = {}) => {
         if (!label) return
         const value = resolveAudienceMetricValue(row)
         ageMap.set(label, (ageMap.get(label) ?? 0) + value)
+        if (normalizedChannelId) {
+          if (!ageMapByChannel.has(normalizedChannelId)) {
+            ageMapByChannel.set(normalizedChannelId, new Map())
+          }
+          const currentByChannel = ageMapByChannel.get(normalizedChannelId)
+          currentByChannel.set(label, (currentByChannel.get(label) ?? 0) + value)
+        }
         ageRowsCount += 1
       })
 
@@ -3354,6 +5352,13 @@ const buildAnalyticsSummary = async (sessionId, connections, options = {}) => {
         if (!label) return
         const value = resolveAudienceMetricValue(row)
         genderMap.set(label, (genderMap.get(label) ?? 0) + value)
+        if (normalizedChannelId) {
+          if (!genderMapByChannel.has(normalizedChannelId)) {
+            genderMapByChannel.set(normalizedChannelId, new Map())
+          }
+          const currentByChannel = genderMapByChannel.get(normalizedChannelId)
+          currentByChannel.set(label, (currentByChannel.get(label) ?? 0) + value)
+        }
         genderRowsCount += 1
       })
     }
@@ -3369,6 +5374,13 @@ const buildAnalyticsSummary = async (sessionId, connections, options = {}) => {
       if (!label) return
       const value = resolveAudienceMetricValue(row)
       geoMap.set(label, (geoMap.get(label) ?? 0) + value)
+      if (normalizedChannelId) {
+        if (!geoMapByChannel.has(normalizedChannelId)) {
+          geoMapByChannel.set(normalizedChannelId, new Map())
+        }
+        const currentByChannel = geoMapByChannel.get(normalizedChannelId)
+        currentByChannel.set(label, (currentByChannel.get(label) ?? 0) + value)
+      }
       geoRowsCount += 1
     })
 
@@ -3391,6 +5403,17 @@ const buildAnalyticsSummary = async (sessionId, connections, options = {}) => {
       }))
       .sort((a, b) => b.value - a.value)
   }
+  const buildPercentListByChannel = (mapByChannel) => {
+    const output = {}
+    for (const [channelId, valueMap] of mapByChannel.entries()) {
+      const channelKey = normalizeTextInput(channelId, { maxLength: 300 })
+      if (!channelKey) continue
+      const list = buildPercentList(valueMap)
+      if (!list.length) continue
+      output[channelKey] = list
+    }
+    return output
+  }
 
   const orderedSeries = [...timeSeriesMap.values()]
     .filter((point) => point.date)
@@ -3399,20 +5422,51 @@ const buildAnalyticsSummary = async (sessionId, connections, options = {}) => {
     (point) =>
       toNumber(point.views) > 0 || toNumber(point.engagements) > 0 || toNumber(point.posts) > 0,
   )
-  const timeSeries = (nonZeroSeries.length ? nonZeroSeries : orderedSeries)
-    .slice(-8)
+  const timeSeries = (nonZeroSeries.length ? nonZeroSeries : orderedSeries).map((point) => ({
+    date: point.date,
+    views: point.views,
+    engagements: point.engagements,
+    posts: point.posts,
+    watchTimeHours: Number(point.watchTimeHours.toFixed(2)),
+    followersNetChange: Math.round(point.followersNetChange),
+  }))
+  const orderedSeriesByChannel = [...timeSeriesByChannelMap.values()]
+    .filter((point) => point.channelId && point.date)
+    .sort((a, b) => {
+      if (a.channelId === b.channelId) return a.date.localeCompare(b.date)
+      return a.channelId.localeCompare(b.channelId)
+    })
+  const nonZeroSeriesByChannel = orderedSeriesByChannel.filter(
+    (point) =>
+      toNumber(point.views) > 0
+      || toNumber(point.engagements) > 0
+      || toNumber(point.posts) > 0
+      || toNumber(point.watchTimeHours) > 0
+      || Math.abs(toNumber(point.followersNetChange)) > 0,
+  )
+  const timeSeriesByChannel = (nonZeroSeriesByChannel.length ? nonZeroSeriesByChannel : orderedSeriesByChannel)
     .map((point) => ({
-      date: formatDateLabel(point.date),
+      channelId: point.channelId,
+      date: point.date,
       views: point.views,
       engagements: point.engagements,
       posts: point.posts,
+      watchTimeHours: Number(point.watchTimeHours.toFixed(2)),
+      followersNetChange: Math.round(point.followersNetChange),
     }))
 
   return {
     timeSeries,
+    timeSeriesByChannel,
     ageDistribution: buildPercentList(ageMap),
+    ageDistributionByChannel: buildPercentListByChannel(ageMapByChannel),
     genderDistribution: buildPercentList(genderMap),
+    genderDistributionByChannel: buildPercentListByChannel(genderMapByChannel),
     topGeos: buildPercentList(geoMap).slice(0, 5),
+    topGeosByChannel: Object.fromEntries(
+      Object.entries(buildPercentListByChannel(geoMapByChannel))
+        .map(([channelId, values]) => [channelId, values.slice(0, 5)]),
+    ),
   }
 }
 
@@ -3773,6 +5827,10 @@ const parseChannelReportRows = (headers, rows) => {
     'subscribers_lost',
     'subscribersLostFromChannel',
   ])
+  const estimatedMinutesWatchedIndex = findHeaderIndex(headers, [
+    'estimatedMinutesWatched',
+    'estimated_minutes_watched',
+  ])
 
   return rows
     .map((row) => ({
@@ -3782,6 +5840,8 @@ const parseChannelReportRows = (headers, rows) => {
       comments: commentsIndex >= 0 ? toNumber(row[commentsIndex]) : 0,
       subscribersGained: subscribersGainedIndex >= 0 ? toNumber(row[subscribersGainedIndex]) : null,
       subscribersLost: subscribersLostIndex >= 0 ? toNumber(row[subscribersLostIndex]) : null,
+      estimatedMinutesWatched:
+        estimatedMinutesWatchedIndex >= 0 ? toNumber(row[estimatedMinutesWatchedIndex]) : 0,
     }))
     .filter((row) => row.day)
 }
@@ -3877,6 +5937,10 @@ const buildReportingSummary = async (sessionId, connections, options = {}) => {
   const demographicRows = []
   const geoRows = []
   const videoIdsByChannel = new Map()
+  const timeSeriesByChannelMap = new Map()
+  const ageMapByChannel = new Map()
+  const genderMapByChannel = new Map()
+  const geoMapByChannel = new Map()
 
   for (const connection of connections) {
     const { accessToken } = await resolveAccessToken(connection)
@@ -3926,26 +5990,56 @@ const buildReportingSummary = async (sessionId, connections, options = {}) => {
   const timeSeriesMap = new Map()
   if (channelRows.length) {
     channelRows.forEach((row) => {
-      const current =
-        timeSeriesMap.get(row.day) ?? { date: row.day, views: 0, engagements: 0, posts: 0 }
+      const current = timeSeriesMap.get(row.day) ?? createTimeSeriesAccumulator(row.day)
       current.views += row.views
       current.engagements += row.likes + row.comments
+      current.watchTimeHours += toNumber(row.estimatedMinutesWatched) / 60
+      const gained = typeof row.subscribersGained === 'number' ? row.subscribersGained : 0
+      const lost = typeof row.subscribersLost === 'number' ? row.subscribersLost : 0
+      current.followersNetChange += gained - lost
       timeSeriesMap.set(row.day, current)
+      if (row.channelId) {
+        const key = `${row.channelId}::${row.day}`
+        const currentByChannel =
+          timeSeriesByChannelMap.get(key)
+          ?? createTimeSeriesByChannelAccumulator(row.channelId, row.day)
+        currentByChannel.views += row.views
+        currentByChannel.engagements += row.likes + row.comments
+        currentByChannel.watchTimeHours += toNumber(row.estimatedMinutesWatched) / 60
+        currentByChannel.followersNetChange += gained - lost
+        timeSeriesByChannelMap.set(key, currentByChannel)
+      }
     })
   } else {
     videoRows.forEach((row) => {
-      const current =
-        timeSeriesMap.get(row.day) ?? { date: row.day, views: 0, engagements: 0, posts: 0 }
+      const current = timeSeriesMap.get(row.day) ?? createTimeSeriesAccumulator(row.day)
       current.views += row.views
       current.engagements += row.likes + row.comments
       timeSeriesMap.set(row.day, current)
+      if (row.channelId) {
+        const key = `${row.channelId}::${row.day}`
+        const currentByChannel =
+          timeSeriesByChannelMap.get(key)
+          ?? createTimeSeriesByChannelAccumulator(row.channelId, row.day)
+        currentByChannel.views += row.views
+        currentByChannel.engagements += row.likes + row.comments
+        timeSeriesByChannelMap.set(key, currentByChannel)
+      }
     })
   }
 
   videoRows.forEach((row) => {
-    const current = timeSeriesMap.get(row.day) ?? { date: row.day, views: 0, engagements: 0, posts: 0 }
+    const current = timeSeriesMap.get(row.day) ?? createTimeSeriesAccumulator(row.day)
     current.posts += 1
     timeSeriesMap.set(row.day, current)
+    if (row.channelId) {
+      const key = `${row.channelId}::${row.day}`
+      const currentByChannel =
+        timeSeriesByChannelMap.get(key)
+        ?? createTimeSeriesByChannelAccumulator(row.channelId, row.day)
+      currentByChannel.posts += 1
+      timeSeriesByChannelMap.set(key, currentByChannel)
+    }
   })
 
   const orderedSeries = [...timeSeriesMap.values()]
@@ -3955,13 +6049,37 @@ const buildReportingSummary = async (sessionId, connections, options = {}) => {
     (point) =>
       toNumber(point.views) > 0 || toNumber(point.engagements) > 0 || toNumber(point.posts) > 0,
   )
-  const timeSeries = (nonZeroSeries.length ? nonZeroSeries : orderedSeries)
-    .slice(-8)
+  const timeSeries = (nonZeroSeries.length ? nonZeroSeries : orderedSeries).map((point) => ({
+    date: point.date,
+    views: point.views,
+    engagements: point.engagements,
+    posts: point.posts,
+    watchTimeHours: Number(point.watchTimeHours.toFixed(2)),
+    followersNetChange: Math.round(point.followersNetChange),
+  }))
+  const orderedSeriesByChannel = [...timeSeriesByChannelMap.values()]
+    .filter((point) => point.channelId && point.date)
+    .sort((a, b) => {
+      if (a.channelId === b.channelId) return a.date.localeCompare(b.date)
+      return a.channelId.localeCompare(b.channelId)
+    })
+  const nonZeroSeriesByChannel = orderedSeriesByChannel.filter(
+    (point) =>
+      toNumber(point.views) > 0
+      || toNumber(point.engagements) > 0
+      || toNumber(point.posts) > 0
+      || toNumber(point.watchTimeHours) > 0
+      || Math.abs(toNumber(point.followersNetChange)) > 0,
+  )
+  const timeSeriesByChannel = (nonZeroSeriesByChannel.length ? nonZeroSeriesByChannel : orderedSeriesByChannel)
     .map((point) => ({
-      date: formatDateLabel(point.date),
+      channelId: point.channelId,
+      date: point.date,
       views: point.views,
       engagements: point.engagements,
       posts: point.posts,
+      watchTimeHours: Number(point.watchTimeHours.toFixed(2)),
+      followersNetChange: Math.round(point.followersNetChange),
     }))
 
   const channelFollowerDeltas = {}
@@ -4047,10 +6165,24 @@ const buildReportingSummary = async (sessionId, connections, options = {}) => {
     if (ageLabel) {
       const current = ageMap.get(ageLabel) ?? 0
       ageMap.set(ageLabel, current + (row.views || row.viewerPercentage))
+      if (row.channelId) {
+        if (!ageMapByChannel.has(row.channelId)) {
+          ageMapByChannel.set(row.channelId, new Map())
+        }
+        const byChannel = ageMapByChannel.get(row.channelId)
+        byChannel.set(ageLabel, (byChannel.get(ageLabel) ?? 0) + (row.views || row.viewerPercentage))
+      }
     }
     if (genderLabel) {
       const current = genderMap.get(genderLabel) ?? 0
       genderMap.set(genderLabel, current + (row.views || row.viewerPercentage))
+      if (row.channelId) {
+        if (!genderMapByChannel.has(row.channelId)) {
+          genderMapByChannel.set(row.channelId, new Map())
+        }
+        const byChannel = genderMapByChannel.get(row.channelId)
+        byChannel.set(genderLabel, (byChannel.get(genderLabel) ?? 0) + (row.views || row.viewerPercentage))
+      }
     }
   })
 
@@ -4063,6 +6195,17 @@ const buildReportingSummary = async (sessionId, connections, options = {}) => {
       }))
       .sort((a, b) => b.value - a.value)
   }
+  const buildPercentListByChannel = (mapByChannel) => {
+    const output = {}
+    for (const [channelId, valueMap] of mapByChannel.entries()) {
+      const channelKey = normalizeTextInput(channelId, { maxLength: 300 })
+      if (!channelKey) continue
+      const list = buildPercentList(valueMap)
+      if (!list.length) continue
+      output[channelKey] = list
+    }
+    return output
+  }
 
   const ageDistribution = buildPercentList(ageMap)
   const genderDistribution = buildPercentList(genderMap)
@@ -4073,16 +6216,30 @@ const buildReportingSummary = async (sessionId, connections, options = {}) => {
     if (!label) return
     const current = geoMap.get(label) ?? 0
     geoMap.set(label, current + (row.views || row.viewerPercentage))
+    if (row.channelId) {
+      if (!geoMapByChannel.has(row.channelId)) {
+        geoMapByChannel.set(row.channelId, new Map())
+      }
+      const byChannel = geoMapByChannel.get(row.channelId)
+      byChannel.set(label, (byChannel.get(label) ?? 0) + (row.views || row.viewerPercentage))
+    }
   })
 
   const topGeos = buildPercentList(geoMap).slice(0, 5)
 
   return {
     timeSeries,
+    timeSeriesByChannel,
     topPosts,
     ageDistribution,
+    ageDistributionByChannel: buildPercentListByChannel(ageMapByChannel),
     genderDistribution,
+    genderDistributionByChannel: buildPercentListByChannel(genderMapByChannel),
     topGeos,
+    topGeosByChannel: Object.fromEntries(
+      Object.entries(buildPercentListByChannel(geoMapByChannel))
+        .map(([channelId, values]) => [channelId, values.slice(0, 5)]),
+    ),
     channelFollowerDeltas,
   }
 }
@@ -4099,12 +6256,23 @@ const buildLiveYouTubeSummary = async ({
   const channelSummaries = []
   const topVideos = []
   const recentVideos = []
+  let firstVideoUploadDate = ''
 
   for (const connection of connections) {
     const { accessToken } = await resolveToken(connection)
     if (!accessToken) continue
     const channelInfo = await fetchYouTubeChannelInfo(accessToken, connection.channelId)
     if (!channelInfo?.id) continue
+    const channelFirstUploadDate = await fetchOldestUploadedVideoDate(
+      accessToken,
+      channelInfo.uploadsPlaylistId,
+    )
+    if (
+      channelFirstUploadDate &&
+      (!firstVideoUploadDate || channelFirstUploadDate < firstVideoUploadDate)
+    ) {
+      firstVideoUploadDate = channelFirstUploadDate
+    }
 
     const topVideoIds = await fetchYouTubeVideoIds(accessToken, channelInfo.id, 'viewCount', 6)
     const recentVideoIds = await fetchYouTubeVideoIds(accessToken, channelInfo.id, 'date', 8)
@@ -4133,6 +6301,7 @@ const buildLiveYouTubeSummary = async ({
       views,
       engagementRate,
       followers,
+      firstVideoUploadDate: channelFirstUploadDate || '',
       status: 'Connected',
     })
   }
@@ -4154,10 +6323,14 @@ const buildLiveYouTubeSummary = async ({
   const fallbackTimeSeries = buildTimeSeries(recentVideos)
   let reportingSummary = {
     timeSeries: [],
+    timeSeriesByChannel: [],
     topPosts: [],
     ageDistribution: [],
+    ageDistributionByChannel: {},
     genderDistribution: [],
+    genderDistributionByChannel: {},
     topGeos: [],
+    topGeosByChannel: {},
     channelFollowerDeltas: {},
   }
   try {
@@ -4170,9 +6343,13 @@ const buildLiveYouTubeSummary = async ({
 
   let analyticsSummary = {
     timeSeries: [],
+    timeSeriesByChannel: [],
     ageDistribution: [],
+    ageDistributionByChannel: {},
     genderDistribution: [],
+    genderDistributionByChannel: {},
     topGeos: [],
+    topGeosByChannel: {},
   }
   try {
     analyticsSummary = await buildAnalyticsSummary(sessionId, connections, {
@@ -4195,7 +6372,24 @@ const buildLiveYouTubeSummary = async ({
     Array.isArray(series)
       && series.some(
         (point) =>
-          toNumber(point?.views) > 0 || toNumber(point?.engagements) > 0 || toNumber(point?.posts) > 0,
+          toNumber(point?.views) > 0
+          || toNumber(point?.engagements) > 0
+          || toNumber(point?.posts) > 0
+          || toNumber(point?.watchTimeHours) > 0
+          || Math.abs(toNumber(point?.followersNetChange)) > 0,
+      )
+  const hasNonZeroSeriesByChannel = (series) =>
+    Array.isArray(series)
+      && series.some(
+        (point) =>
+          normalizeTextInput(point?.channelId, { maxLength: 300 }).length > 0
+          && (
+            toNumber(point?.views) > 0
+            || toNumber(point?.engagements) > 0
+            || toNumber(point?.posts) > 0
+            || toNumber(point?.watchTimeHours) > 0
+            || Math.abs(toNumber(point?.followersNetChange)) > 0
+          ),
       )
   const resolvedTimeSeries = hasNonZeroSeries(analyticsSummary.timeSeries)
     ? analyticsSummary.timeSeries
@@ -4208,46 +6402,99 @@ const buildLiveYouTubeSummary = async ({
           : reportingSummary.timeSeries.length
             ? reportingSummary.timeSeries
             : fallbackTimeSeries
+  const resolvedTimeSeriesByChannel = hasNonZeroSeriesByChannel(analyticsSummary.timeSeriesByChannel)
+    ? analyticsSummary.timeSeriesByChannel
+    : hasNonZeroSeriesByChannel(reportingSummary.timeSeriesByChannel)
+      ? reportingSummary.timeSeriesByChannel
+      : []
+  const ageDistributionByChannel =
+    analyticsSummary.ageDistributionByChannel
+    && Object.keys(analyticsSummary.ageDistributionByChannel).length
+      ? analyticsSummary.ageDistributionByChannel
+      : reportingSummary.ageDistributionByChannel
+  const genderDistributionByChannel =
+    analyticsSummary.genderDistributionByChannel
+    && Object.keys(analyticsSummary.genderDistributionByChannel).length
+      ? analyticsSummary.genderDistributionByChannel
+      : reportingSummary.genderDistributionByChannel
+  const topGeosByChannel =
+    analyticsSummary.topGeosByChannel && Object.keys(analyticsSummary.topGeosByChannel).length
+      ? analyticsSummary.topGeosByChannel
+      : reportingSummary.topGeosByChannel
 
   return {
+    firstVideoUploadDate,
     channels: hydratedChannels,
     topPosts: reportingSummary.topPosts.length ? reportingSummary.topPosts : fallbackTopPosts,
     timeSeries: resolvedTimeSeries,
+    timeSeriesByChannel: resolvedTimeSeriesByChannel,
     ageDistribution: analyticsSummary.ageDistribution.length
       ? analyticsSummary.ageDistribution
       : reportingSummary.ageDistribution,
+    ageDistributionByChannel,
     genderDistribution: analyticsSummary.genderDistribution.length
       ? analyticsSummary.genderDistribution
       : reportingSummary.genderDistribution,
+    genderDistributionByChannel,
     topGeos: analyticsSummary.topGeos.length ? analyticsSummary.topGeos : reportingSummary.topGeos,
+    topGeosByChannel,
   }
 }
 
 const buildEmptyYouTubeSummary = () => ({
+  firstVideoUploadDate: '',
   channels: [],
   topPosts: [],
   timeSeries: [],
+  timeSeriesByChannel: [],
   ageDistribution: [],
+  ageDistributionByChannel: {},
   genderDistribution: [],
+  genderDistributionByChannel: {},
   topGeos: [],
+  topGeosByChannel: {},
 })
 
 const normalizeCachedSummaryPayload = (payload) => {
   if (!payload || typeof payload !== 'object') return buildEmptyYouTubeSummary()
   const parsed = payload
   return {
+    firstVideoUploadDate: normalizeIsoDateOnly(parsed.firstVideoUploadDate),
     channels: Array.isArray(parsed.channels) ? parsed.channels : [],
     topPosts: Array.isArray(parsed.topPosts) ? parsed.topPosts : [],
     timeSeries: Array.isArray(parsed.timeSeries) ? parsed.timeSeries : [],
+    timeSeriesByChannel: Array.isArray(parsed.timeSeriesByChannel) ? parsed.timeSeriesByChannel : [],
     ageDistribution: Array.isArray(parsed.ageDistribution) ? parsed.ageDistribution : [],
+    ageDistributionByChannel:
+      parsed.ageDistributionByChannel && typeof parsed.ageDistributionByChannel === 'object'
+        ? parsed.ageDistributionByChannel
+        : {},
     genderDistribution: Array.isArray(parsed.genderDistribution) ? parsed.genderDistribution : [],
+    genderDistributionByChannel:
+      parsed.genderDistributionByChannel && typeof parsed.genderDistributionByChannel === 'object'
+        ? parsed.genderDistributionByChannel
+        : {},
     topGeos: Array.isArray(parsed.topGeos) ? parsed.topGeos : [],
+    topGeosByChannel:
+      parsed.topGeosByChannel && typeof parsed.topGeosByChannel === 'object'
+        ? parsed.topGeosByChannel
+        : {},
   }
 }
 
 const resolveYouTubeViewer = async (req, res) => {
   const viewer = await resolveAuthedUserContext(req, res)
   if (!viewer.ok) return { ok: false, viewer }
+  if (!canRoleTagCampaignContent(viewer.appRole)) {
+    return {
+      ok: false,
+      viewer: {
+        status: 403,
+        error: 'forbidden',
+        message: 'Brand viewers can only access shared report links.',
+      },
+    }
+  }
   return { ok: true, viewer }
 }
 
@@ -4424,6 +6671,14 @@ app.post('/api/youtube/reporting/init', async (req, res) => {
     })
     return
   }
+  if (!canRoleConnectAccounts(viewerResult.viewer.appRole)) {
+    res.status(403).json({
+      ok: false,
+      error: 'forbidden',
+      message: 'Only admins can initialize YouTube reporting jobs.',
+    })
+    return
+  }
 
   const userId = viewerResult.viewer.userId
   const connectionsResult = await loadSupabaseYouTubeConnections(userId)
@@ -4521,6 +6776,13 @@ app.post('/api/youtube/refresh', async (req, res) => {
     })
     return
   }
+  if (!canRoleConnectAccounts(viewerResult.viewer.appRole)) {
+    res.status(403).json({
+      error: 'forbidden',
+      message: 'Only admins can refresh YouTube data.',
+    })
+    return
+  }
 
   const userId = viewerResult.viewer.userId
   const queued = await createAndStartYouTubeRefreshJob(userId, {
@@ -4554,10 +6816,17 @@ app.get('/api/youtube/refresh/:jobId', async (req, res) => {
     })
     return
   }
+  if (!canRoleConnectAccounts(viewerResult.viewer.appRole)) {
+    res.status(403).json({
+      error: 'forbidden',
+      message: 'Only admins can check YouTube refresh jobs.',
+    })
+    return
+  }
 
   const userId = viewerResult.viewer.userId
-  const jobId = typeof req.params?.jobId === 'string' ? req.params.jobId.trim() : ''
-  if (!jobId) {
+  const jobId = normalizeTextInput(req.params?.jobId, { maxLength: 80 })
+  if (!isUuid(jobId)) {
     res.status(400).json({ error: 'invalid_job_id' })
     return
   }
@@ -4596,6 +6865,15 @@ app.get('/api/youtube/connections', async (req, res) => {
       count: 0,
       connections: [],
       error: viewer.error || 'not_authenticated',
+    })
+    return
+  }
+  if (!canRoleConnectAccounts(viewerResult.viewer.appRole)) {
+    res.status(403).json({
+      count: 0,
+      connections: [],
+      error: 'forbidden',
+      message: 'Only admins can manage connected platforms.',
     })
     return
   }
@@ -4642,11 +6920,14 @@ app.get('/api/youtube/summary', async (req, res) => {
   const hasConnections = connectionsResult.ok ? connectionsResult.connections.length > 0 : false
   const generatedAtValue =
     typeof cachedResult.row?.generated_at === 'string' ? cachedResult.row.generated_at : ''
-  const autoRefresh = await maybeQueueAutoYouTubeRefresh({
-    userId,
-    hasConnections,
-    generatedAt: generatedAtValue,
-  })
+  const allowAutoRefresh = isTrustedRequestSource(req)
+  const autoRefresh = allowAutoRefresh
+    ? await maybeQueueAutoYouTubeRefresh({
+      userId,
+      hasConnections,
+      generatedAt: generatedAtValue,
+    })
+    : { queued: false }
 
   if (!cachedResult.row?.summary_json) {
     res.json({
@@ -4692,6 +6973,14 @@ app.post('/api/youtube/disconnect', async (req, res) => {
       ok: false,
       error: viewer.error || 'not_authenticated',
       message: viewer.message || 'Unable to disconnect YouTube channels.',
+    })
+    return
+  }
+  if (!canRoleConnectAccounts(viewerResult.viewer.appRole)) {
+    res.status(403).json({
+      ok: false,
+      error: 'forbidden',
+      message: 'Only admins can disconnect YouTube channels.',
     })
     return
   }

@@ -12,7 +12,9 @@ import { MetricCard } from '../components/ui/MetricCard'
 import { SectionHeader } from '../components/ui/SectionHeader'
 import { useYouTubeSummary } from '../hooks/useYouTubeSummary'
 import type { KPI, Platform } from '../types/dashboard'
+import { normalizeSummaryIsoDate, todayIsoDate } from '../utils/date'
 import { formatNumber, formatPercent, formatThousands } from '../utils/format'
+import { sanitizeDateInput } from '../utils/sanitize'
 
 type PortfolioRange = 'daily' | 'weekly' | 'monthly'
 
@@ -40,35 +42,6 @@ interface ChannelRollup {
   platform: Platform
   views: number
   engagementRate: number
-}
-
-const toIsoDate = (date: Date) => {
-  const year = date.getFullYear()
-  const month = String(date.getMonth() + 1).padStart(2, '0')
-  const day = String(date.getDate()).padStart(2, '0')
-  return `${year}-${month}-${day}`
-}
-
-const todayIso = () => toIsoDate(new Date())
-
-const normalizeIsoDate = (value: string, fallbackYear: number) => {
-  const normalizedValue = value.trim()
-  if (/^\d{4}-\d{2}-\d{2}$/.test(normalizedValue)) return normalizedValue
-  const compactIsoMatch = /^(\d{4})(\d{2})(\d{2})$/.exec(normalizedValue)
-  if (compactIsoMatch) {
-    const [, year, month, day] = compactIsoMatch
-    return `${year}-${month}-${day}`
-  }
-  const hasExplicitYear = /\b\d{4}\b/.test(normalizedValue)
-  if (!hasExplicitYear) {
-    const parsedWithFallbackYear = new Date(`${normalizedValue} ${fallbackYear}`)
-    if (!Number.isNaN(parsedWithFallbackYear.getTime())) return toIsoDate(parsedWithFallbackYear)
-  }
-  const direct = new Date(normalizedValue)
-  if (!Number.isNaN(direct.getTime())) return toIsoDate(direct)
-  const parsed = new Date(`${normalizedValue} ${fallbackYear}`)
-  if (Number.isNaN(parsed.getTime())) return ''
-  return toIsoDate(parsed)
 }
 
 const formatDate = (isoDate: string) => {
@@ -135,17 +108,21 @@ export const Portfolio = () => {
   const [startDate, setStartDate] = useState('')
   const [endDate, setEndDate] = useState('')
   const isLoading = status === 'loading'
+  const today = useMemo(() => todayIsoDate(), [])
 
   const normalizedSeries = useMemo(() => {
-    const fallbackYear = new Date().getFullYear()
     return summary.timeSeries
       .map((point) => ({
         ...point,
-        isoDate: normalizeIsoDate(point.date, fallbackYear),
+        isoDate: normalizeSummaryIsoDate(point.date, today),
         label: point.date,
       }))
       .filter((point) => point.isoDate)
-  }, [summary.timeSeries])
+  }, [summary.timeSeries, today])
+  const firstVideoUploadDate = useMemo(
+    () => normalizeSummaryIsoDate(summary.firstVideoUploadDate, today),
+    [summary.firstVideoUploadDate, today],
+  )
 
   const channelWeights = useMemo(() => {
     if (!summary.channels.length) {
@@ -197,13 +174,15 @@ export const Portfolio = () => {
 
   const dateBounds = useMemo(() => {
     const orderedDates = portfolioRecords.map((record) => record.date).sort((a, b) => a.localeCompare(b))
-    const today = todayIso()
-    if (!orderedDates.length) return { min: '', max: today }
+    const nonFutureDates = orderedDates.filter((value) => value <= today)
+    const earliestSeriesDate = nonFutureDates.length ? nonFutureDates[0] : ''
+    const minDate = firstVideoUploadDate || earliestSeriesDate
+    if (!minDate) return { min: '', max: today }
     return {
-      min: orderedDates[0],
-      max: orderedDates[orderedDates.length - 1] > today ? orderedDates[orderedDates.length - 1] : today,
+      min: minDate,
+      max: today,
     }
-  }, [portfolioRecords])
+  }, [firstVideoUploadDate, portfolioRecords, today])
 
   const hasDateBounds = Boolean(dateBounds.min && dateBounds.max)
   const boundedStartDate = useMemo(() => {
@@ -620,7 +599,14 @@ export const Portfolio = () => {
                     min={dateBounds.min || undefined}
                     max={dateBounds.max || undefined}
                     value={boundedStartDate}
-                    onChange={(event) => setStartDate(event.target.value)}
+                    onChange={(event) =>
+                      setStartDate(
+                        sanitizeDateInput(event.target.value, {
+                          fallback: boundedStartDate || dateBounds.min,
+                          min: dateBounds.min,
+                          max: dateBounds.max,
+                        }),
+                      )}
                     disabled={!dateBounds.min}
                   />
                 </div>
@@ -635,7 +621,14 @@ export const Portfolio = () => {
                     min={dateBounds.min || undefined}
                     max={dateBounds.max || undefined}
                     value={boundedEndDate}
-                    onChange={(event) => setEndDate(event.target.value)}
+                    onChange={(event) =>
+                      setEndDate(
+                        sanitizeDateInput(event.target.value, {
+                          fallback: boundedEndDate || dateBounds.max,
+                          min: dateBounds.min,
+                          max: dateBounds.max,
+                        }),
+                      )}
                     disabled={!dateBounds.min}
                   />
                 </div>

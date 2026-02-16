@@ -1,14 +1,34 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { jsPDF } from 'jspdf'
 import { SectionHeader } from '../components/ui/SectionHeader'
 import { useYouTubeSummary } from '../hooks/useYouTubeSummary'
+import type { Role } from '../types/dashboard'
+import { resolveAuthBaseUrl } from '../utils/baseUrl'
 import { fetchCampaigns } from '../utils/campaigns'
 import { createCsvContent, downloadCsv, toFileSlug } from '../utils/csv'
 import { formatNumber } from '../utils/format'
-import { mapCampaignForReport, type ReportCampaign } from '../utils/reportCampaigns'
+import {
+  mapCampaignForReport,
+  resolveViewerCampaignRole,
+  type ReportCampaign,
+} from '../utils/reportCampaigns'
+import {
+  sanitizeAllowlistedValue,
+  sanitizeDateInput,
+  sanitizeMultilineInput,
+  sanitizeTextInput,
+} from '../utils/sanitize'
 
-export const ReportBuilder = () => {
+interface ReportBuilderProps {
+  role: Role
+}
+
+const formatChannelOptionValue = (channelName: string, platform: string) =>
+  `${channelName} [${platform}]`
+
+export const ReportBuilder = ({ role }: ReportBuilderProps) => {
   const [campaignList, setCampaignList] = useState<ReportCampaign[]>([])
+  const [viewerUserId, setViewerUserId] = useState('')
   const [campaignsLoading, setCampaignsLoading] = useState(true)
   const [campaignsError, setCampaignsError] = useState<string | null>(null)
   const platformOptions = ['TikTok', 'Instagram', 'YouTube', 'X']
@@ -33,16 +53,34 @@ export const ReportBuilder = () => {
   )
 
   const resolvedSeries = useMemo(() => youtubeSummary.timeSeries, [youtubeSummary.timeSeries])
+  const resolvedSeriesByChannel = useMemo(
+    () => youtubeSummary.timeSeriesByChannel ?? [],
+    [youtubeSummary.timeSeriesByChannel],
+  )
 
   const resolvedAgeDistribution = useMemo(() => youtubeSummary.ageDistribution, [youtubeSummary.ageDistribution])
+  const resolvedAgeDistributionByChannel = useMemo(
+    () => youtubeSummary.ageDistributionByChannel ?? {},
+    [youtubeSummary.ageDistributionByChannel],
+  )
 
   const resolvedGenderDistribution = useMemo(() => youtubeSummary.genderDistribution, [youtubeSummary.genderDistribution])
+  const resolvedGenderDistributionByChannel = useMemo(
+    () => youtubeSummary.genderDistributionByChannel ?? {},
+    [youtubeSummary.genderDistributionByChannel],
+  )
 
   const resolvedTopGeos = useMemo(() => youtubeSummary.topGeos, [youtubeSummary.topGeos])
+  const resolvedTopGeosByChannel = useMemo(
+    () => youtubeSummary.topGeosByChannel ?? {},
+    [youtubeSummary.topGeosByChannel],
+  )
 
   const channelOptions = useMemo(() => {
-    const uniqueChannelNames = [...new Set(resolvedChannels.map((channel) => channel.name))]
-    return ['All ONO/LNO', ...uniqueChannelNames]
+    const uniqueChannelLabels = [
+      ...new Set(resolvedChannels.map((channel) => formatChannelOptionValue(channel.name, channel.platform))),
+    ]
+    return ['All ONO/LNO', ...uniqueChannelLabels]
   }, [resolvedChannels])
 
   const todayDate = useMemo(() => {
@@ -51,40 +89,57 @@ export const ReportBuilder = () => {
     return localTime.toISOString().slice(0, 10)
   }, [])
 
-  const parseListParam = (value: string | null, allowed: string[], fallback: string[]) => {
-    if (!value) return fallback
+  const parseListParam = (
+    value: string | null,
+    allowed: string[],
+    fallback: string[],
+    options?: { allowEmpty?: boolean },
+  ) => {
+    if (value === null) return fallback
+    if (!value.trim()) return options?.allowEmpty ? [] : fallback
     const normalized = value
       .split(',')
       .map((item) => item.trim())
       .filter((item) => allowed.includes(item))
-    return normalized.length ? normalized : fallback
+    if (normalized.length) return normalized
+    return options?.allowEmpty ? [] : fallback
   }
 
   const parseDateParam = (value: string | null, fallback: string, min: string, max: string) => {
-    if (!value) return fallback
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return fallback
-    if (value < min || value > max) return fallback
-    return value
+    return sanitizeDateInput(value, { fallback, min, max })
+  }
+
+  const toMetricNumber = (value: unknown) => {
+    const parsed = Number(value)
+    return Number.isFinite(parsed) ? parsed : 0
+  }
+
+  const roundMetric = (value: number, digits = 2) => {
+    const precision = 10 ** digits
+    return Math.round(value * precision) / precision
   }
 
   const [initialShareState] = useState(() => {
     const params = new URLSearchParams(window.location.search)
-    const initialChannels = parseListParam(params.get('channels'), channelOptions, ['All ONO/LNO'])
+    const initialChannels = parseListParam(
+      params.get('channels'),
+      channelOptions,
+      ['All ONO/LNO'],
+      { allowEmpty: true },
+    )
     const hasAllChannel = initialChannels.includes('All ONO/LNO')
 
     return {
-      brandName: params.get('brand') ?? '',
-      campaignName: params.get('campaign') ?? '',
-      campaignFilter: params.get('filter') ?? 'No campaign filter',
-      rangeSelection: rangeOptions.includes(params.get('range') ?? '')
-        ? (params.get('range') as string)
-        : 'Campaign flight',
+      brandName: sanitizeTextInput(params.get('brand'), { maxLength: 140 }),
+      campaignName: sanitizeTextInput(params.get('campaign'), { maxLength: 140 }),
+      campaignFilter: sanitizeTextInput(params.get('filter') ?? 'No campaign filter', { maxLength: 140 }),
+      rangeSelection: sanitizeAllowlistedValue(params.get('range'), rangeOptions, 'Campaign flight'),
       customStart: parseDateParam(params.get('start'), todayDate, fallbackMinDate, fallbackMaxDate),
       customEnd: parseDateParam(params.get('end'), todayDate, fallbackMinDate, fallbackMaxDate),
       showCPM: (params.get('showCpm') ?? 'true') === 'true',
       showGuarantee: (params.get('showGuarantee') ?? 'true') === 'true',
       notes:
-        params.get('notes') ??
+        sanitizeMultilineInput(params.get('notes'), 4000) ||
         'Performance summary generated from campaign delivery data.',
       channels: hasAllChannel ? ['All ONO/LNO'] : initialChannels,
       platforms: parseListParam(params.get('platforms'), platformOptions, platformOptions),
@@ -105,6 +160,100 @@ export const ReportBuilder = () => {
   const [platforms, setPlatforms] = useState<string[]>(initialShareState.platforms)
   const [metrics, setMetrics] = useState<string[]>(initialShareState.metrics)
   const [shareStatus, setShareStatus] = useState('')
+  const canAccessReportBuilder = role === 'admin' || role === 'internal'
+  const authBaseUrl = resolveAuthBaseUrl()
+
+  const blobToBase64 = (blob: Blob) =>
+    new Promise<string>((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onloadend = () => {
+        if (typeof reader.result !== 'string') {
+          reject(new Error('Unable to read export preview payload.'))
+          return
+        }
+        const [, data = ''] = reader.result.split(',', 2)
+        resolve(data)
+      }
+      reader.onerror = () => reject(new Error('Unable to read export preview payload.'))
+      reader.readAsDataURL(blob)
+    })
+
+  const openProtectedPreview = async (blob: Blob, type: 'pdf' | 'csv', fileName: string) => {
+    const previewWindow = window.open('', '_blank')
+    if (!previewWindow) {
+      setShareStatus('Popup blocked. Allow popups to open export previews.')
+      return
+    }
+    const writePreviewWindowText = (title: string, message: string) => {
+      const document = previewWindow.document
+      document.title = title
+      const body = document.body
+      body.textContent = ''
+      const paragraph = document.createElement('p')
+      paragraph.style.fontFamily = 'Arial, sans-serif'
+      paragraph.style.padding = '24px'
+      paragraph.textContent = message
+      body.appendChild(paragraph)
+    }
+    try {
+      writePreviewWindowText('Preparing export preview...', 'Preparing export preview...')
+    } catch {
+      // Ignore document write errors and continue with navigation.
+    }
+
+    try {
+      if (!exportAuthorizationCampaign?.id) {
+        setShareStatus('Select a campaign you are a member of to export reports.')
+        previewWindow.close()
+        return
+      }
+      const dataBase64 = await blobToBase64(blob)
+      const response = await fetch(`${authBaseUrl}/api/exports/preview`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          campaignId: exportAuthorizationCampaign.id,
+          type,
+          fileName,
+          dataBase64,
+        }),
+      })
+      const payload = await response.json().catch(() => null)
+      if (!response.ok) {
+        throw new Error(
+          payload && typeof payload === 'object' && typeof (payload as { message?: unknown }).message === 'string'
+            ? (payload as { message: string }).message
+            : 'Unable to create export preview.',
+        )
+      }
+
+      const previewId =
+        payload && typeof payload === 'object' && typeof (payload as { id?: unknown }).id === 'string'
+          ? (payload as { id: string }).id
+          : ''
+      if (!previewId) {
+        throw new Error('Unable to create export preview.')
+      }
+      const previewUrl = `${window.location.origin}/exports/preview?id=${encodeURIComponent(previewId)}&type=${encodeURIComponent(type)}&fileName=${encodeURIComponent(fileName)}`
+      try {
+        previewWindow.location.href = previewUrl
+      } catch {
+        window.open(previewUrl, '_blank')
+      }
+    } catch (err) {
+      const message =
+        err instanceof Error
+          ? sanitizeTextInput(err.message, { maxLength: 300 })
+          : 'Unable to create export preview.'
+      try {
+        writePreviewWindowText('Export preview unavailable', message)
+      } catch {
+        previewWindow.close()
+      }
+      setShareStatus(message)
+    }
+  }
 
   useEffect(() => {
     let cancelled = false
@@ -115,10 +264,17 @@ export const ReportBuilder = () => {
       try {
         const response = await fetchCampaigns()
         if (cancelled) return
-        setCampaignList(response.campaigns.map((campaign) => mapCampaignForReport(campaign)))
+        setViewerUserId(response.viewerUserId)
+        const memberCampaigns = response.campaigns.flatMap((campaign) => {
+          const viewerRole = resolveViewerCampaignRole(campaign, response.viewerUserId)
+          if (!viewerRole) return []
+          return [mapCampaignForReport(campaign, viewerRole)]
+        })
+        setCampaignList(memberCampaigns)
       } catch (err) {
         if (cancelled) return
         setCampaignList([])
+        setViewerUserId('')
         setCampaignsError(err instanceof Error ? err.message : 'Unable to load campaigns.')
       } finally {
         if (!cancelled) setCampaignsLoading(false)
@@ -144,6 +300,22 @@ export const ReportBuilder = () => {
   }, [campaignList, todayDate])
 
   const allChannelsSelected = channels.includes('All ONO/LNO')
+  const includesWatchTimeMetric = metrics.includes('Watch Time')
+  const includesFollowersMetric = metrics.includes('Followers')
+  const selectedChannelOptions = useMemo(
+    () => channels.filter((item) => item !== 'All ONO/LNO' && channelOptions.includes(item)),
+    [channelOptions, channels],
+  )
+  const selectedChannelsLabel = allChannelsSelected
+    ? 'All ONO/LNO'
+    : selectedChannelOptions.length
+      ? selectedChannelOptions.join(', ')
+      : 'No channels selected'
+  const selectedChannelOptionSet = useMemo(() => new Set(selectedChannelOptions), [selectedChannelOptions])
+  const resolveChannelOptionLabel = (option: string) => {
+    if (option === 'All ONO/LNO') return option
+    return option
+  }
 
   const selectedCampaign = useMemo(() => {
     if (!campaignList.length) return null
@@ -156,6 +328,71 @@ export const ReportBuilder = () => {
       null
     )
   }, [campaignFilter, campaignList, campaignName])
+  const isAllCampaignFilter = campaignFilter === 'No campaign filter'
+  const activeCampaign = isAllCampaignFilter ? null : selectedCampaign
+  const scopedCampaigns = useMemo(
+    () => (isAllCampaignFilter ? campaignList : activeCampaign ? [activeCampaign] : []),
+    [activeCampaign, campaignList, isAllCampaignFilter],
+  )
+  const exportAuthorizationCampaign = useMemo(
+    () =>
+      scopedCampaigns.find(
+        (campaign) => campaign.viewerRole === 'admin' || campaign.viewerRole === 'internal',
+      ) ?? null,
+    [scopedCampaigns],
+  )
+  const scopedCampaignTotals = useMemo(
+    () =>
+      scopedCampaigns.reduce(
+        (totals, campaign) => ({
+          guaranteedViews: totals.guaranteedViews + toMetricNumber(campaign.guaranteedViews),
+          deliveredViews: totals.deliveredViews + toMetricNumber(campaign.deliveredViews),
+          guaranteedEngagements:
+            totals.guaranteedEngagements + toMetricNumber(campaign.guaranteedEngagements),
+          deliveredEngagements: totals.deliveredEngagements + toMetricNumber(campaign.deliveredEngagements),
+        }),
+        {
+          guaranteedViews: 0,
+          deliveredViews: 0,
+          guaranteedEngagements: 0,
+          deliveredEngagements: 0,
+        },
+      ),
+    [scopedCampaigns],
+  )
+  const scopedCampaignDeliveryPercent =
+    scopedCampaignTotals.guaranteedViews > 0
+      ? Math.min(100, Math.round((scopedCampaignTotals.deliveredViews / scopedCampaignTotals.guaranteedViews) * 100))
+      : 0
+  const scopedCampaignDistribution = useMemo(() => {
+    const deliveredTotal = scopedCampaigns.reduce(
+      (sum, campaign) => sum + Math.max(0, toMetricNumber(campaign.deliveredViews)),
+      0,
+    )
+    if (!deliveredTotal) {
+      return { ono: 0, clipper: 0 }
+    }
+    const onoWeighted = scopedCampaigns.reduce(
+      (sum, campaign) =>
+        sum + toMetricNumber(campaign.distribution.ono) * Math.max(0, toMetricNumber(campaign.deliveredViews)),
+      0,
+    )
+    const clipperWeighted = scopedCampaigns.reduce(
+      (sum, campaign) =>
+        sum + toMetricNumber(campaign.distribution.clipper) * Math.max(0, toMetricNumber(campaign.deliveredViews)),
+      0,
+    )
+    return {
+      ono: roundMetric(onoWeighted / deliveredTotal, 1),
+      clipper: roundMetric(clipperWeighted / deliveredTotal, 1),
+    }
+  }, [scopedCampaigns])
+  const scopedCampaignPacingLabel = isAllCampaignFilter
+    ? `Mixed (${scopedCampaigns.length} campaigns)`
+    : activeCampaign?.pacing || 'N/A'
+
+  const canExportReports = Boolean(exportAuthorizationCampaign)
+  const canShareReports = canExportReports
 
   useEffect(() => {
     if (!campaignList.length) return
@@ -166,42 +403,289 @@ export const ReportBuilder = () => {
   }, [campaignFilter, campaignList])
 
   useEffect(() => {
-    if (!selectedCampaign) return
+    if (!activeCampaign) return
     setCampaignName((current) => {
-      if (current.trim() && campaignList.some((campaign) => campaign.name === current.trim())) {
-        return current
+      const sanitizedCurrent = sanitizeTextInput(current, { maxLength: 140 })
+      if (
+        sanitizedCurrent &&
+        campaignList.some((campaign) => campaign.name === sanitizedCurrent)
+      ) {
+        return sanitizedCurrent
       }
-      return selectedCampaign.name
+      return activeCampaign.name
     })
-    setBrandName((current) => (current.trim() ? current : selectedCampaign.brand))
-  }, [campaignList, selectedCampaign])
+    setBrandName((current) => {
+      const sanitizedCurrent = sanitizeTextInput(current, { maxLength: 140 })
+      return sanitizedCurrent || activeCampaign.brand
+    })
+  }, [activeCampaign, campaignList])
 
   useEffect(() => {
-    const fallbackStart = selectedCampaign?.startDate ?? dataStartDate
+    const fallbackStart = activeCampaign?.startDate ?? dataStartDate
     const nextStart = parseDateParam(customStart, fallbackStart, dataStartDate, dataEndDate)
     if (nextStart !== customStart) {
       setCustomStart(nextStart)
     }
 
-    const fallbackEnd = selectedCampaign?.endDate ?? dataEndDate
+    const fallbackEnd = activeCampaign?.endDate ?? dataEndDate
     const nextEndValue = parseDateParam(customEnd, fallbackEnd, dataStartDate, dataEndDate)
     const boundedEnd = nextEndValue < nextStart ? nextStart : nextEndValue
     if (boundedEnd !== customEnd) {
       setCustomEnd(boundedEnd)
     }
-  }, [customEnd, customStart, dataEndDate, dataStartDate, selectedCampaign])
+  }, [activeCampaign, customEnd, customStart, dataEndDate, dataStartDate])
+
+  const scopedCampaignPostIdSet = useMemo(() => {
+    const ids = new Set<string>()
+    scopedCampaigns.forEach((campaign) => {
+      campaign.selectedPostIds.forEach((postId) => {
+        const normalizedPostId = typeof postId === 'string' ? postId.trim() : ''
+        if (!normalizedPostId) return
+        ids.add(normalizedPostId)
+      })
+      campaign.posts.forEach((group) => {
+        if (!group || typeof group !== 'object') return
+        const posts = group.posts && typeof group.posts === 'object' && !Array.isArray(group.posts)
+          ? group.posts
+          : {}
+        Object.keys(posts).forEach((postId) => {
+          const normalizedPostId = typeof postId === 'string' ? postId.trim() : ''
+          if (!normalizedPostId) return
+          ids.add(normalizedPostId)
+        })
+      })
+    })
+    return ids
+  }, [scopedCampaigns])
+
+  const scopedCampaignAssignedPosts = useMemo(
+    () => {
+      const byId = new Map<string, {
+        id: string
+        title: string
+        platform: string
+        channelId: string
+        channelName: string
+        views: number
+        engagementRate: number
+      }>()
+      scopedCampaigns.forEach((campaign) => {
+        campaign.posts.forEach((group) => {
+          if (!group || typeof group !== 'object') return
+          const channelId = typeof group.channelId === 'string' ? group.channelId.trim() : ''
+          const channelName = typeof group.channelName === 'string' ? group.channelName.trim() : ''
+          const groupPlatform = typeof group.platform === 'string' ? group.platform.trim() : ''
+          const posts = group.posts && typeof group.posts === 'object' && !Array.isArray(group.posts)
+            ? group.posts
+            : {}
+          Object.entries(posts).forEach(([postId, postValue]) => {
+            const normalizedPostId = typeof postId === 'string' ? postId.trim() : ''
+            if (!normalizedPostId) return
+            const source = postValue && typeof postValue === 'object' && !Array.isArray(postValue)
+              ? postValue as {
+                title?: unknown
+                platform?: unknown
+                channelId?: unknown
+                channelName?: unknown
+                views?: unknown
+                engagementRate?: unknown
+              }
+              : {}
+            byId.set(normalizedPostId, {
+              id: normalizedPostId,
+              title: sanitizeTextInput(source.title, { maxLength: 300 }) || 'Untitled post',
+              platform: sanitizeTextInput(source.platform, { maxLength: 64 }) || groupPlatform || 'YouTube',
+              channelId: sanitizeTextInput(source.channelId, { maxLength: 300 }) || channelId,
+              channelName: sanitizeTextInput(source.channelName, { maxLength: 180 }) || channelName,
+              views: toMetricNumber(source.views),
+              engagementRate: toMetricNumber(source.engagementRate),
+            })
+          })
+        })
+      })
+      return [...byId.values()]
+    },
+    [scopedCampaigns],
+  )
+
+  const scopedCampaignChannelIdSet = useMemo(() => {
+    const ids = new Set<string>()
+    scopedCampaignAssignedPosts.forEach((post) => {
+      const channelId = typeof post.channelId === 'string' ? post.channelId.trim() : ''
+      if (!channelId) return
+      ids.add(channelId)
+    })
+    resolvedPosts.forEach((post) => {
+      if (!scopedCampaignPostIdSet.has(post.id)) return
+      const channelId = typeof post.channelId === 'string' ? post.channelId.trim() : ''
+      if (!channelId) return
+      ids.add(channelId)
+    })
+    return ids
+  }, [resolvedPosts, scopedCampaignAssignedPosts, scopedCampaignPostIdSet])
 
   const filteredChannels = useMemo(() => {
-    return resolvedChannels.filter((channel) => platforms.includes(channel.platform))
-  }, [platforms, resolvedChannels])
+    return resolvedChannels.filter(
+      (channel) =>
+        platforms.includes(channel.platform)
+        && (
+          allChannelsSelected
+          || selectedChannelOptionSet.has(formatChannelOptionValue(channel.name, channel.platform))
+        )
+        && scopedCampaignChannelIdSet.has(channel.id),
+    )
+  }, [allChannelsSelected, platforms, resolvedChannels, scopedCampaignChannelIdSet, selectedChannelOptionSet])
 
   const filteredPosts = useMemo(() => {
     const byPlatform = resolvedPosts.filter((post) => platforms.includes(post.platform))
-    if (!selectedCampaign) return byPlatform
-    const byCampaign = byPlatform.filter((post) => post.campaignTag === selectedCampaign.name)
-    if (byCampaign.length) return byCampaign
-    return byPlatform
-  }, [platforms, resolvedPosts, selectedCampaign])
+    const allowedPostChannelIds = new Set(filteredChannels.map((channel) => channel.id))
+    const allowedPostChannelNames = new Set(
+      filteredChannels.map((channel) => channel.name.toLowerCase()),
+    )
+    const byChannel = byPlatform.filter((post) => {
+      if (!allowedPostChannelIds.size && !allowedPostChannelNames.size) return false
+      const postChannelId = typeof post.channelId === 'string' ? post.channelId : ''
+      if (postChannelId && allowedPostChannelIds.has(postChannelId)) return true
+      const postChannelName = typeof post.channelName === 'string' ? post.channelName.toLowerCase() : ''
+      if (postChannelName && allowedPostChannelNames.has(postChannelName)) return true
+      return false
+    })
+    const byCampaignAssignments = byChannel.filter((post) => scopedCampaignPostIdSet.has(post.id))
+    if (byCampaignAssignments.length) return byCampaignAssignments
+    return scopedCampaignAssignedPosts
+      .filter((post) => platforms.includes(post.platform))
+      .filter((post) => {
+        if (!allowedPostChannelIds.size) return false
+        if (post.channelId && allowedPostChannelIds.has(post.channelId)) return true
+        const normalizedChannelName = post.channelName.toLowerCase()
+        if (normalizedChannelName && allowedPostChannelNames.has(normalizedChannelName)) return true
+        return false
+      })
+      .map((post) => ({
+        id: post.id,
+        title: post.title,
+        platform: post.platform as 'YouTube' | 'Instagram' | 'TikTok' | 'X',
+        channelId: post.channelId,
+        channelName: post.channelName,
+        views: post.views,
+        engagementRate: post.engagementRate,
+        campaignTag: '',
+      }))
+  }, [filteredChannels, platforms, resolvedPosts, scopedCampaignAssignedPosts, scopedCampaignPostIdSet])
+  const platformScopedChannels = useMemo(
+    () => resolvedChannels.filter((channel) => platforms.includes(channel.platform)),
+    [platforms, resolvedChannels],
+  )
+  const selectedChannelViews = useMemo(
+    () => filteredChannels.reduce((sum, channel) => sum + toMetricNumber(channel.views), 0),
+    [filteredChannels],
+  )
+  const selectedFollowerCount = useMemo(
+    () => filteredChannels.reduce((sum, channel) => sum + toMetricNumber(channel.followers), 0),
+    [filteredChannels],
+  )
+  const platformScopedViews = useMemo(
+    () => platformScopedChannels.reduce((sum, channel) => sum + toMetricNumber(channel.views), 0),
+    [platformScopedChannels],
+  )
+  const filteredChannelIdSet = useMemo(
+    () => new Set(filteredChannels.map((channel) => channel.id)),
+    [filteredChannels],
+  )
+  const campaignScopedSeries = useMemo(() => {
+    if (!filteredChannelIdSet.size) return []
+    if (resolvedSeriesByChannel.length) {
+      const byDate = new Map<string, {
+        date: string
+        views: number
+        engagements: number
+        posts: number
+        watchTimeHours: number
+        followersNetChange: number
+      }>()
+      resolvedSeriesByChannel.forEach((point) => {
+        if (!filteredChannelIdSet.has(point.channelId)) return
+        const date = typeof point.date === 'string' ? point.date : ''
+        if (!date) return
+        const current = byDate.get(date) ?? {
+          date,
+          views: 0,
+          engagements: 0,
+          posts: 0,
+          watchTimeHours: 0,
+          followersNetChange: 0,
+        }
+        current.views += toMetricNumber(point.views)
+        current.engagements += toMetricNumber(point.engagements)
+        current.posts += toMetricNumber(point.posts)
+        current.watchTimeHours += toMetricNumber(point.watchTimeHours)
+        current.followersNetChange += toMetricNumber(point.followersNetChange)
+        byDate.set(date, current)
+      })
+      return [...byDate.values()]
+        .sort((a, b) => a.date.localeCompare(b.date))
+        .map((point) => ({
+          ...point,
+          watchTimeHours: roundMetric(point.watchTimeHours, 2),
+          followersNetChange: Math.round(point.followersNetChange),
+        }))
+    }
+    const ratio = platformScopedViews > 0 ? Math.min(1, selectedChannelViews / platformScopedViews) : 0
+    if (!ratio) return []
+    return resolvedSeries.map((point) => ({
+      date: point.date,
+      views: roundMetric(toMetricNumber(point.views) * ratio, 2),
+      engagements: roundMetric(toMetricNumber(point.engagements) * ratio, 2),
+      posts: roundMetric(toMetricNumber(point.posts) * ratio, 2),
+      watchTimeHours: roundMetric(toMetricNumber(point.watchTimeHours) * ratio, 2),
+      followersNetChange: Math.round(toMetricNumber(point.followersNetChange) * ratio),
+    }))
+  }, [filteredChannelIdSet, platformScopedViews, resolvedSeries, resolvedSeriesByChannel, selectedChannelViews])
+  const channelViewById = useMemo(
+    () => new Map(filteredChannels.map((channel) => [channel.id, Math.max(1, toMetricNumber(channel.views))])),
+    [filteredChannels],
+  )
+  const buildScopedAudienceDistribution = useCallback((
+    distributionByChannel: Record<string, Array<{ label: string; value: number }>>,
+    fallback: Array<{ label: string; value: number }>,
+    limit?: number,
+  ) => {
+    const weightedTotals = new Map<string, number>()
+    filteredChannelIdSet.forEach((channelId) => {
+      const rows = Array.isArray(distributionByChannel[channelId]) ? distributionByChannel[channelId] : []
+      if (!rows.length) return
+      const weight = channelViewById.get(channelId) ?? 1
+      rows.forEach((row) => {
+        const label = sanitizeTextInput(row.label, { maxLength: 140 })
+        if (!label) return
+        const value = toMetricNumber(row.value)
+        weightedTotals.set(label, (weightedTotals.get(label) ?? 0) + value * weight)
+      })
+    })
+    const total = [...weightedTotals.values()].reduce((sum, value) => sum + value, 0)
+    const rows = total
+      ? [...weightedTotals.entries()]
+        .map(([label, value]) => ({
+          label,
+          value: Math.round((value / total) * 100),
+        }))
+        .sort((a, b) => b.value - a.value)
+      : []
+    const resolved = rows.length ? rows : (filteredChannelIdSet.size ? [] : fallback)
+    return typeof limit === 'number' ? resolved.slice(0, limit) : resolved
+  }, [filteredChannelIdSet, channelViewById])
+  const scopedAgeDistribution = useMemo(
+    () => buildScopedAudienceDistribution(resolvedAgeDistributionByChannel, resolvedAgeDistribution),
+    [resolvedAgeDistribution, resolvedAgeDistributionByChannel, buildScopedAudienceDistribution],
+  )
+  const scopedGenderDistribution = useMemo(
+    () => buildScopedAudienceDistribution(resolvedGenderDistributionByChannel, resolvedGenderDistribution),
+    [resolvedGenderDistribution, resolvedGenderDistributionByChannel, buildScopedAudienceDistribution],
+  )
+  const scopedTopGeos = useMemo(
+    () => buildScopedAudienceDistribution(resolvedTopGeosByChannel, resolvedTopGeos, 5),
+    [resolvedTopGeos, resolvedTopGeosByChannel, buildScopedAudienceDistribution],
+  )
 
   const formatDateLabel = (value: string) => {
     const date = new Date(value)
@@ -214,12 +698,15 @@ export const ReportBuilder = () => {
   }
 
   const displayRange = useMemo(() => {
-    if (rangeSelection === 'Campaign flight' && selectedCampaign) {
-      return `${formatDateLabel(selectedCampaign.startDate)} - ${formatDateLabel(selectedCampaign.endDate)}`
+    if (rangeSelection === 'Campaign flight') {
+      if (activeCampaign) {
+        return `${formatDateLabel(activeCampaign.startDate)} - ${formatDateLabel(activeCampaign.endDate)}`
+      }
+      return `${formatDateLabel(dataStartDate)} - ${formatDateLabel(dataEndDate)}`
     }
     if (rangeSelection !== 'Custom') return rangeSelection
     return `${formatDateLabel(customStart)} - ${formatDateLabel(customEnd)}`
-  }, [customEnd, customStart, rangeSelection, selectedCampaign])
+  }, [activeCampaign, customEnd, customStart, dataEndDate, dataStartDate, rangeSelection])
 
   const readBlobAsDataUrl = (blob: Blob) =>
     new Promise<string>((resolve, reject) => {
@@ -267,6 +754,16 @@ export const ReportBuilder = () => {
   const truncateAudienceLabel = (label: string, maxLength: number) => {
     if (label.length <= maxLength) return label
     return `${label.slice(0, maxLength - 1)}...`
+  }
+
+  const TOP_CONTENT_POST_TITLE_MAX_LENGTH = 30
+  const truncateTopContentPostTitle = (
+    title: string,
+    maxLength = TOP_CONTENT_POST_TITLE_MAX_LENGTH,
+  ) => {
+    if (title.length <= maxLength) return title
+    if (maxLength <= 3) return title.slice(0, maxLength)
+    return `${title.slice(0, maxLength - 3)}...`
   }
 
   const getTopAudiencePoints = (
@@ -325,7 +822,15 @@ export const ReportBuilder = () => {
     return canvas.toDataURL('image/png')
   }
 
-  const handleExportPdf = async () => {
+  const handleExportPdf = async (options?: { preview?: boolean }) => {
+    if (!canExportReports) {
+      setShareStatus('You do not have permission to export reports.')
+      return
+    }
+    if (!scopedCampaigns.length) {
+      setShareStatus('Select a campaign you are a member of to export reports.')
+      return
+    }
     const doc = new jsPDF({ unit: 'pt', format: 'letter' })
     const pageWidth = doc.internal.pageSize.getWidth()
     const pageHeight = doc.internal.pageSize.getHeight()
@@ -340,12 +845,20 @@ export const ReportBuilder = () => {
       minute: '2-digit',
     }).format(new Date())
     const totalPages = 6
-    const totalViews = selectedCampaign?.deliveredViews ?? 0
-    const totalEngagements = selectedCampaign?.deliveredEngagements ?? 0
+    const totalViews = scopedCampaignTotals.deliveredViews
+    const totalEngagements = scopedCampaignTotals.deliveredEngagements
     const totalPublishedPosts = filteredPosts.length ? filteredPosts.length : 0
+    const totalFollowers = selectedFollowerCount
+    const totalWatchTimeHours = roundMetric(
+      campaignScopedSeries.reduce((sum, point) => sum + toMetricNumber(point.watchTimeHours), 0),
+      1,
+    )
+    const campaignScopeLabel = isAllCampaignFilter
+      ? `All campaigns (${scopedCampaigns.length})`
+      : campaignName || activeCampaign?.name || 'Campaign Name'
     const top3Channels = filteredChannels.slice(0, 3)
     const channelViewTotal = filteredChannels.reduce((sum, channel) => sum + channel.views, 0)
-    const hasTimeSeriesData = resolvedSeries.some(
+    const hasTimeSeriesData = campaignScopedSeries.some(
       (point) => Number(point.views) > 0 || Number(point.engagements) > 0 || Number(point.posts) > 0,
     )
     const insightBullets = notes
@@ -353,13 +866,10 @@ export const ReportBuilder = () => {
       .map((line) => line.trim())
       .filter(Boolean)
       .slice(0, 6)
-    const deliveryProgress =
-      selectedCampaign && selectedCampaign.guaranteedViews > 0
-        ? Math.min(100, Math.round((selectedCampaign.deliveredViews / selectedCampaign.guaranteedViews) * 100))
-        : 0
-    const ageAudiencePoints = getTopAudiencePoints(resolvedAgeDistribution)
-    const genderAudiencePoints = getTopAudiencePoints(resolvedGenderDistribution)
-    const geoAudiencePoints = getTopAudiencePoints(resolvedTopGeos)
+    const deliveryProgress = scopedCampaignDeliveryPercent
+    const ageAudiencePoints = getTopAudiencePoints(scopedAgeDistribution)
+    const genderAudiencePoints = getTopAudiencePoints(scopedGenderDistribution)
+    const geoAudiencePoints = getTopAudiencePoints(scopedTopGeos)
     const agePieDataUrl = buildPieChartImage(ageAudiencePoints)
     const genderPieDataUrl = buildPieChartImage(genderAudiencePoints)
     const geoPieDataUrl = buildPieChartImage(geoAudiencePoints)
@@ -462,13 +972,13 @@ export const ReportBuilder = () => {
     doc.setFontSize(13)
     doc.setFont('helvetica', 'normal')
     doc.setTextColor(...brandPalette.muted)
-    doc.text(`Campaign/Deal: ${campaignName || 'Campaign Name'}`, margin + 20, 195)
+    doc.text(`Campaign/Deal: ${campaignScopeLabel}`, margin + 20, 195)
     doc.text(`Time range: ${displayRange}`, margin + 20, 220)
-    doc.text(`Title: ${campaignName || 'Brand Campaign Report'}`, margin + 20, 245)
+    doc.text(`Title: ${campaignScopeLabel}`, margin + 20, 245)
     doc.setTextColor(...brandPalette.primary)
     doc.text(`Layout: Clean PDF`, margin + 20, 270)
     doc.setTextColor(...brandPalette.muted)
-    doc.text(`Channels: ${allChannelsSelected ? 'All ONO/LNO' : channels.join(', ')}`, margin + 20, 295)
+    doc.text(`Channels: ${selectedChannelsLabel}`, margin + 20, 295)
     doc.text(`Platforms: ${platforms.join(', ')}`, margin + 20, 320)
     if (logoDataUrl) {
       doc.addImage(logoDataUrl, 'PNG', margin + 20, 334, 120, 42)
@@ -491,22 +1001,31 @@ export const ReportBuilder = () => {
     doc.setTextColor(...brandPalette.muted)
     doc.text(`Total views: ${formatNumber(totalViews)}`, margin, 154)
     doc.text(`Total engagements: ${formatNumber(totalEngagements)}`, margin, 176)
-    doc.text(`Posts published: ${totalPublishedPosts}`, margin, 198)
+    if (includesWatchTimeMetric) {
+      doc.text(`Watch time: ${formatNumber(totalWatchTimeHours)} hrs`, margin, 198)
+    }
+    if (includesFollowersMetric) {
+      doc.text(`Follower count: ${formatNumber(totalFollowers)}`, margin, 220)
+    }
+    doc.text(`Posts published: ${totalPublishedPosts}`, margin, 242)
     doc.setFont('helvetica', 'bold')
     doc.setTextColor(...brandPalette.text)
-    doc.text('Top 3 channels', margin, 236)
+    doc.text('Top 3 channels', margin, 274)
     doc.setFont('helvetica', 'normal')
     doc.setTextColor(...brandPalette.muted)
     if (top3Channels.length) {
       top3Channels.forEach((channel, index) => {
+        const followerSuffix = includesFollowersMetric
+          ? ` | ${formatNumber(toMetricNumber(channel.followers))} followers`
+          : ''
         doc.text(
-          `${index + 1}. ${channel.name} (${channel.platform}) - ${formatNumber(channel.views)} views`,
+          `${index + 1}. ${channel.name} (${channel.platform}) - ${formatNumber(channel.views)} views${followerSuffix}`,
           margin,
-          260 + index * 22,
+          298 + index * 18,
         )
       })
     } else {
-      doc.text('No live channel data available for this section.', margin, 260)
+      doc.text('No live channel data available for this section.', margin, 298)
     }
     doc.setFont('helvetica', 'bold')
     doc.setTextColor(...brandPalette.text)
@@ -519,22 +1038,29 @@ export const ReportBuilder = () => {
         doc.text(wrapped, margin, 365 + index * 24)
       },
     )
-    if (showGuarantee && selectedCampaign) {
+    if (showGuarantee && scopedCampaigns.length) {
       doc.setFont('helvetica', 'bold')
       doc.setTextColor(...brandPalette.text)
       doc.text('Guaranteed vs Delivered', margin, 520)
       doc.setFont('helvetica', 'normal')
       doc.setTextColor(...brandPalette.muted)
       doc.text(
-        `Views: ${formatNumber(selectedCampaign.guaranteedViews)} guaranteed vs ${formatNumber(selectedCampaign.deliveredViews)} delivered`,
+        `Views: ${formatNumber(scopedCampaignTotals.guaranteedViews)} guaranteed vs ${formatNumber(scopedCampaignTotals.deliveredViews)} delivered`,
         margin,
         544,
       )
       doc.text(
-        `Engagements: ${formatNumber(selectedCampaign.guaranteedEngagements)} guaranteed vs ${formatNumber(selectedCampaign.deliveredEngagements)} delivered`,
+        `Engagements: ${formatNumber(scopedCampaignTotals.guaranteedEngagements)} guaranteed vs ${formatNumber(scopedCampaignTotals.deliveredEngagements)} delivered`,
         margin,
         566,
       )
+      if (isAllCampaignFilter) {
+        const wrappedCampaigns = doc.splitTextToSize(
+          `Campaigns: ${scopedCampaigns.map((campaign) => campaign.name).join(', ')}`,
+          availableWidth - 10,
+        )
+        doc.text(wrappedCampaigns, margin, 588)
+      }
     }
     addFooter(2)
 
@@ -545,13 +1071,15 @@ export const ReportBuilder = () => {
     const chartTop = 130
     const chartWidth = availableWidth
     const chartHeight = 230
-    const maxViews = resolvedSeries.length ? Math.max(...resolvedSeries.map((point) => point.views)) : 0
+    const maxViews = campaignScopedSeries.length
+      ? Math.max(...campaignScopedSeries.map((point) => point.views))
+      : 0
     doc.setDrawColor(...brandPalette.border)
     doc.rect(chartLeft, chartTop, chartWidth, chartHeight)
-    if (resolvedSeries.length && maxViews > 0 && hasTimeSeriesData) {
-      resolvedSeries.forEach((point, index) => {
-        const barWidth = chartWidth / resolvedSeries.length - 8
-        const x = chartLeft + index * (chartWidth / resolvedSeries.length) + 4
+    if (campaignScopedSeries.length && maxViews > 0 && hasTimeSeriesData) {
+      campaignScopedSeries.forEach((point, index) => {
+        const barWidth = chartWidth / campaignScopedSeries.length - 8
+        const x = chartLeft + index * (chartWidth / campaignScopedSeries.length) + 4
         const height = (point.views / maxViews) * (chartHeight - 35)
         const y = chartTop + chartHeight - height - 20
         doc.setFillColor(...brandPalette.primary)
@@ -633,13 +1161,11 @@ export const ReportBuilder = () => {
       filteredPosts.slice(0, 8).forEach((post, index) => {
         const y = 156 + index * 30
         doc.setTextColor(...brandPalette.text)
-        doc.text(post.title, margin, y)
+        doc.text(truncateTopContentPostTitle(post.title), margin, y)
         doc.setTextColor(...brandPalette.muted)
         doc.text(post.platform, margin + 235, y)
         doc.text(formatNumber(post.views), margin + 340, y)
         doc.text(`${post.engagementRate.toFixed(1)}%`, margin + 430, y)
-        doc.setFontSize(8)
-        doc.text('Thumbnail: not available in live export', margin, y + 12)
         doc.setFontSize(11)
       })
     } else {
@@ -650,7 +1176,7 @@ export const ReportBuilder = () => {
     // Page 6 - Campaign ROI
     doc.addPage()
     addPageTitle('Campaign ROI', 'Delivery progress, guarantee attainment, and distribution')
-    if (selectedCampaign) {
+    if (scopedCampaigns.length) {
       doc.setFont('helvetica', 'bold')
       doc.setFontSize(13)
       doc.setTextColor(...brandPalette.text)
@@ -664,12 +1190,12 @@ export const ReportBuilder = () => {
       doc.setTextColor(...brandPalette.muted)
       doc.text(`${deliveryProgress}% delivered`, margin, 180)
       doc.text(
-        `Guaranteed vs Actual Views: ${formatNumber(selectedCampaign.guaranteedViews)} vs ${formatNumber(selectedCampaign.deliveredViews)}`,
+        `Guaranteed vs Actual Views: ${formatNumber(scopedCampaignTotals.guaranteedViews)} vs ${formatNumber(scopedCampaignTotals.deliveredViews)}`,
         margin,
         210,
       )
       doc.text(
-        `Guaranteed vs Actual Engagements: ${formatNumber(selectedCampaign.guaranteedEngagements)} vs ${formatNumber(selectedCampaign.deliveredEngagements)}`,
+        `Guaranteed vs Actual Engagements: ${formatNumber(scopedCampaignTotals.guaranteedEngagements)} vs ${formatNumber(scopedCampaignTotals.deliveredEngagements)}`,
         margin,
         234,
       )
@@ -682,9 +1208,31 @@ export const ReportBuilder = () => {
       doc.text('Distribution breakdown', margin, 310)
       doc.setFont('helvetica', 'normal')
       doc.setTextColor(...brandPalette.muted)
-      doc.text(`ONO: ${selectedCampaign.distribution.ono}%`, margin, 334)
-      doc.text(`Clipper: ${selectedCampaign.distribution.clipper}%`, margin + 150, 334)
-      doc.text(`Pacing: ${selectedCampaign.pacing}`, margin, 358)
+      doc.text(`ONO: ${scopedCampaignDistribution.ono}%`, margin, 334)
+      doc.text(`Clipper: ${scopedCampaignDistribution.clipper}%`, margin + 150, 334)
+      doc.text(`Pacing: ${scopedCampaignPacingLabel}`, margin, 358)
+      if (isAllCampaignFilter) {
+        doc.setFont('helvetica', 'bold')
+        doc.setTextColor(...brandPalette.text)
+        doc.text(`Campaigns included (${scopedCampaigns.length})`, margin, 390)
+        doc.setFont('helvetica', 'normal')
+        doc.setTextColor(...brandPalette.muted)
+        const visibleCampaigns = scopedCampaigns.slice(0, 10)
+        visibleCampaigns.forEach((campaign, index) => {
+          doc.text(
+            `${campaign.name}: ${formatNumber(campaign.deliveredViews)}/${formatNumber(campaign.guaranteedViews)} views`,
+            margin,
+            412 + index * 16,
+          )
+        })
+        if (scopedCampaigns.length > visibleCampaigns.length) {
+          doc.text(
+            `+${scopedCampaigns.length - visibleCampaigns.length} more campaigns`,
+            margin,
+            412 + visibleCampaigns.length * 16,
+          )
+        }
+      }
     } else {
       doc.setFont('helvetica', 'normal')
       doc.setFontSize(12)
@@ -698,10 +1246,22 @@ export const ReportBuilder = () => {
     addFooter(6)
 
     const safeFileName = `${(campaignName || 'brand-report').toLowerCase().replace(/\s+/g, '-')}-report.pdf`
+    if (options?.preview) {
+      await openProtectedPreview(doc.output('blob'), 'pdf', safeFileName)
+      return
+    }
     doc.save(safeFileName)
   }
 
-  const handleExportDeckPdf = async () => {
+  const handleExportDeckPdf = async (options?: { preview?: boolean }) => {
+    if (!canExportReports) {
+      setShareStatus('You do not have permission to export reports.')
+      return
+    }
+    if (!scopedCampaigns.length) {
+      setShareStatus('Select a campaign you are a member of to export reports.')
+      return
+    }
     const doc = new jsPDF({ orientation: 'landscape', unit: 'pt', format: 'letter' })
     const pageWidth = doc.internal.pageSize.getWidth()
     const pageHeight = doc.internal.pageSize.getHeight()
@@ -717,29 +1277,36 @@ export const ReportBuilder = () => {
       minute: '2-digit',
     }).format(new Date())
     const totalSlides = 6
-    const totalViews = selectedCampaign?.deliveredViews ?? 0
-    const totalEngagements = selectedCampaign?.deliveredEngagements ?? 0
+    const totalViews = scopedCampaignTotals.deliveredViews
+    const totalEngagements = scopedCampaignTotals.deliveredEngagements
     const totalPublishedPosts = filteredPosts.length ? filteredPosts.length : 0
+    const totalFollowers = selectedFollowerCount
+    const totalWatchTimeHours = roundMetric(
+      campaignScopedSeries.reduce((sum, point) => sum + toMetricNumber(point.watchTimeHours), 0),
+      1,
+    )
+    const campaignScopeLabel = isAllCampaignFilter
+      ? `All campaigns (${scopedCampaigns.length})`
+      : campaignName || activeCampaign?.name || 'Campaign Name'
     const topChannels = filteredChannels.slice(0, 5)
     const topPosts = filteredPosts.slice(0, 6)
     const channelViewTotal = filteredChannels.reduce((sum, channel) => sum + channel.views, 0)
-    const hasTimeSeriesData = resolvedSeries.some(
+    const hasTimeSeriesData = campaignScopedSeries.some(
       (point) => Number(point.views) > 0 || Number(point.engagements) > 0 || Number(point.posts) > 0,
     )
-    const maxViews = resolvedSeries.length ? Math.max(...resolvedSeries.map((point) => point.views)) : 0
+    const maxViews = campaignScopedSeries.length
+      ? Math.max(...campaignScopedSeries.map((point) => point.views))
+      : 0
     const insightBullets = notes
       .split('\n')
       .map((line) => line.trim())
       .filter(Boolean)
       .slice(0, 5)
-    const deliveryProgress =
-      selectedCampaign && selectedCampaign.guaranteedViews > 0
-        ? Math.min(100, Math.round((selectedCampaign.deliveredViews / selectedCampaign.guaranteedViews) * 100))
-        : 0
+    const deliveryProgress = scopedCampaignDeliveryPercent
     const baseFileName = toFileSlug(campaignName || brandName || 'brand-report')
-    const ageAudiencePoints = getTopAudiencePoints(resolvedAgeDistribution, 4)
-    const genderAudiencePoints = getTopAudiencePoints(resolvedGenderDistribution, 4)
-    const geoAudiencePoints = getTopAudiencePoints(resolvedTopGeos, 4)
+    const ageAudiencePoints = getTopAudiencePoints(scopedAgeDistribution, 4)
+    const genderAudiencePoints = getTopAudiencePoints(scopedGenderDistribution, 4)
+    const geoAudiencePoints = getTopAudiencePoints(scopedTopGeos, 4)
     const agePieDataUrl = buildPieChartImage(ageAudiencePoints)
     const genderPieDataUrl = buildPieChartImage(genderAudiencePoints)
     const geoPieDataUrl = buildPieChartImage(geoAudiencePoints)
@@ -813,14 +1380,14 @@ export const ReportBuilder = () => {
     doc.setFont('helvetica', 'bold')
     doc.setFontSize(30)
     doc.setTextColor(...brandPalette.text)
-    doc.text(campaignName || 'Campaign Name', margin + 28, 160)
+    doc.text(campaignScopeLabel, margin + 28, 160)
     doc.setFont('helvetica', 'normal')
     doc.setFontSize(15)
     doc.setTextColor(...brandPalette.muted)
     doc.text(brandName || 'Brand Name', margin + 28, 188)
     doc.setFontSize(12)
     doc.text(`Date range: ${displayRange}`, margin + 28, 216)
-    doc.text(`Channels: ${allChannelsSelected ? 'All ONO/LNO' : channels.join(', ')}`, margin + 28, 238)
+    doc.text(`Channels: ${selectedChannelsLabel}`, margin + 28, 238)
     doc.text(`Platforms: ${platforms.join(', ')}`, margin + 28, 260)
     doc.setFont('helvetica', 'bold')
     doc.setTextColor(...brandPalette.primary)
@@ -844,7 +1411,7 @@ export const ReportBuilder = () => {
       86,
       'Total views delivered',
       formatNumber(totalViews),
-      selectedCampaign ? `Guarantee: ${formatNumber(selectedCampaign.guaranteedViews)}` : undefined,
+      `Guarantee: ${formatNumber(scopedCampaignTotals.guaranteedViews)}`,
     )
     addMetricCard(
       margin + summaryCardWidth + 16,
@@ -853,9 +1420,7 @@ export const ReportBuilder = () => {
       86,
       'Total engagements',
       formatNumber(totalEngagements),
-      selectedCampaign
-        ? `Guarantee: ${formatNumber(selectedCampaign.guaranteedEngagements)}`
-        : undefined,
+      `Guarantee: ${formatNumber(scopedCampaignTotals.guaranteedEngagements)}`,
     )
     addMetricCard(
       margin + (summaryCardWidth + 16) * 2,
@@ -874,12 +1439,21 @@ export const ReportBuilder = () => {
     doc.setTextColor(...brandPalette.text)
     doc.text('Insights', margin + 18, 236)
     doc.setFont('helvetica', 'normal')
+    doc.setFontSize(10)
+    doc.setTextColor(...brandPalette.muted)
+    if (includesWatchTimeMetric) {
+      doc.text(`Watch time: ${formatNumber(totalWatchTimeHours)} hrs`, margin + 18, 256)
+    }
+    if (includesFollowersMetric) {
+      doc.text(`Follower count: ${formatNumber(totalFollowers)}`, margin + 18, 276)
+    }
+    doc.setFont('helvetica', 'normal')
     doc.setFontSize(11)
     doc.setTextColor(...brandPalette.muted)
     ;(insightBullets.length ? insightBullets : ['No additional notes provided.']).forEach(
       (bullet, index) => {
         const wrapped = doc.splitTextToSize(`- ${bullet}`, contentWidth * 0.54)
-        doc.text(wrapped, margin + 18, 262 + index * 26)
+        doc.text(wrapped, margin + 18, 304 + index * 22)
       },
     )
 
@@ -913,9 +1487,9 @@ export const ReportBuilder = () => {
     const chartHeight = 190
     doc.setDrawColor(...brandPalette.border)
     doc.rect(chartX, chartY, chartWidth, chartHeight)
-    if (resolvedSeries.length && maxViews > 0 && hasTimeSeriesData) {
-      resolvedSeries.forEach((point, index) => {
-        const barSlot = chartWidth / resolvedSeries.length
+    if (campaignScopedSeries.length && maxViews > 0 && hasTimeSeriesData) {
+      campaignScopedSeries.forEach((point, index) => {
+        const barSlot = chartWidth / campaignScopedSeries.length
         const barWidth = Math.max(4, barSlot - 6)
         const x = chartX + index * barSlot + (barSlot - barWidth) / 2
         const height = Math.max(2, (point.views / maxViews) * (chartHeight - 28))
@@ -1033,7 +1607,10 @@ export const ReportBuilder = () => {
     if (topPosts.length) {
       topPosts.forEach((post, index) => {
         const y = 182 + index * 34
-        const title = doc.splitTextToSize(post.title, contentWidth * 0.52)
+        const title = doc.splitTextToSize(
+          truncateTopContentPostTitle(post.title),
+          contentWidth * 0.52,
+        )
         doc.text(title, margin + 24, y)
         doc.text(post.platform, margin + contentWidth * 0.58, y)
         doc.text(formatNumber(post.views), margin + contentWidth * 0.74, y)
@@ -1067,26 +1644,33 @@ export const ReportBuilder = () => {
     doc.setFontSize(11)
     doc.setTextColor(...brandPalette.text)
     doc.text(`${deliveryProgress}%`, margin + 24, 177)
-    if (selectedCampaign) {
+    if (scopedCampaigns.length) {
       doc.setFont('helvetica', 'normal')
       doc.setFontSize(12)
       doc.setTextColor(...brandPalette.muted)
       doc.text(
-        `Views: ${formatNumber(selectedCampaign.deliveredViews)} delivered / ${formatNumber(selectedCampaign.guaranteedViews)} guaranteed`,
+        `Views: ${formatNumber(scopedCampaignTotals.deliveredViews)} delivered / ${formatNumber(scopedCampaignTotals.guaranteedViews)} guaranteed`,
         margin + 20,
         218,
       )
       doc.text(
-        `Engagements: ${formatNumber(selectedCampaign.deliveredEngagements)} delivered / ${formatNumber(selectedCampaign.guaranteedEngagements)} guaranteed`,
+        `Engagements: ${formatNumber(scopedCampaignTotals.deliveredEngagements)} delivered / ${formatNumber(scopedCampaignTotals.guaranteedEngagements)} guaranteed`,
         margin + 20,
         242,
       )
-      doc.text(`Distribution source: ONO ${selectedCampaign.distribution.ono}%`, margin + 20, 266)
-      doc.text(`Distribution source: Clipper ${selectedCampaign.distribution.clipper}%`, margin + 20, 290)
-      doc.text(`Pacing status: ${selectedCampaign.pacing}`, margin + 20, 314)
+      doc.text(`Distribution source: ONO ${scopedCampaignDistribution.ono}%`, margin + 20, 266)
+      doc.text(`Distribution source: Clipper ${scopedCampaignDistribution.clipper}%`, margin + 20, 290)
+      doc.text(`Pacing status: ${scopedCampaignPacingLabel}`, margin + 20, 314)
       if (showCPM) {
         doc.text('CPV: N/A', margin + 20, 338)
         doc.text('CPM: N/A', margin + 120, 338)
+      }
+      if (isAllCampaignFilter) {
+        const deckCampaignSummary = doc.splitTextToSize(
+          `Campaigns: ${scopedCampaigns.map((campaign) => campaign.name).join(', ')}`,
+          contentWidth - 40,
+        )
+        doc.text(deckCampaignSummary, margin + 20, 362)
       }
     } else {
       doc.setFont('helvetica', 'normal')
@@ -1099,39 +1683,80 @@ export const ReportBuilder = () => {
       )
     }
 
-    doc.save(`${baseFileName}-deck-report.pdf`)
+    const deckFileName = `${baseFileName}-deck-report.pdf`
+    if (options?.preview) {
+      await openProtectedPreview(doc.output('blob'), 'pdf', deckFileName)
+      return
+    }
+    doc.save(deckFileName)
   }
 
-  const handleExportCsv = () => {
+  const handleExportCsv = (options?: { preview?: boolean }) => {
+    if (!canExportReports) {
+      setShareStatus('You do not have permission to export reports.')
+      return
+    }
+    if (!scopedCampaigns.length) {
+      setShareStatus('Select a campaign you are a member of to export reports.')
+      return
+    }
     const generatedAt = new Date().toISOString()
     const selectedMetrics = new Set(metrics)
     const filePrefix = toFileSlug(campaignName || brandName || 'brand-report')
+    const totalFollowers = selectedFollowerCount
+    const totalWatchTimeHours = roundMetric(
+      campaignScopedSeries.reduce((sum, point) => sum + toMetricNumber(point.watchTimeHours), 0),
+      2,
+    )
+    const campaignScopeLabel = isAllCampaignFilter
+      ? `All campaigns (${scopedCampaigns.length})`
+      : campaignName || activeCampaign?.name || ''
 
     const overviewRows: Array<{ field: string; value: string | number }> = [
       { field: 'generated_at', value: generatedAt },
       { field: 'brand', value: brandName || '' },
-      { field: 'campaign_name', value: campaignName || '' },
+      { field: 'campaign_name', value: campaignScopeLabel },
       { field: 'campaign_filter', value: campaignFilter },
       { field: 'date_range', value: displayRange },
-      { field: 'channels_included', value: allChannelsSelected ? 'All ONO/LNO' : channels.join(', ') },
+      { field: 'channels_included', value: selectedChannelsLabel },
       { field: 'platforms_included', value: platforms.join(', ') },
       { field: 'metrics_included', value: metrics.join(', ') },
       { field: 'show_cpm', value: showCPM ? 'yes' : 'no' },
       { field: 'show_guarantee_vs_delivered', value: showGuarantee ? 'yes' : 'no' },
     ]
-
-    if (selectedCampaign) {
-      overviewRows.push(
-        { field: 'campaign_status', value: selectedCampaign.status },
-        { field: 'guaranteed_views', value: selectedCampaign.guaranteedViews },
-        { field: 'delivered_views', value: selectedCampaign.deliveredViews },
-        { field: 'guaranteed_engagements', value: selectedCampaign.guaranteedEngagements },
-        { field: 'delivered_engagements', value: selectedCampaign.deliveredEngagements },
-        { field: 'ono_distribution_percent', value: selectedCampaign.distribution.ono },
-        { field: 'clipper_distribution_percent', value: selectedCampaign.distribution.clipper },
-        { field: 'pacing', value: selectedCampaign.pacing },
-      )
+    if (includesWatchTimeMetric) {
+      overviewRows.push({ field: 'total_watch_time_hours', value: totalWatchTimeHours })
     }
+    if (includesFollowersMetric) {
+      overviewRows.push({ field: 'total_follower_count', value: totalFollowers })
+    }
+
+    overviewRows.push(
+      { field: 'campaign_count', value: scopedCampaigns.length },
+      { field: 'guaranteed_views', value: scopedCampaignTotals.guaranteedViews },
+      { field: 'delivered_views', value: scopedCampaignTotals.deliveredViews },
+      { field: 'guaranteed_engagements', value: scopedCampaignTotals.guaranteedEngagements },
+      { field: 'delivered_engagements', value: scopedCampaignTotals.deliveredEngagements },
+      { field: 'ono_distribution_percent', value: scopedCampaignDistribution.ono },
+      { field: 'clipper_distribution_percent', value: scopedCampaignDistribution.clipper },
+      { field: 'pacing', value: scopedCampaignPacingLabel },
+    )
+
+    const campaignRows = scopedCampaigns.map((campaign) => ({
+      id: campaign.id,
+      name: campaign.name,
+      brand: campaign.brand,
+      status: campaign.status,
+      pacing: campaign.pacing,
+      start_date: campaign.startDate,
+      end_date: campaign.endDate,
+      guaranteed_views: campaign.guaranteedViews,
+      delivered_views: campaign.deliveredViews,
+      guaranteed_engagements: campaign.guaranteedEngagements,
+      delivered_engagements: campaign.deliveredEngagements,
+      ono_distribution_percent: campaign.distribution.ono,
+      clipper_distribution_percent: campaign.distribution.clipper,
+    }))
 
     const channelRows = filteredChannels.map((channel) => ({
       id: channel.id,
@@ -1139,7 +1764,12 @@ export const ReportBuilder = () => {
       platform: channel.platform,
       views: channel.views,
       engagement_rate_percent: channel.engagementRate,
-      followers: channel.followers,
+      ...(includesFollowersMetric
+        ? {
+          followers: channel.followers,
+          follower_count: channel.followers,
+        }
+        : {}),
       status: channel.status,
     }))
 
@@ -1153,43 +1783,86 @@ export const ReportBuilder = () => {
     }))
 
     const audienceRows = [
-      ...resolvedAgeDistribution.map((point) => ({
+      ...scopedAgeDistribution.map((point) => ({
         segment: 'age',
         label: point.label,
         percent: point.value,
       })),
-      ...resolvedGenderDistribution.map((point) => ({
+      ...scopedGenderDistribution.map((point) => ({
         segment: 'gender',
         label: point.label,
         percent: point.value,
       })),
-      ...resolvedTopGeos.map((point) => ({
+      ...scopedTopGeos.map((point) => ({
         segment: 'geo',
         label: point.label,
         percent: point.value,
       })),
     ]
 
-    const timeSeriesRows = resolvedSeries.map((point) => ({
+    const timeSeriesRows = campaignScopedSeries.map((point) => ({
       date: point.date,
       ...(selectedMetrics.has('Views') ? { views_millions: point.views } : {}),
       ...(selectedMetrics.has('Engagements') ? { engagements_millions: point.engagements } : {}),
       ...(selectedMetrics.has('Posts') ? { posts: point.posts } : {}),
-      ...(selectedMetrics.has('Watch Time') ? { watch_time_hours: '' } : {}),
-      ...(selectedMetrics.has('Followers') ? { followers_net_change: '' } : {}),
+      ...(selectedMetrics.has('Watch Time')
+        ? { watch_time_hours: roundMetric(toMetricNumber(point.watchTimeHours), 2) }
+        : {}),
+      ...(selectedMetrics.has('Followers')
+        ? {
+          follower_count_total: totalFollowers,
+          followers_net_change: Math.round(toMetricNumber(point.followersNetChange)),
+        }
+        : {}),
     }))
+
+    const overviewCsv = createCsvContent(overviewRows, ['field', 'value'])
+    const campaignsCsv = createCsvContent(campaignRows)
+    const channelsCsv = createCsvContent(channelRows)
+    const postsCsv = createCsvContent(postRows)
+    const audienceCsv = createCsvContent(audienceRows, ['segment', 'label', 'percent'])
+    const timeSeriesCsv = createCsvContent(timeSeriesRows)
+
+    if (options?.preview) {
+      const combinedPreview = [
+        '# overview.csv',
+        overviewCsv,
+        '',
+        '# campaigns.csv',
+        campaignsCsv,
+        '',
+        '# channels.csv',
+        channelsCsv,
+        '',
+        '# posts.csv',
+        postsCsv,
+        '',
+        '# audience.csv',
+        audienceCsv,
+        '',
+        '# timeseries.csv',
+        timeSeriesCsv,
+      ].join('\n')
+      void openProtectedPreview(
+        new Blob([combinedPreview], { type: 'text/plain;charset=utf-8' }),
+        'csv',
+        `${filePrefix}-bundle-preview.csv`,
+      )
+      return
+    }
 
     downloadCsv(
       `${filePrefix}-overview.csv`,
-      createCsvContent(overviewRows, ['field', 'value']),
+      overviewCsv,
     )
-    downloadCsv(`${filePrefix}-channels.csv`, createCsvContent(channelRows))
-    downloadCsv(`${filePrefix}-posts.csv`, createCsvContent(postRows))
+    downloadCsv(`${filePrefix}-campaigns.csv`, campaignsCsv)
+    downloadCsv(`${filePrefix}-channels.csv`, channelsCsv)
+    downloadCsv(`${filePrefix}-posts.csv`, postsCsv)
     downloadCsv(
       `${filePrefix}-audience.csv`,
-      createCsvContent(audienceRows, ['segment', 'label', 'percent']),
+      audienceCsv,
     )
-    downloadCsv(`${filePrefix}-timeseries.csv`, createCsvContent(timeSeriesRows))
+    downloadCsv(`${filePrefix}-timeseries.csv`, timeSeriesCsv)
   }
 
   const toggleSelection = (value: string, list: string[], setList: (next: string[]) => void) => {
@@ -1202,19 +1875,29 @@ export const ReportBuilder = () => {
 
   const handleChannelToggle = (value: string) => {
     if (value === 'All ONO/LNO') {
-      setChannels(['All ONO/LNO'])
+      setChannels((current) => (current.includes('All ONO/LNO') ? [] : ['All ONO/LNO']))
       return
     }
-    const next = channels.includes(value)
-      ? channels.filter((item) => item !== value)
-      : [...channels.filter((item) => item !== 'All ONO/LNO'), value]
-    setChannels(next.length ? next : ['All ONO/LNO'])
+    setChannels((current) => {
+      const withoutAll = current.filter((item) => item !== 'All ONO/LNO')
+      if (withoutAll.includes(value)) {
+        return withoutAll.filter((item) => item !== value)
+      }
+      return [...withoutAll, value]
+    })
   }
 
   const handleCampaignFilterChange = (value: string) => {
-    setCampaignFilter(value)
-    if (value === 'No campaign filter') return
-    const matchedCampaign = campaignList.find((campaign) => campaign.name === value)
+    const sanitizedValue = sanitizeTextInput(value, { maxLength: 140 })
+    setCampaignFilter(sanitizedValue)
+    if (sanitizedValue === 'No campaign filter') {
+      if (rangeSelection === 'Campaign flight') {
+        setCustomStart(dataStartDate)
+        setCustomEnd(dataEndDate)
+      }
+      return
+    }
+    const matchedCampaign = campaignList.find((campaign) => campaign.name === sanitizedValue)
     if (!matchedCampaign) return
     setCampaignName(matchedCampaign.name)
     setBrandName(matchedCampaign.brand)
@@ -1225,20 +1908,42 @@ export const ReportBuilder = () => {
   }
 
   const buildShareUrl = () => {
+    const sanitizedBrand = sanitizeTextInput(brandName, { maxLength: 140 })
+    const sanitizedCampaign = sanitizeTextInput(campaignName, { maxLength: 140 })
+    const sanitizedFilter = sanitizeTextInput(campaignFilter, { maxLength: 140 })
+    const sanitizedNotes = sanitizeMultilineInput(notes, 4000)
+    const sanitizedRangeSelection = sanitizeAllowlistedValue(
+      rangeSelection,
+      rangeOptions,
+      'Campaign flight',
+    )
+    const sanitizedStart = sanitizeDateInput(customStart, {
+      fallback: todayDate,
+      min: fallbackMinDate,
+      max: fallbackMaxDate,
+    })
+    const sanitizedEnd = sanitizeDateInput(customEnd, {
+      fallback: sanitizedStart,
+      min: fallbackMinDate,
+      max: fallbackMaxDate,
+    })
     const params = new URLSearchParams()
-    params.set('brand', brandName)
-    params.set('campaign', campaignName)
-    params.set('filter', campaignFilter)
-    params.set('range', rangeSelection)
-    params.set('start', customStart)
-    params.set('end', customEnd)
+    params.set('brand', sanitizedBrand)
+    params.set('campaign', sanitizedCampaign)
+    params.set('filter', sanitizedFilter)
+    params.set('range', sanitizedRangeSelection)
+    params.set('start', sanitizedStart)
+    params.set('end', sanitizedEnd)
     params.set('showCpm', String(showCPM))
     params.set('showGuarantee', String(showGuarantee))
-    params.set('notes', notes)
-    params.set('channels', channels.join(','))
+    params.set('notes', sanitizedNotes)
+    params.set('channels', allChannelsSelected ? 'All ONO/LNO' : selectedChannelOptions.join(','))
     params.set('platforms', platforms.join(','))
     params.set('metrics', metrics.join(','))
-    return `${window.location.origin}/reports?${params.toString()}`
+    if (!isAllCampaignFilter && activeCampaign?.id) {
+      params.set('campaignId', activeCampaign.id)
+    }
+    return `${window.location.origin}/report-view?${params.toString()}`
   }
 
   const fallbackCopy = (value: string) => {
@@ -1254,6 +1959,10 @@ export const ReportBuilder = () => {
   }
 
   const handleShareLink = async () => {
+    if (!canShareReports) {
+      setShareStatus('Only campaign admins and internal members can share report links.')
+      return
+    }
     const shareUrl = buildShareUrl()
     try {
       if (navigator.clipboard?.writeText) {
@@ -1278,29 +1987,37 @@ export const ReportBuilder = () => {
     return () => window.clearTimeout(timeoutId)
   }, [shareStatus])
 
-  const previewTotalViews = selectedCampaign?.deliveredViews ?? 0
-  const previewTotalEngagements = selectedCampaign?.deliveredEngagements ?? 0
-  const previewDeliveryPercent =
-    selectedCampaign && selectedCampaign.guaranteedViews > 0
-      ? Math.min(100, Math.round((selectedCampaign.deliveredViews / selectedCampaign.guaranteedViews) * 100))
-      : 0
-  const canExport = Boolean(campaignList.length && !campaignsLoading)
+  const previewTotalViews = scopedCampaignTotals.deliveredViews
+  const previewTotalEngagements = scopedCampaignTotals.deliveredEngagements
+  const previewDeliveryPercent = scopedCampaignDeliveryPercent
+  const previewCampaignLabel = isAllCampaignFilter
+    ? `All campaigns (${scopedCampaigns.length})`
+    : campaignName || 'Report Preview'
+  const canExport = Boolean(canAccessReportBuilder && canExportReports && campaignList.length && !campaignsLoading)
 
   return (
     <>
       <SectionHeader
         title="Brand Report Builder"
         subtitle="Configure a polished, client-ready report."
-        actions={
+        actions={canExportReports ? (
           <div className="filter-bar">
-            <button className="ghost-button" onClick={handleExportCsv} disabled={!canExport}>
+            <button className="ghost-button" onClick={() => handleExportCsv()} disabled={!canExport}>
               Export CSV
             </button>
-            <button className="primary-button" onClick={handleExportPdf} disabled={!canExport}>
+            <button className="primary-button" onClick={() => void handleExportPdf()} disabled={!canExport}>
               Export PDF
             </button>
           </div>
-        }
+        ) : (
+          <span className="filter-chip static">
+            {campaignList.length
+              ? 'View-only access for this campaign'
+              : viewerUserId
+                ? 'No report access: you are not a campaign member.'
+                : 'Loading report access...'}
+          </span>
+        )}
       />
 
       <div className="grid grid-2">
@@ -1313,7 +2030,9 @@ export const ReportBuilder = () => {
               <input
                 className="input"
                 value={brandName}
-                onChange={(event) => setBrandName(event.target.value)}
+                onChange={(event) =>
+                  setBrandName(sanitizeTextInput(event.target.value, { maxLength: 140 }))
+                }
               />
             </div>
             <div className="form-field">
@@ -1321,7 +2040,9 @@ export const ReportBuilder = () => {
               <input
                 className="input"
                 value={campaignName}
-                onChange={(event) => setCampaignName(event.target.value)}
+                onChange={(event) =>
+                  setCampaignName(sanitizeTextInput(event.target.value, { maxLength: 140 }))
+                }
               />
             </div>
             <div className="form-field">
@@ -1353,7 +2074,11 @@ export const ReportBuilder = () => {
               <select
                 className="select"
                 value={rangeSelection}
-                onChange={(event) => setRangeSelection(event.target.value)}
+                onChange={(event) =>
+                  setRangeSelection(
+                    sanitizeAllowlistedValue(event.target.value, rangeOptions, 'Campaign flight'),
+                  )
+                }
               >
                 {rangeOptions.map((option) => (
                   <option key={option} value={option}>
@@ -1373,7 +2098,11 @@ export const ReportBuilder = () => {
                     max={dataEndDate}
                     value={customStart}
                     onChange={(event) => {
-                      const next = event.target.value
+                      const next = sanitizeDateInput(event.target.value, {
+                        fallback: customStart,
+                        min: dataStartDate,
+                        max: dataEndDate,
+                      })
                       setCustomStart(next)
                       if (next > customEnd) {
                         setCustomEnd(next)
@@ -1386,7 +2115,13 @@ export const ReportBuilder = () => {
                     min={customStart}
                     max={dataEndDate}
                     value={customEnd}
-                    onChange={(event) => setCustomEnd(event.target.value)}
+                    onChange={(event) =>
+                      setCustomEnd(sanitizeDateInput(event.target.value, {
+                        fallback: customEnd,
+                        min: customStart,
+                        max: dataEndDate,
+                      }))
+                    }
                   />
                 </div>
                 <div className="section-subtitle">
@@ -1405,7 +2140,7 @@ export const ReportBuilder = () => {
                       onChange={() => handleChannelToggle(option)}
                       disabled={allChannelsSelected && option !== 'All ONO/LNO'}
                     />
-                    {option}
+                    {resolveChannelOptionLabel(option)}
                   </label>
                 ))}
               </div>
@@ -1447,7 +2182,7 @@ export const ReportBuilder = () => {
               <textarea
                 className="textarea"
                 value={notes}
-                onChange={(event) => setNotes(event.target.value)}
+                onChange={(event) => setNotes(sanitizeMultilineInput(event.target.value, 4000))}
                 placeholder="Add short bullets, one per line."
               />
             </div>
@@ -1465,20 +2200,36 @@ export const ReportBuilder = () => {
             </label>
           </div>
 
-          <div className="filter-bar" style={{ marginTop: '16px' }}>
-            <button className="ghost-button" onClick={handleExportPdf} disabled={!canExport}>
-              Clean PDF
-            </button>
-            <button className="ghost-button" onClick={handleExportDeckPdf} disabled={!canExport}>
-              Deck-style PDF
-            </button>
-            <button className="ghost-button" onClick={handleShareLink}>
-              Shareable link
-            </button>
-            <button className="ghost-button" onClick={handleExportCsv} disabled={!canExport}>
-              CSV export
-            </button>
-          </div>
+          {canExportReports ? (
+            <div className="filter-bar" style={{ marginTop: '16px' }}>
+              <button
+                className="ghost-button"
+                onClick={() => void handleExportPdf({ preview: true })}
+                disabled={!canExport}
+              >
+                View clean PDF
+              </button>
+              <button
+                className="ghost-button"
+                onClick={() => void handleExportDeckPdf({ preview: true })}
+                disabled={!canExport}
+              >
+                View deck PDF
+              </button>
+              <button
+                className="ghost-button"
+                onClick={() => handleExportCsv({ preview: true })}
+                disabled={!canExport}
+              >
+                View CSV
+              </button>
+              {canShareReports ? (
+                <button className="ghost-button" onClick={handleShareLink}>
+                  Shareable link
+                </button>
+              ) : null}
+            </div>
+          ) : null}
           {shareStatus ? (
             <div className="section-subtitle" style={{ marginTop: '8px' }}>
               {shareStatus}
@@ -1489,7 +2240,7 @@ export const ReportBuilder = () => {
           <div className="section-title">Live preview</div>
           <div className="section-subtitle">Auto-updates with your selections.</div>
           <div className="report-preview" style={{ marginTop: '16px' }}>
-            <div className="section-title">{campaignName || 'Report Preview'}</div>
+            <div className="section-title">{previewCampaignLabel}</div>
             <div className="muted">
               {brandName || 'Brand'} | {displayRange}
             </div>
@@ -1530,4 +2281,3 @@ export const ReportBuilder = () => {
     </>
   )
 }
-

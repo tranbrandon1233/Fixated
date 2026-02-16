@@ -286,6 +286,13 @@ a:focus-visible {
   color: var(--text);
 }
 
+.pill.self-tag {
+  background: var(--primary);
+  color: #ffffff;
+  font-size: 10px;
+  padding: 2px 8px;
+}
+
 .pill.success {
   background: rgba(47, 182, 109, 0.15);
   color: var(--primary-strong);
@@ -327,27 +334,18 @@ a:focus-visible {
   cursor: pointer;
 }
 
+.member-row {
+  border-radius: 8px;
+  padding: 4px 6px;
+}
+
+.member-row.self {
+  background: rgba(47, 182, 109, 0.12);
+  border: 1px solid rgba(47, 182, 109, 0.35);
+}
+
 .filter-chip.static {
   cursor: default;
-}
-
-.role-select {
-  margin-left: 8px;
-  border: none;
-  background: transparent;
-  cursor: pointer;
-}
-
-.role-select option {
-  background: var(--surface);
-  color: var(--text);
-  cursor: pointer;
-}
-
-html[data-theme="dark"] .role-select,
-html[data-theme="dark"] .role-select option {
-  background: #111f18;
-  color: var(--text);
 }
 
 .form-field {

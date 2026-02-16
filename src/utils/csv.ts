@@ -5,10 +5,11 @@ type CsvRecord = Record<string, CsvValue>
 const escapeCsvValue = (value: CsvValue) => {
   if (value === null || value === undefined) return ''
   const stringValue = String(value)
-  if (/[",\n\r]/.test(stringValue)) {
-    return `"${stringValue.replace(/"/g, '""')}"`
+  const neutralizedValue = /^[\t\r ]*[=+\-@]/.test(stringValue) ? `'${stringValue}` : stringValue
+  if (/[",\n\r]/.test(neutralizedValue)) {
+    return `"${neutralizedValue.replace(/"/g, '""')}"`
   }
-  return stringValue
+  return neutralizedValue
 }
 
 export const createCsvContent = (rows: CsvRecord[], columns?: string[]) => {

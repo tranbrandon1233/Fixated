@@ -1,15 +1,27 @@
-import type { ChannelSummary, DemographicPoint, PostSummary, TimeSeriesPoint } from '../types/dashboard'
+import type {
+  ChannelSummary,
+  ChannelTimeSeriesPoint,
+  DemographicPoint,
+  PostSummary,
+  TimeSeriesPoint,
+} from '../types/dashboard'
 import { resolveAuthBaseUrl } from './baseUrl'
+import { sanitizeDateInput, sanitizeTextInput } from './sanitize'
 
 const apiBaseUrl = resolveAuthBaseUrl()
 
 export interface YouTubeSummary {
+  firstVideoUploadDate: string
   channels: ChannelSummary[]
   topPosts: PostSummary[]
   timeSeries: TimeSeriesPoint[]
+  timeSeriesByChannel: ChannelTimeSeriesPoint[]
   ageDistribution: DemographicPoint[]
+  ageDistributionByChannel: Record<string, DemographicPoint[]>
   genderDistribution: DemographicPoint[]
+  genderDistributionByChannel: Record<string, DemographicPoint[]>
   topGeos: DemographicPoint[]
+  topGeosByChannel: Record<string, DemographicPoint[]>
 }
 
 export interface YouTubeConnection {
@@ -64,6 +76,64 @@ const normalizeConnections = (payload: unknown): YouTubeConnectionsResponse => {
   }
 }
 
+const toSafeNumber = (value: unknown) => {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : 0
+}
+
+const normalizeTimeSeriesPoint = (value: unknown): TimeSeriesPoint | null => {
+  if (!value || typeof value !== 'object') return null
+  const row = value as Partial<TimeSeriesPoint>
+  const date = sanitizeTextInput(row.date, { maxLength: 64 })
+  if (!date) return null
+  return {
+    date,
+    views: toSafeNumber(row.views),
+    engagements: toSafeNumber(row.engagements),
+    posts: toSafeNumber(row.posts),
+    watchTimeHours: toSafeNumber(row.watchTimeHours),
+    followersNetChange: Math.round(toSafeNumber(row.followersNetChange)),
+  }
+}
+
+const normalizeChannelTimeSeriesPoint = (value: unknown): ChannelTimeSeriesPoint | null => {
+  if (!value || typeof value !== 'object') return null
+  const row = value as Partial<ChannelTimeSeriesPoint>
+  const channelId = sanitizeTextInput(row.channelId, { maxLength: 300 })
+  if (!channelId) return null
+  const basePoint = normalizeTimeSeriesPoint(value)
+  if (!basePoint) return null
+  return {
+    channelId,
+    ...basePoint,
+  }
+}
+
+const normalizeDemographicByChannel = (value: unknown): Record<string, DemographicPoint[]> => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+  const output: Record<string, DemographicPoint[]> = {}
+  Object.entries(value as Record<string, unknown>).forEach(([rawChannelId, rows]) => {
+    const channelId = sanitizeTextInput(rawChannelId, { maxLength: 300 })
+    if (!channelId) return
+    if (!Array.isArray(rows)) return
+    const normalizedRows = rows
+      .map((entry) => {
+        if (!entry || typeof entry !== 'object') return null
+        const point = entry as Partial<DemographicPoint>
+        const label = sanitizeTextInput(point.label, { maxLength: 140 })
+        if (!label) return null
+        return {
+          label,
+          value: toSafeNumber(point.value),
+        }
+      })
+      .filter((entry): entry is DemographicPoint => Boolean(entry))
+    if (!normalizedRows.length) return
+    output[channelId] = normalizedRows
+  })
+  return output
+}
+
 const readYouTubeConnections = async (): Promise<YouTubeConnectionsResponse> => {
   const response = await fetch(`${apiBaseUrl}/api/youtube/connections`, {
     credentials: 'include',
@@ -84,29 +154,52 @@ export const clearYouTubeConnectionsCache = () => {
 const normalizeSummary = (payload: unknown): YouTubeSummary => {
   if (!payload || typeof payload !== 'object') {
     return {
+      firstVideoUploadDate: '',
       channels: [],
       topPosts: [],
       timeSeries: [],
+      timeSeriesByChannel: [],
       ageDistribution: [],
+      ageDistributionByChannel: {},
       genderDistribution: [],
+      genderDistributionByChannel: {},
       topGeos: [],
+      topGeosByChannel: {},
     }
   }
   const data = payload as {
+    firstVideoUploadDate?: string
     channels?: ChannelSummary[]
     topPosts?: PostSummary[]
     timeSeries?: TimeSeriesPoint[]
+    timeSeriesByChannel?: ChannelTimeSeriesPoint[]
     ageDistribution?: DemographicPoint[]
+    ageDistributionByChannel?: Record<string, DemographicPoint[]>
     genderDistribution?: DemographicPoint[]
+    genderDistributionByChannel?: Record<string, DemographicPoint[]>
     topGeos?: DemographicPoint[]
+    topGeosByChannel?: Record<string, DemographicPoint[]>
   }
   return {
+    firstVideoUploadDate: sanitizeDateInput(data.firstVideoUploadDate),
     channels: Array.isArray(data.channels) ? data.channels : [],
     topPosts: Array.isArray(data.topPosts) ? data.topPosts : [],
-    timeSeries: Array.isArray(data.timeSeries) ? data.timeSeries : [],
+    timeSeries: Array.isArray(data.timeSeries)
+      ? data.timeSeries
+        .map((point) => normalizeTimeSeriesPoint(point))
+        .filter((point): point is TimeSeriesPoint => Boolean(point))
+      : [],
+    timeSeriesByChannel: Array.isArray(data.timeSeriesByChannel)
+      ? data.timeSeriesByChannel
+        .map((point) => normalizeChannelTimeSeriesPoint(point))
+        .filter((point): point is ChannelTimeSeriesPoint => Boolean(point))
+      : [],
     ageDistribution: Array.isArray(data.ageDistribution) ? data.ageDistribution : [],
+    ageDistributionByChannel: normalizeDemographicByChannel(data.ageDistributionByChannel),
     genderDistribution: Array.isArray(data.genderDistribution) ? data.genderDistribution : [],
+    genderDistributionByChannel: normalizeDemographicByChannel(data.genderDistributionByChannel),
     topGeos: Array.isArray(data.topGeos) ? data.topGeos : [],
+    topGeosByChannel: normalizeDemographicByChannel(data.topGeosByChannel),
   }
 }
 

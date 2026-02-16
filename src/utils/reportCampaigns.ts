@@ -1,9 +1,15 @@
 import type { CampaignStatus } from '../types/dashboard'
-import type { CampaignApiItem } from './campaigns'
+import type {
+  CampaignApiItem,
+  CampaignChannelPostsGroup,
+  CampaignMemberRole,
+} from './campaigns'
+import { sanitizeDateInput, sanitizeTextInput, sanitizeTokenInput } from './sanitize'
 
 export interface ReportCampaign {
   id: string
   name: string
+  viewerRole: CampaignMemberRole
   brand: string
   startDate: string
   endDate: string
@@ -18,6 +24,8 @@ export interface ReportCampaign {
   }
   status: CampaignStatus
   pacing: string
+  selectedPostIds: string[]
+  posts: CampaignChannelPostsGroup[]
 }
 
 const toNumber = (value: unknown) => {
@@ -55,7 +63,24 @@ const resolvePacing = (status: CampaignStatus) => {
   return 'On track'
 }
 
-export const mapCampaignForReport = (campaign: CampaignApiItem): ReportCampaign => {
+export const resolveViewerCampaignRole = (
+  campaign: CampaignApiItem,
+  viewerUserId: string,
+): CampaignMemberRole | '' => {
+  const normalizedViewerId = sanitizeTokenInput(viewerUserId, 80)
+  if (!normalizedViewerId) return ''
+  if (campaign.creator === normalizedViewerId) return 'admin'
+  const memberRole = campaign.allowedMemberRoles?.[normalizedViewerId]
+  if (memberRole === 'admin' || memberRole === 'internal' || memberRole === 'brand viewer') {
+    return memberRole
+  }
+  return ''
+}
+
+export const mapCampaignForReport = (
+  campaign: CampaignApiItem,
+  viewerRole: CampaignMemberRole,
+): ReportCampaign => {
   const guaranteedViews = toNumber(campaign.guaranteed)
   const deliveredViews = toNumber(campaign.viewsDelivered)
   const engagementRate = toNumber(campaign.engagementRate)
@@ -66,10 +91,11 @@ export const mapCampaignForReport = (campaign: CampaignApiItem): ReportCampaign 
 
   return {
     id: campaign.id,
-    name: campaign.campaignName || 'Untitled campaign',
-    brand: campaign.brand || 'Unknown brand',
-    startDate: campaign.startDate,
-    endDate: campaign.endDate,
+    name: sanitizeTextInput(campaign.campaignName, { maxLength: 140 }) || 'Untitled campaign',
+    viewerRole,
+    brand: sanitizeTextInput(campaign.brand, { maxLength: 140 }) || 'Unknown brand',
+    startDate: sanitizeDateInput(campaign.startDate),
+    endDate: sanitizeDateInput(campaign.endDate),
     guaranteedViews,
     deliveredViews,
     engagementRate,
@@ -78,5 +104,11 @@ export const mapCampaignForReport = (campaign: CampaignApiItem): ReportCampaign 
     distribution: resolveDistribution(campaign.distributionSources),
     status,
     pacing: resolvePacing(status),
+    selectedPostIds: Array.isArray(campaign.selectedPostIds)
+      ? campaign.selectedPostIds
+        .map((value) => sanitizeTokenInput(value, 300))
+        .filter((value) => Boolean(value))
+      : [],
+    posts: Array.isArray(campaign.posts) ? campaign.posts : [],
   }
 }

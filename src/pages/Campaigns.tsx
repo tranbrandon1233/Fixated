@@ -3,7 +3,7 @@ import { Badge } from '../components/ui/Badge'
 import { ProgressBar } from '../components/ui/ProgressBar'
 import { SectionHeader } from '../components/ui/SectionHeader'
 import { useYouTubeSummary } from '../hooks/useYouTubeSummary'
-import type { CampaignSummary, PostSummary } from '../types/dashboard'
+import type { CampaignSummary, PostSummary, Role } from '../types/dashboard'
 import {
   createCampaign,
   deleteCampaign,
@@ -20,6 +20,12 @@ import {
   type MemberResolutionSummary,
 } from '../utils/campaigns'
 import { formatNumber, formatPercent } from '../utils/format'
+import {
+  sanitizeDateInput,
+  sanitizeEmailInput,
+  sanitizeTextInput,
+  sanitizeTokenInput,
+} from '../utils/sanitize'
 
 interface CampaignCardModel extends CampaignSummary {
   creator: string
@@ -44,6 +50,12 @@ interface CampaignChannelOption {
   label: string
 }
 
+interface CampaignsProps {
+  role: Role
+}
+
+type CampaignViewerRole = CampaignMemberRole | ''
+
 const hasResolutionRows = (summary: MemberResolutionSummary) => flattenResolutionItems(summary).length > 0
 
 const statusTone = (status: string) => {
@@ -58,13 +70,56 @@ const toNumber = (value: unknown) => {
   return Number.isFinite(parsed) ? parsed : 0
 }
 
-const normalizeEmail = (value: string) => value.trim().toLowerCase()
-const normalizePostId = (value: string) => value.trim()
+const normalizeEmail = (value: string) => sanitizeEmailInput(value)
+const normalizePostId = (value: string) => sanitizeTokenInput(value, 300)
+const sanitizeNumericInput = (value: string) =>
+  sanitizeTextInput(value, { maxLength: 24 }).replace(/[^0-9.]/g, '')
+const sanitizeEmailFieldInput = (value: string) =>
+  sanitizeTextInput(value, { maxLength: 320, trim: false })
 
-const normalizeMemberRole = (value: unknown): CampaignMemberRole =>
-  value === 'admin' ? 'admin' : 'member'
+const resolveViewerCampaignRole = (
+  campaign: CampaignCardModel,
+  viewerUserId: string,
+): CampaignViewerRole => {
+  const normalizedViewerId = sanitizeTokenInput(viewerUserId, 80)
+  if (!normalizedViewerId) return ''
+  if (campaign.creator === normalizedViewerId) return 'admin'
+  const memberRole = campaign.allowedMemberRoles?.[normalizedViewerId]
+  return memberRole ? normalizeMemberRole(memberRole) : ''
+}
 
-const createEmptyMemberInput = (): MemberInputRow => ({ email: '', role: 'member' })
+const campaignRolePriority: Record<CampaignMemberRole, number> = {
+  'brand viewer': 1,
+  internal: 2,
+  admin: 3,
+}
+
+const normalizeMemberRole = (value: unknown): CampaignMemberRole => {
+  if (typeof value !== 'string') return 'internal'
+  const normalized = value.trim().toLowerCase()
+  if (normalized === 'admin' || normalized.includes('admin')) return 'admin'
+  if (
+    normalized === 'brand viewer' ||
+    normalized === 'brand-viewer' ||
+    normalized === 'brand_viewer' ||
+    normalized === 'brand' ||
+    normalized.includes('brand')
+  ) {
+    return 'brand viewer'
+  }
+  if (normalized === 'member') return 'internal'
+  return 'internal'
+}
+
+const formatCampaignMemberRoleLabel = (role: CampaignMemberRole) => {
+  if (role === 'brand viewer') return 'Brand Viewer'
+  if (role === 'internal') return 'Internal'
+  return 'Admin'
+}
+
+const campaignMemberRoleOptions: CampaignMemberRole[] = ['admin', 'internal', 'brand viewer']
+
+const createEmptyMemberInput = (): MemberInputRow => ({ email: '', role: 'internal' })
 
 const buildMemberInputSignature = (inputs: MemberInputRow[]) =>
   JSON.stringify(
@@ -81,7 +136,7 @@ const collectMemberInputs = (inputs: MemberInputRow[]): MemberAccessInput[] => {
     if (!normalizedEmail) return
     const normalizedRole = normalizeMemberRole(entry.role)
     const existingRole = roleByEmail.get(normalizedEmail)
-    if (!existingRole || normalizedRole === 'admin') {
+    if (!existingRole || campaignRolePriority[normalizedRole] > campaignRolePriority[existingRole]) {
       roleByEmail.set(normalizedEmail, normalizedRole)
     }
   })
@@ -99,7 +154,7 @@ const mergeEmailInputs = (current: MemberInputRow[], additions: string[]) => {
     const normalized = normalizeEmail(email)
     if (!normalized) return
     const exists = merged.some((entry) => normalizeEmail(entry.email) === normalized)
-    if (!exists) merged.push({ email: normalized, role: 'member' })
+    if (!exists) merged.push({ email: normalized, role: 'internal' })
   })
   return merged.length ? merged : [createEmptyMemberInput()]
 }
@@ -109,7 +164,7 @@ const resolveDistribution = (value: unknown) => {
     return { brand: 'Unknown brand', ono: 0, clipper: 0 }
   }
   const source = value as Record<string, unknown>
-  const brand = typeof source.brand === 'string' && source.brand.trim() ? source.brand.trim() : 'Unknown brand'
+  const brand = sanitizeTextInput(source.brand, { maxLength: 140 }) || 'Unknown brand'
   return {
     brand,
     ono: toNumber(source.ono),
@@ -145,14 +200,15 @@ const mapCampaignToCard = (campaign: CampaignApiItem): CampaignCardModel => {
   const deliveryPercent = guaranteedViews > 0 ? (deliveredViews / guaranteedViews) * 100 : 0
   const distribution = resolveDistribution(campaign.distributionSources)
   const status = resolveStatus(campaign.startDate, campaign.endDate, deliveryPercent)
+  const sanitizedSelectedChannelId = sanitizeTokenInput(campaign.selectedChannelId, 300)
 
   return {
     id: campaign.id,
-    name: campaign.campaignName || 'Untitled campaign',
-    brand: campaign.brand || distribution.brand,
+    name: sanitizeTextInput(campaign.campaignName, { maxLength: 140 }) || 'Untitled campaign',
+    brand: sanitizeTextInput(campaign.brand, { maxLength: 140 }) || distribution.brand,
     status,
-    startDate: campaign.startDate,
-    endDate: campaign.endDate,
+    startDate: sanitizeTokenInput(campaign.startDate, 32),
+    endDate: sanitizeTokenInput(campaign.endDate, 32),
     guaranteedViews,
     deliveredViews,
     guaranteedEngagements,
@@ -167,9 +223,7 @@ const mapCampaignToCard = (campaign: CampaignApiItem): CampaignCardModel => {
     selectedPostIds: Array.isArray(campaign.selectedPostIds)
       ? [...new Set(campaign.selectedPostIds.map((entry) => normalizePostId(entry)).filter(Boolean))]
       : [],
-    selectedChannelId: typeof campaign.selectedChannelId === 'string' && campaign.selectedChannelId.trim()
-      ? campaign.selectedChannelId.trim()
-      : undefined,
+    selectedChannelId: sanitizedSelectedChannelId || undefined,
   }
 }
 
@@ -290,7 +344,7 @@ const MemberFeedback = ({ feedback }: { feedback: FeedbackState }) => {
   )
 }
 
-export const Campaigns = () => {
+export const Campaigns = ({ role }: CampaignsProps) => {
   const {
     summary: youtubeSummary,
     status: youtubeSummaryStatus,
@@ -345,6 +399,7 @@ export const Campaigns = () => {
   const [managePostsError, setManagePostsError] = useState<string | null>(null)
   const [selectedPostIdsDraft, setSelectedPostIdsDraft] = useState<string[]>([])
   const [selectedPostChannelId, setSelectedPostChannelId] = useState('all')
+  const canCreateCampaignByRole = role === 'admin'
 
   const todayDate = useMemo(() => {
     const now = new Date()
@@ -362,17 +417,13 @@ export const Campaigns = () => {
     return editStart
   }, [editStart])
 
-  const isManageViewerCreator = useMemo(() => {
-    if (!manageCampaign || !viewerUserId) return false
-    return manageCampaign.creator === viewerUserId
+  const manageViewerRole = useMemo<CampaignViewerRole>(() => {
+    if (!manageCampaign) return ''
+    return resolveViewerCampaignRole(manageCampaign, viewerUserId)
   }, [manageCampaign, viewerUserId])
-
-  const isManageViewerAdmin = useMemo(() => {
-    if (isManageViewerCreator) return true
-    if (!viewerUserId) return false
-    const viewerMember = members.find((member) => member.id === viewerUserId)
-    return normalizeMemberRole(viewerMember?.role) === 'admin'
-  }, [isManageViewerCreator, members, viewerUserId])
+  const normalizedViewerId = useMemo(() => sanitizeTokenInput(viewerUserId, 80), [viewerUserId])
+  const isManageViewerAdmin = manageViewerRole === 'admin'
+  const canManageMembersForManageCampaign = manageViewerRole === 'admin'
 
   const sortedMembers = useMemo(() => {
     if (!manageCampaign) return members
@@ -387,8 +438,10 @@ export const Campaigns = () => {
   }, [manageCampaign, members])
 
   const pendingAddMembers = useMemo(() => {
-    return isManageViewerAdmin ? collectMemberInputs(addEmailInputs) : []
-  }, [addEmailInputs, isManageViewerAdmin])
+    return canManageMembersForManageCampaign
+      ? collectMemberInputs(addEmailInputs)
+      : []
+  }, [addEmailInputs, canManageMembersForManageCampaign])
 
   const pendingRoleUpdates = useMemo(() => {
     if (!manageCampaign) return []
@@ -558,10 +611,13 @@ export const Campaigns = () => {
       return false
     }
 
-    const start = new Date(draftStart)
-    const end = new Date(draftEnd)
+    const normalizedStart = sanitizeDateInput(draftStart)
+    const normalizedEnd = sanitizeDateInput(draftEnd)
+    if (!normalizedStart || !normalizedEnd) return false
+    const start = new Date(normalizedStart)
+    const end = new Date(normalizedEnd)
     if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return false
-    if (draftStart < todayDate || draftEnd < todayDate) return false
+    if (normalizedStart < todayDate || normalizedEnd < todayDate) return false
     const guaranteedViews = Number(draftGuaranteedViews)
     const guaranteedEngagements = Number(draftGuaranteedEngagements)
     if (
@@ -595,8 +651,11 @@ export const Campaigns = () => {
       return false
     }
 
-    const start = new Date(editStart)
-    const end = new Date(editEnd)
+    const normalizedStart = sanitizeDateInput(editStart)
+    const normalizedEnd = sanitizeDateInput(editEnd)
+    if (!normalizedStart || !normalizedEnd) return false
+    const start = new Date(normalizedStart)
+    const end = new Date(normalizedEnd)
     if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return false
     const guaranteedViews = Number(editGuaranteedViews)
     const guaranteedEngagements = Number(editGuaranteedEngagements)
@@ -679,17 +738,29 @@ export const Campaigns = () => {
 
   const handleCreate = async () => {
     if (isSubmitting) return
+    if (!canCreateCampaignByRole) {
+      setCreateError('Only admins can create campaigns.')
+      return
+    }
     setHasCreateSubmitAttempt(true)
     if (hasMissingRequiredCreateField) return
     if (!canSubmit) return
     setCreateError(null)
     setFeedbackModal(null)
-    if (draftStart < todayDate || draftEnd < todayDate) {
+    const sanitizedDraftStart = sanitizeDateInput(draftStart)
+    const sanitizedDraftEnd = sanitizeDateInput(draftEnd)
+    if (!sanitizedDraftStart || !sanitizedDraftEnd) {
+      setCreateError('Start and end dates must use YYYY-MM-DD format.')
+      return
+    }
+    if (sanitizedDraftStart < todayDate || sanitizedDraftEnd < todayDate) {
       setCreateError('Start and end dates must be today or later.')
       return
     }
 
     setIsSubmitting(true)
+    const sanitizedDraftName = sanitizeTextInput(draftName, { maxLength: 140 })
+    const sanitizedDraftBrand = sanitizeTextInput(draftBrand, { maxLength: 140 })
     const submittedMembers = collectMemberInputs(inviteEmails)
     const submittedEmails = submittedMembers.map((entry) => entry.email)
     const guaranteedViews = Number(draftGuaranteedViews)
@@ -699,17 +770,17 @@ export const Campaigns = () => {
 
     try {
       const created = await createCampaign({
-        campaignName: draftName.trim(),
-        brand: draftBrand.trim(),
-        startDate: draftStart,
-        endDate: draftEnd,
+        campaignName: sanitizedDraftName,
+        brand: sanitizedDraftBrand,
+        startDate: sanitizedDraftStart,
+        endDate: sanitizedDraftEnd,
         guaranteed: guaranteedViews,
         viewsDelivered: 0,
         engagementRate,
         memberAccess: submittedMembers,
         memberEmails: submittedEmails,
         distributionSources: {
-          brand: draftBrand.trim(),
+          brand: sanitizedDraftBrand,
           ono: 0,
           clipper: 0,
         },
@@ -733,6 +804,8 @@ export const Campaigns = () => {
   }
 
   const openManageModal = async (campaign: CampaignCardModel) => {
+    const viewerRole = resolveViewerCampaignRole(campaign, viewerUserId)
+    if (!viewerRole) return
     setManageCampaign(campaign)
     setMembers([])
     setManageLoading(true)
@@ -753,19 +826,20 @@ export const Campaigns = () => {
   }
 
   const handleManageSubmit = async () => {
+    if (!canManageMembersForManageCampaign) return
     if (!manageCampaign || manageSubmitting) return
     const addMembers = pendingAddMembers
     const addEmails = addMembers.map((entry) => entry.email)
-    const roleUpdates = isManageViewerCreator ? pendingRoleUpdates : []
+    const roleUpdates = isManageViewerAdmin ? pendingRoleUpdates : []
     const roleUpdateEmails = roleUpdates.map((entry) => {
       const member = sortedMembers.find((candidate) => candidate.id === entry.userId)
-      const email = typeof member?.email === 'string' ? member.email.trim() : ''
+      const email = normalizeEmail(member?.email ?? '')
       return email || member?.id || entry.userId
     })
 
     if (!addMembers.length && !roleUpdates.length) {
       setManageError(
-        isManageViewerCreator
+        isManageViewerAdmin
           ? 'Enter at least one email, upload a CSV file, or change a member role.'
           : 'Enter at least one email or upload a CSV file.',
       )
@@ -799,7 +873,8 @@ export const Campaigns = () => {
   }
 
   const handleRemoveMember = async () => {
-    if (!manageCampaign || !removeMemberTarget || removeMemberSubmitting || !isManageViewerCreator) return
+    if (!canManageMembersForManageCampaign) return
+    if (!manageCampaign || !removeMemberTarget || removeMemberSubmitting) return
     setRemoveMemberSubmitting(true)
     setRemoveMemberError(null)
     try {
@@ -828,6 +903,7 @@ export const Campaigns = () => {
 
   const handleDeleteCampaign = async () => {
     if (!deleteCampaignTarget || deleteSubmitting) return
+    if (resolveViewerCampaignRole(deleteCampaignTarget, viewerUserId) !== 'admin') return
     setDeleteSubmitting(true)
     setDeleteError(null)
     try {
@@ -858,6 +934,8 @@ export const Campaigns = () => {
   }
 
   const openEditModal = (campaign: CampaignCardModel) => {
+    const viewerRole = resolveViewerCampaignRole(campaign, viewerUserId)
+    if (viewerRole !== 'admin' && viewerRole !== 'internal') return
     setEditCampaignTarget(campaign)
     setHasEditSubmitAttempt(false)
     setEditError(null)
@@ -884,19 +962,29 @@ export const Campaigns = () => {
 
   const handleEditCampaign = async () => {
     if (!editCampaignTarget || editSubmitting) return
+    const viewerRole = resolveViewerCampaignRole(editCampaignTarget, viewerUserId)
+    if (viewerRole !== 'admin' && viewerRole !== 'internal') return
     setHasEditSubmitAttempt(true)
     if (hasMissingRequiredEditField || !canSubmitEdit) return
 
     const guaranteedViews = Number(editGuaranteedViews)
     const guaranteedEngagements = Number(editGuaranteedEngagements)
+    const sanitizedEditName = sanitizeTextInput(editName, { maxLength: 140 })
+    const sanitizedEditBrand = sanitizeTextInput(editBrand, { maxLength: 140 })
+    const sanitizedEditStart = sanitizeDateInput(editStart)
+    const sanitizedEditEnd = sanitizeDateInput(editEnd)
+    if (!sanitizedEditStart || !sanitizedEditEnd) {
+      setEditError('Start and end dates must use YYYY-MM-DD format.')
+      return
+    }
     setEditSubmitting(true)
     setEditError(null)
     try {
       const result = await updateCampaignDetails(editCampaignTarget.id, {
-        campaignName: editName.trim(),
-        brand: editBrand.trim(),
-        startDate: editStart,
-        endDate: editEnd,
+        campaignName: sanitizedEditName,
+        brand: sanitizedEditBrand,
+        startDate: sanitizedEditStart,
+        endDate: sanitizedEditEnd,
         guaranteed: guaranteedViews,
         guaranteedEngagements,
       })
@@ -930,6 +1018,8 @@ export const Campaigns = () => {
   }
 
   const openManagePostsModal = (campaign: CampaignCardModel) => {
+    const viewerRole = resolveViewerCampaignRole(campaign, viewerUserId)
+    if (viewerRole !== 'admin' && viewerRole !== 'internal') return
     setManagePostsCampaign(campaign)
     setManagePostsError(null)
     setManagePostsSubmitting(false)
@@ -951,6 +1041,8 @@ export const Campaigns = () => {
 
   const handleManagePostsSubmit = async () => {
     if (!managePostsCampaign || managePostsSubmitting) return
+    const viewerRole = resolveViewerCampaignRole(managePostsCampaign, viewerUserId)
+    if (viewerRole !== 'admin') return
     setManagePostsSubmitting(true)
     setManagePostsError(null)
     const deduplicatedPostIds = [...new Set(selectedPostIdsDraft.map((entry) => normalizePostId(entry)).filter(Boolean))]
@@ -958,7 +1050,18 @@ export const Campaigns = () => {
     try {
       const result = await updateCampaignPosts(managePostsCampaign.id, {
         selectedPostIds: deduplicatedPostIds,
-        selectedChannelId: selectedPostChannelId === 'all' ? '' : selectedPostChannelId,
+        selectedPosts: selectedCampaignPosts.map((post) => ({
+          id: normalizePostId(post.id),
+          title: sanitizeTextInput(post.title, { maxLength: 300 }) || 'Untitled post',
+          platform: sanitizeTextInput(post.platform, { maxLength: 64 }) || 'YouTube',
+          channelId: sanitizeTokenInput(post.channelId, 300),
+          channelName: sanitizeTextInput(post.channelName, { maxLength: 180 }),
+          views: toNumber(post.views),
+          engagementRate: toNumber(post.engagementRate),
+        })),
+        selectedChannelId: selectedPostChannelId === 'all'
+          ? ''
+          : sanitizeTokenInput(selectedPostChannelId, 300),
         viewsDelivered: selectedPostTotals.viewsDelivered,
         engagementRate: selectedPostTotals.engagementRate,
       })
@@ -982,7 +1085,7 @@ export const Campaigns = () => {
       <SectionHeader
         title="Campaign ROI Tracking"
         subtitle="Delivery vs guarantee with pacing and ROI metrics."
-        actions={
+        actions={canCreateCampaignByRole ? (
           <button
             className="primary-button"
             onClick={() => {
@@ -993,10 +1096,10 @@ export const Campaigns = () => {
           >
             Create campaign
           </button>
-        }
+        ) : null}
       />
 
-      {isCreateOpen ? (
+      {isCreateOpen && canCreateCampaignByRole ? (
         <div className="modal-backdrop">
           <div className="modal-card">
             <div className="section-title">Create campaign</div>
@@ -1008,7 +1111,7 @@ export const Campaigns = () => {
                   className="input"
                   style={hasCreateSubmitAttempt && createRequiredFieldErrors.draftName ? { borderColor: 'var(--danger)' } : undefined}
                   value={draftName}
-                  onChange={(event) => setDraftName(event.target.value)}
+                  onChange={(event) => setDraftName(sanitizeTextInput(event.target.value, { maxLength: 140 }))}
                   placeholder="PowerPlay Q2"
                 />
                 {hasCreateSubmitAttempt && createRequiredFieldErrors.draftName ? (
@@ -1023,7 +1126,7 @@ export const Campaigns = () => {
                   className="input"
                   style={hasCreateSubmitAttempt && createRequiredFieldErrors.draftBrand ? { borderColor: 'var(--danger)' } : undefined}
                   value={draftBrand}
-                  onChange={(event) => setDraftBrand(event.target.value)}
+                  onChange={(event) => setDraftBrand(sanitizeTextInput(event.target.value, { maxLength: 140 }))}
                   placeholder="Vertex Energy"
                 />
                 {hasCreateSubmitAttempt && createRequiredFieldErrors.draftBrand ? (
@@ -1043,7 +1146,7 @@ export const Campaigns = () => {
                   }
                   value={draftStart}
                   onChange={(event) => {
-                    const nextStart = event.target.value
+                    const nextStart = sanitizeDateInput(event.target.value)
                     setDraftStart(nextStart)
                     if (draftEnd && nextStart && draftEnd < nextStart) {
                       setDraftEnd(nextStart)
@@ -1064,7 +1167,7 @@ export const Campaigns = () => {
                   className="input"
                   style={hasCreateSubmitAttempt && createRequiredFieldErrors.draftEnd ? { borderColor: 'var(--danger)' } : undefined}
                   value={draftEnd}
-                  onChange={(event) => setDraftEnd(event.target.value)}
+                  onChange={(event) => setDraftEnd(sanitizeDateInput(event.target.value))}
                   type="date"
                   min={minEndDate}
                 />
@@ -1084,7 +1187,7 @@ export const Campaigns = () => {
                       : undefined
                   }
                   value={draftGuaranteedViews}
-                  onChange={(event) => setDraftGuaranteedViews(event.target.value)}
+                  onChange={(event) => setDraftGuaranteedViews(sanitizeNumericInput(event.target.value))}
                   type="number"
                   min={0}
                   step={1}
@@ -1106,7 +1209,7 @@ export const Campaigns = () => {
                       : undefined
                   }
                   value={draftGuaranteedEngagements}
-                  onChange={(event) => setDraftGuaranteedEngagements(event.target.value)}
+                  onChange={(event) => setDraftGuaranteedEngagements(sanitizeNumericInput(event.target.value))}
                   type="number"
                   min={0}
                   step={1}
@@ -1134,7 +1237,7 @@ export const Campaigns = () => {
                             setInviteEmails((previous) =>
                               previous.map((value, fieldIndex) =>
                                 fieldIndex === index
-                                  ? { ...value, email: event.target.value }
+                                  ? { ...value, email: sanitizeEmailFieldInput(event.target.value) }
                                   : value,
                               ),
                             )
@@ -1150,13 +1253,16 @@ export const Campaigns = () => {
                                 fieldIndex === index
                                   ? { ...value, role: normalizeMemberRole(event.target.value) }
                                   : value,
-                              ),
+                                ),
                             )
                           }
                           style={{ minWidth: '120px' }}
                         >
-                          <option value="member">Member</option>
-                          <option value="admin">Admin</option>
+                          {campaignMemberRoleOptions.map((option) => (
+                            <option key={option} value={option}>
+                              {formatCampaignMemberRoleLabel(option)}
+                            </option>
+                          ))}
                         </select>
                         {inviteEmails.length > 1 ? (
                           <button
@@ -1238,7 +1344,7 @@ export const Campaigns = () => {
                   className="input"
                   style={hasEditSubmitAttempt && editRequiredFieldErrors.editName ? { borderColor: 'var(--danger)' } : undefined}
                   value={editName}
-                  onChange={(event) => setEditName(event.target.value)}
+                  onChange={(event) => setEditName(sanitizeTextInput(event.target.value, { maxLength: 140 }))}
                   placeholder="PowerPlay Q2"
                 />
                 {hasEditSubmitAttempt && editRequiredFieldErrors.editName ? (
@@ -1253,7 +1359,7 @@ export const Campaigns = () => {
                   className="input"
                   style={hasEditSubmitAttempt && editRequiredFieldErrors.editBrand ? { borderColor: 'var(--danger)' } : undefined}
                   value={editBrand}
-                  onChange={(event) => setEditBrand(event.target.value)}
+                  onChange={(event) => setEditBrand(sanitizeTextInput(event.target.value, { maxLength: 140 }))}
                   placeholder="Vertex Energy"
                 />
                 {hasEditSubmitAttempt && editRequiredFieldErrors.editBrand ? (
@@ -1273,7 +1379,7 @@ export const Campaigns = () => {
                   }
                   value={editStart}
                   onChange={(event) => {
-                    const nextStart = event.target.value
+                    const nextStart = sanitizeDateInput(event.target.value)
                     setEditStart(nextStart)
                     if (editEnd && nextStart && editEnd < nextStart) {
                       setEditEnd(nextStart)
@@ -1293,7 +1399,7 @@ export const Campaigns = () => {
                   className="input"
                   style={hasEditSubmitAttempt && editRequiredFieldErrors.editEnd ? { borderColor: 'var(--danger)' } : undefined}
                   value={editEnd}
-                  onChange={(event) => setEditEnd(event.target.value)}
+                  onChange={(event) => setEditEnd(sanitizeDateInput(event.target.value))}
                   type="date"
                   min={minEditEndDate || undefined}
                 />
@@ -1313,7 +1419,7 @@ export const Campaigns = () => {
                       : undefined
                   }
                   value={editGuaranteedViews}
-                  onChange={(event) => setEditGuaranteedViews(event.target.value)}
+                  onChange={(event) => setEditGuaranteedViews(sanitizeNumericInput(event.target.value))}
                   type="number"
                   min={0}
                   step={1}
@@ -1334,7 +1440,7 @@ export const Campaigns = () => {
                       : undefined
                   }
                   value={editGuaranteedEngagements}
-                  onChange={(event) => setEditGuaranteedEngagements(event.target.value)}
+                  onChange={(event) => setEditGuaranteedEngagements(sanitizeNumericInput(event.target.value))}
                   type="number"
                   min={0}
                   step={1}
@@ -1377,8 +1483,11 @@ export const Campaigns = () => {
       {manageCampaign ? (
         <div className="modal-backdrop">
           <div className="modal-card">
-            <div className="section-title">Manage campaign members</div>
+            <div className="section-title">Campaign members</div>
             <div className="section-subtitle">{manageCampaign.name}</div>
+            {!canManageMembersForManageCampaign ? (
+              <div className="section-subtitle">Read-only access. Only campaign admins can edit members.</div>
+            ) : null}
 
             {manageLoading ? (
               <div className="section-subtitle" style={{ marginTop: '12px' }}>
@@ -1402,10 +1511,15 @@ export const Campaigns = () => {
                       sortedMembers.map((member) => {
                         const isCampaignCreator = Boolean(manageCampaign && member.id === manageCampaign.creator)
                         const memberRole = memberRoleEdits[member.id] ?? normalizeMemberRole(member.role)
+                        const isViewer = Boolean(normalizedViewerId && member.id === normalizedViewerId)
                         return (
-                          <div key={member.id} className="split" style={{ fontSize: '13px', padding: '3px 0' }}>
+                          <div
+                            key={member.id}
+                            className={`split member-row ${isViewer ? 'self' : ''}`}
+                            style={{ fontSize: '13px', padding: '3px 0' }}
+                          >
                             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                              {isManageViewerCreator && !isCampaignCreator ? (
+                              {canManageMembersForManageCampaign && !isCampaignCreator ? (
                                 <button
                                   type="button"
                                   className="ghost-button"
@@ -1429,10 +1543,11 @@ export const Campaigns = () => {
                                 </button>
                               ) : null}
                               <span>{member.email || member.id}</span>
+                              {isViewer ? <span className="pill self-tag">You</span> : null}
                             </div>
                             {isCampaignCreator ? (
                               <span className="muted">Creator (Admin)</span>
-                            ) : isManageViewerCreator ? (
+                            ) : isManageViewerAdmin ? (
                               <select
                                 className="select"
                                 value={memberRole}
@@ -1450,11 +1565,14 @@ export const Campaigns = () => {
                                 }}
                                 style={{ minWidth: '120px' }}
                               >
-                                <option value="member">Member</option>
-                                <option value="admin">Admin</option>
+                                {campaignMemberRoleOptions.map((option) => (
+                                  <option key={option} value={option}>
+                                    {formatCampaignMemberRoleLabel(option)}
+                                  </option>
+                                ))}
                               </select>
                             ) : (
-                              <span className="muted">{memberRole === 'admin' ? 'Admin' : 'Member'}</span>
+                              <span className="muted">{formatCampaignMemberRoleLabel(memberRole)}</span>
                             )}
                           </div>
                         )
@@ -1465,7 +1583,7 @@ export const Campaigns = () => {
                   </div>
                 </div>
 
-                {isManageViewerAdmin ? (
+                {canManageMembersForManageCampaign ? (
                   <div style={{ marginTop: '14px', display: 'grid', gap: '12px' }}>
                     <div className="form-field">
                       <label className="section-subtitle">Add emails</label>
@@ -1478,14 +1596,14 @@ export const Campaigns = () => {
                               setAddEmailInputs((previous) =>
                                 previous.map((value, fieldIndex) =>
                                   fieldIndex === index
-                                    ? { ...value, email: event.target.value }
+                                    ? { ...value, email: sanitizeEmailFieldInput(event.target.value) }
                                     : value,
                                 ),
                               )
                             }
                             placeholder="add-user@example.com"
                           />
-                          {isManageViewerCreator ? (
+                          {isManageViewerAdmin ? (
                             <select
                               className="select"
                               value={member.role}
@@ -1500,12 +1618,15 @@ export const Campaigns = () => {
                               }
                               style={{ minWidth: '120px' }}
                             >
-                              <option value="member">Member</option>
-                              <option value="admin">Admin</option>
+                              {campaignMemberRoleOptions.map((option) => (
+                                <option key={option} value={option}>
+                                  {formatCampaignMemberRoleLabel(option)}
+                                </option>
+                              ))}
                             </select>
                           ) : (
                             <span className="muted" style={{ minWidth: '120px', textAlign: 'right' }}>
-                              Member
+                              Internal
                             </span>
                           )}
                           {addEmailInputs.length > 1 ? (
@@ -1561,13 +1682,15 @@ export const Campaigns = () => {
               >
                 Close
               </button>
-              <button
-                className="primary-button"
-                onClick={() => void handleManageSubmit()}
-                disabled={manageSubmitting || manageLoading || !hasPendingManageChanges}
-              >
-                {manageSubmitting ? 'Updating...' : 'Submit'}
-              </button>
+              {canManageMembersForManageCampaign ? (
+                <button
+                  className="primary-button"
+                  onClick={() => void handleManageSubmit()}
+                  disabled={manageSubmitting || manageLoading || !hasPendingManageChanges}
+                >
+                  {manageSubmitting ? 'Updating...' : 'Submit'}
+                </button>
+              ) : null}
             </div>
 
             {manageError ? (
@@ -1592,7 +1715,7 @@ export const Campaigns = () => {
                 <select
                   className="select"
                   value={selectedPostChannelId}
-                  onChange={(event) => setSelectedPostChannelId(event.target.value)}
+                  onChange={(event) => setSelectedPostChannelId(sanitizeTokenInput(event.target.value, 300))}
                 >
                   {campaignChannelOptions.map((option) => (
                     <option key={option.id} value={option.id}>
@@ -1853,19 +1976,16 @@ export const Campaigns = () => {
           const engagementRate = campaign.deliveredViews
             ? (campaign.deliveredEngagements / campaign.deliveredViews) * 100
             : 0
-          const isCreator = Boolean(viewerUserId && campaign.creator === viewerUserId)
-          const isAdmin = Boolean(
-            viewerUserId &&
-              campaign.allowedMemberRoles &&
-              campaign.allowedMemberRoles[viewerUserId] === 'admin',
-          )
-          const canManageMembers = isCreator || isAdmin
-          const canManageCampaignPosts = isCreator || isAdmin
-          const canEditCampaign = isCreator || isAdmin
+          const viewerCampaignRole = resolveViewerCampaignRole(campaign, viewerUserId)
+          const canViewMembers = Boolean(viewerCampaignRole)
+          const canManageMembers = viewerCampaignRole === 'admin'
+          const canManageCampaignPosts = viewerCampaignRole === 'admin' || viewerCampaignRole === 'internal'
+          const canEditCampaign = viewerCampaignRole === 'admin'
+          const canDeleteCampaign = viewerCampaignRole === 'admin'
 
           return (
             <div key={campaign.id} className="card" style={{ position: 'relative' }}>
-              {isCreator ? (
+              {canDeleteCampaign ? (
                 <button
                   className="ghost-button"
                   type="button"
@@ -1902,7 +2022,7 @@ export const Campaigns = () => {
                   }}
                   style={{
                     position: 'absolute',
-                    top: isCreator ? '42px' : '10px',
+                    top: canDeleteCampaign ? '42px' : '10px',
                     right: '10px',
                     padding: '4px 10px',
                     minHeight: '24px',
@@ -1918,7 +2038,7 @@ export const Campaigns = () => {
                   <div className="section-title">{campaign.name}</div>
                   <div className="section-subtitle">{campaign.brand}</div>
                 </div>
-                <div style={canEditCampaign || isCreator ? { marginRight: '82px' } : undefined}>
+                <div style={canEditCampaign || canDeleteCampaign ? { marginRight: '82px' } : undefined}>
                   <Badge tone={statusTone(campaign.status)} label={campaign.status} />
                 </div>
               </div>
@@ -1967,18 +2087,20 @@ export const Campaigns = () => {
                   <span>{formatNumber(campaign.selectedPostIds.length)}</span>
                 </div>
               </div>
-              {canManageMembers || canManageCampaignPosts ? (
+              {canViewMembers || canManageCampaignPosts ? (
                 <div style={{ marginTop: '14px', display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-                  <button
-                    className="primary-button"
-                    type="button"
-                    onClick={() => {
-                      void openManageModal(campaign)
-                    }}
-                    style={{ flex: '1 1 180px' }}
-                  >
-                    Manage Members
-                  </button>
+                  {canViewMembers ? (
+                    <button
+                      className={canManageMembers ? 'primary-button' : 'ghost-button'}
+                      type="button"
+                      onClick={() => {
+                        void openManageModal(campaign)
+                      }}
+                      style={{ flex: '1 1 180px' }}
+                    >
+                      {canManageMembers ? 'Manage Members' : 'View Members'}
+                    </button>
+                  ) : null}
                   {canManageCampaignPosts ? (
                     <button
                       className="ghost-button"

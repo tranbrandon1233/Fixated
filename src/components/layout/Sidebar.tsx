@@ -9,8 +9,8 @@ const baseLinks = [
   { to: '/portfolio', label: 'Portfolio' },
   { to: '/channels', label: 'Channels' },
   { to: '/campaigns', label: 'Campaigns' },
+  { to: '/organizations', label: 'Organizations' },
   { to: '/reports', label: 'Reports' },
-  { to: '/settings', label: 'Settings' },
 ]
 
 export const Sidebar = ({ role }: SidebarProps) => {
@@ -18,10 +18,11 @@ export const Sidebar = ({ role }: SidebarProps) => {
   const links =
     role === 'brand'
       ? [
-          { to: '/reports', label: 'Reports' },
-          { to: '/settings', label: 'Settings' },
+          { to: '/report-view', label: 'Report Viewer' },
         ]
-      : baseLinks
+      : role === 'admin'
+        ? [...baseLinks, { to: '/settings', label: 'Settings' }]
+        : baseLinks
 
   return (
     <aside className="sidebar">
@@ -45,12 +46,20 @@ export const Sidebar = ({ role }: SidebarProps) => {
         <div className="section-title">Quick Actions</div>
         <div className="section-subtitle">Two-click access</div>
         <div className="filter-bar" style={{ marginTop: '12px' }}>
-          <button className="primary-button" onClick={() => navigate('/reports')}>
-            Export Brand Report
-          </button>
-          <button className="ghost-button" onClick={() => navigate('/campaigns')}>
-            View Campaign ROI
-          </button>
+          {role === 'brand' ? (
+            <button className="primary-button" onClick={() => navigate('/report-view')}>
+              Open Shared Report
+            </button>
+          ) : (
+            <>
+              <button className="primary-button" onClick={() => navigate('/reports')}>
+                Export Brand Report
+              </button>
+              <button className="ghost-button" onClick={() => navigate('/campaigns')}>
+                View Campaign ROI
+              </button>
+            </>
+          )}
         </div>
       </div>
     </aside>

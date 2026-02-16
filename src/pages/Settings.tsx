@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { SectionHeader } from '../components/ui/SectionHeader'
+import type { Role } from '../types/dashboard'
 import { formatRelativeRefreshTime } from '../utils/refresh'
 import { bumpRefreshCounter } from '../utils/refreshCounter'
 import { getYouTubeConnectUrl } from '../utils/auth'
@@ -15,14 +16,14 @@ import {
 } from '../utils/youtube'
 
 type PlatformKey = 'youtube' | 'instagram' | 'tiktok' | 'x'
-type RoleKey = 'admin' | 'internal' | 'brandViewers'
 
 interface SettingsProps {
+  role: Role
   lastDataRefreshAt: number | null
   onDataRefreshed: (timestamp?: number) => void
 }
 
-export const Settings = ({ lastDataRefreshAt, onDataRefreshed }: SettingsProps) => {
+export const Settings = ({ role, lastDataRefreshAt, onDataRefreshed }: SettingsProps) => {
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
 
@@ -45,11 +46,11 @@ export const Settings = ({ lastDataRefreshAt, onDataRefreshed }: SettingsProps) 
     return null
   })
   const [selectedPlatform, setSelectedPlatform] = useState<PlatformKey | null>(null)
-  const [selectedRole, setSelectedRole] = useState<RoleKey | null>(null)
   const [selectedYouTubeChannels, setSelectedYouTubeChannels] = useState<string[]>([])
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [refreshClock, setRefreshClock] = useState(() => Date.now())
   const [refreshCount24h, setRefreshCount24h] = useState<number | null>(null)
+  const canManageConnectedAccounts = role === 'admin'
 
   const fetchConnections = useCallback(async () => {
     try {
@@ -147,17 +148,13 @@ export const Settings = ({ lastDataRefreshAt, onDataRefreshed }: SettingsProps) 
     { key: 'x', label: 'X • 2 accounts', accountCount: 2 },
   ]
 
-  const roleItems: Array<{ key: RoleKey; label: string }> = [
-    { key: 'admin', label: 'Admin: 4 users' },
-    { key: 'internal', label: 'Internal: 18 users' },
-    { key: 'brandViewers', label: 'Brand viewers: 6 users' },
-  ]
-
   const handleConnectYouTube = () => {
+    if (!canManageConnectedAccounts) return
     window.location.assign(getYouTubeConnectUrl())
   }
 
   const handleDisconnectYouTube = () => {
+    if (!canManageConnectedAccounts) return
     clearYouTubeConnectionsCache()
     clearYouTubeSummaryCache()
     void disconnectYouTubeChannels()
@@ -178,6 +175,7 @@ export const Settings = ({ lastDataRefreshAt, onDataRefreshed }: SettingsProps) 
   }
 
   const handleDisconnectSelectedYouTube = () => {
+    if (!canManageConnectedAccounts) return
     const selectedConnectedChannels = resolvedYoutubeChannelNames.filter((name) =>
       selectedYouTubeChannels.includes(name),
     )
@@ -202,6 +200,7 @@ export const Settings = ({ lastDataRefreshAt, onDataRefreshed }: SettingsProps) 
   }
 
   const handleRefreshNow = () => {
+    if (!canManageConnectedAccounts) return
     if (isRefreshing) return
     setIsRefreshing(true)
     setYoutubeStatusMessage('Refreshing YouTube data...')
@@ -249,7 +248,7 @@ export const Settings = ({ lastDataRefreshAt, onDataRefreshed }: SettingsProps) 
         title="Account Connections"
         subtitle="Connect owned and operated accounts to unlock analytics."
       />
-      <div className="grid grid-2">
+      <div className="grid">
         <div className="card">
           <div className="split">
             <div>
@@ -282,7 +281,12 @@ export const Settings = ({ lastDataRefreshAt, onDataRefreshed }: SettingsProps) 
           </div>
          
           <div className="filter-bar" style={{ marginTop: '12px' }}>
-            <button className="primary-button" onClick={handleConnectYouTube} type="button">
+            <button
+              className="primary-button"
+              onClick={handleConnectYouTube}
+              type="button"
+              disabled={!canManageConnectedAccounts}
+            >
               Add YouTube Account
             </button>
           </div>
@@ -291,14 +295,19 @@ export const Settings = ({ lastDataRefreshAt, onDataRefreshed }: SettingsProps) 
               <button
                 className="ghost-button"
                 aria-disabled={selectedConnectedYouTubeCount === 0}
-                disabled={selectedConnectedYouTubeCount === 0}
+                disabled={selectedConnectedYouTubeCount === 0 || !canManageConnectedAccounts}
                 onClick={selectedConnectedYouTubeCount > 0 ? handleDisconnectSelectedYouTube : undefined}
                 style={selectedConnectedYouTubeCount === 0 ? { pointerEvents: 'none', opacity: 0.6 } : undefined}
                 type="button"
               >
                 Disconnect selected
               </button>
-              <button className="ghost-button" onClick={handleDisconnectYouTube} type="button">
+              <button
+                className="ghost-button"
+                onClick={handleDisconnectYouTube}
+                type="button"
+                disabled={!canManageConnectedAccounts}
+              >
                 Disconnect all YouTube
               </button>
             </div>
@@ -327,29 +336,17 @@ export const Settings = ({ lastDataRefreshAt, onDataRefreshed }: SettingsProps) 
           ) : null}
         
         </div>
-        <div className="card">
-          <div className="section-title">Access & roles</div>
-          <div className="section-subtitle">Row-level access and brand viewers.</div>
-          <div className="filter-bar" style={{ marginTop: '16px' }}>
-            {roleItems.map((item) => (
-              <button
-                key={item.key}
-                className={`filter-chip ${selectedRole === item.key ? 'active' : ''}`}
-                onClick={() => setSelectedRole((current) => (current === item.key ? null : item.key))}
-                type="button"
-              >
-                {item.label}
-              </button>
-            ))}
-          </div>
-        
-        </div>
       </div>
       <div className="card">
         <div className="section-title">Data refresh</div>
         <div className="section-subtitle">Daily refresh with hourly campaign pacing updates.</div>
         <div className="filter-bar" style={{ marginTop: '16px' }}>
-          <button className="ghost-button" type="button" onClick={handleRefreshNow} disabled={isRefreshing}>
+          <button
+            className="ghost-button"
+            type="button"
+            onClick={handleRefreshNow}
+            disabled={isRefreshing || !canManageConnectedAccounts}
+          >
             {isRefreshing ? 'Refreshing...' : 'Refresh now'}
           </button>
           <span className="filter-chip">Last refresh: {lastRefreshLabel}</span>

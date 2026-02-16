@@ -5,12 +5,17 @@ import type { YouTubeSummary } from '../utils/youtube'
 type LoadStatus = 'idle' | 'loading' | 'ready' | 'error'
 
 const emptySummary: YouTubeSummary = {
+  firstVideoUploadDate: '',
   channels: [],
   topPosts: [],
   timeSeries: [],
+  timeSeriesByChannel: [],
   ageDistribution: [],
+  ageDistributionByChannel: {},
   genderDistribution: [],
+  genderDistributionByChannel: {},
   topGeos: [],
+  topGeosByChannel: {},
 }
 
 export const useYouTubeSummary = () => {

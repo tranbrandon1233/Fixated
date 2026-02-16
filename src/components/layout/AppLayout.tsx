@@ -5,9 +5,6 @@ import { TopBar } from './TopBar'
 
 interface AppLayoutProps {
   role: Role
-  roleLabel: string
-  roleOptions: Role[]
-  onRoleChange: (role: Role) => void
   lastDataRefreshAt: number | null
   themeMode: 'light' | 'dark'
   onToggleTheme: () => void
@@ -18,15 +15,13 @@ const routeTitles: Record<string, string> = {
   '/portfolio': 'Portfolio Overview',
   '/channels': 'Channel Drilldown',
   '/campaigns': 'Campaign ROI',
+  '/organizations': 'Organizations',
   '/reports': 'Brand Report Builder',
   '/settings': 'Account Settings',
 }
 
 export const AppLayout = ({
   role,
-  roleLabel,
-  roleOptions,
-  onRoleChange,
   lastDataRefreshAt,
   themeMode,
   onToggleTheme,
@@ -41,10 +36,6 @@ export const AppLayout = ({
       <div className="content-area">
         <TopBar
           title={title}
-          role={role}
-          roleLabel={roleLabel}
-          roleOptions={roleOptions}
-          onRoleChange={onRoleChange}
           lastDataRefreshAt={lastDataRefreshAt}
           themeMode={themeMode}
           onToggleTheme={onToggleTheme}

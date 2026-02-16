@@ -2,13 +2,25 @@ import { useEffect, useMemo, useState } from 'react'
 import { useYouTubeSummary } from '../hooks/useYouTubeSummary'
 import { fetchCampaigns } from '../utils/campaigns'
 import { formatNumber } from '../utils/format'
-import { mapCampaignForReport, type ReportCampaign } from '../utils/reportCampaigns'
+import { mapCampaignForReport, resolveViewerCampaignRole, type ReportCampaign } from '../utils/reportCampaigns'
+import { sanitizeTextInput, sanitizeTokenInput } from '../utils/sanitize'
 
-export const ReportViewer = () => {
+interface ReportViewerProps {
+  onLogout?: () => void
+}
+
+export const ReportViewer = ({ onLogout }: ReportViewerProps) => {
   const [campaigns, setCampaigns] = useState<ReportCampaign[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const { summary: youtubeSummary } = useYouTubeSummary()
+  const logoutControl = onLogout ? (
+    <div className="filter-bar" style={{ justifyContent: 'flex-end', marginBottom: '12px' }}>
+      <button className="ghost-button" type="button" onClick={onLogout}>
+        Log out
+      </button>
+    </div>
+  ) : null
 
   useEffect(() => {
     let cancelled = false
@@ -19,7 +31,12 @@ export const ReportViewer = () => {
       try {
         const response = await fetchCampaigns()
         if (cancelled) return
-        setCampaigns(response.campaigns.map((campaign) => mapCampaignForReport(campaign)))
+        const memberCampaigns = response.campaigns.flatMap((campaign) => {
+          const viewerRole = resolveViewerCampaignRole(campaign, response.viewerUserId)
+          if (!viewerRole) return []
+          return [mapCampaignForReport(campaign, viewerRole)]
+        })
+        setCampaigns(memberCampaigns)
       } catch (err) {
         if (cancelled) return
         setCampaigns([])
@@ -37,7 +54,15 @@ export const ReportViewer = () => {
 
   const selectedCampaign = useMemo(() => {
     if (!campaigns.length) return null
-    const queryCampaign = new URLSearchParams(window.location.search).get('campaign')
+    const params = new URLSearchParams(window.location.search)
+    const queryCampaignId = sanitizeTokenInput(params.get('campaignId'), 80)
+    if (queryCampaignId) {
+      const campaignById = campaigns.find((campaign) => campaign.id === queryCampaignId)
+      if (campaignById) return campaignById
+    }
+    const queryCampaign = sanitizeTextInput(params.get('campaign'), {
+      maxLength: 140,
+    })
     if (!queryCampaign) return campaigns[0]
     return campaigns.find((campaign) => campaign.name === queryCampaign) ?? campaigns[0]
   }, [campaigns])
@@ -64,6 +89,7 @@ export const ReportViewer = () => {
   if (isLoading) {
     return (
       <div className="page" style={{ maxWidth: '1100px', margin: '0 auto' }}>
+        {logoutControl}
         <div className="card">
           <div className="section-subtitle">Loading report...</div>
         </div>
@@ -74,6 +100,7 @@ export const ReportViewer = () => {
   if (error) {
     return (
       <div className="page" style={{ maxWidth: '1100px', margin: '0 auto' }}>
+        {logoutControl}
         <div className="card">
           <div className="section-subtitle" style={{ color: 'var(--danger)' }}>
             {error}
@@ -86,6 +113,7 @@ export const ReportViewer = () => {
   if (!selectedCampaign) {
     return (
       <div className="page" style={{ maxWidth: '1100px', margin: '0 auto' }}>
+        {logoutControl}
         <div className="card">
           <div className="section-subtitle">No campaigns are available for reporting.</div>
         </div>
@@ -95,6 +123,7 @@ export const ReportViewer = () => {
 
   return (
     <div className="page" style={{ maxWidth: '1100px', margin: '0 auto' }}>
+      {logoutControl}
       <div className="card">
         <div className="section-title">{selectedCampaign.brand}</div>
         <div className="section-subtitle">

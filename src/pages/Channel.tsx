@@ -14,36 +14,9 @@ import {
 import { Badge } from '../components/ui/Badge'
 import { SectionHeader } from '../components/ui/SectionHeader'
 import { useYouTubeSummary } from '../hooks/useYouTubeSummary'
+import { todayIsoDate, toIsoDate, normalizeSummaryIsoDate } from '../utils/date'
 import { formatNumber, formatPercent } from '../utils/format'
-
-const toIsoDate = (date: Date) => {
-  const year = date.getFullYear()
-  const month = String(date.getMonth() + 1).padStart(2, '0')
-  const day = String(date.getDate()).padStart(2, '0')
-  return `${year}-${month}-${day}`
-}
-
-const todayIso = () => toIsoDate(new Date())
-
-const normalizeIsoDate = (value: string, fallbackYear: number) => {
-  const normalizedValue = value.trim()
-  if (/^\d{4}-\d{2}-\d{2}$/.test(normalizedValue)) return normalizedValue
-  const compactIsoMatch = /^(\d{4})(\d{2})(\d{2})$/.exec(normalizedValue)
-  if (compactIsoMatch) {
-    const [, year, month, day] = compactIsoMatch
-    return `${year}-${month}-${day}`
-  }
-  const hasExplicitYear = /\b\d{4}\b/.test(normalizedValue)
-  if (!hasExplicitYear) {
-    const parsedWithFallbackYear = new Date(`${normalizedValue} ${fallbackYear}`)
-    if (!Number.isNaN(parsedWithFallbackYear.getTime())) return toIsoDate(parsedWithFallbackYear)
-  }
-  const direct = new Date(normalizedValue)
-  if (!Number.isNaN(direct.getTime())) return toIsoDate(direct)
-  const parsed = new Date(`${normalizedValue} ${fallbackYear}`)
-  if (Number.isNaN(parsed.getTime())) return ''
-  return toIsoDate(parsed)
-}
+import { sanitizeDateInput } from '../utils/sanitize'
 
 const formatDateLabel = (isoDate: string) =>
   new Date(`${isoDate}T00:00:00`).toLocaleDateString('en-US', {
@@ -56,11 +29,28 @@ export const Channel = () => {
   const { summary } = useYouTubeSummary()
   const [startDate, setStartDate] = useState('')
   const [endDate, setEndDate] = useState('')
+  const [selectedChannelId, setSelectedChannelId] = useState('')
+  const today = useMemo(() => todayIsoDate(), [])
+  const channelOptions = useMemo(
+    () => [...summary.channels].sort((a, b) => b.views - a.views),
+    [summary.channels],
+  )
   const channel = useMemo(() => {
-    if (!summary.channels.length) return undefined
-    return [...summary.channels].sort((a, b) => b.views - a.views)[0]
-  }, [summary.channels])
-  const resolvedPosts = summary.topPosts
+    if (!channelOptions.length) return undefined
+    if (selectedChannelId) {
+      const selected = channelOptions.find((entry) => entry.id === selectedChannelId)
+      if (selected) return selected
+    }
+    return channelOptions[0]
+  }, [channelOptions, selectedChannelId])
+  const resolvedPosts = useMemo(() => {
+    if (!channel) return summary.topPosts
+    return summary.topPosts.filter((post) => {
+      if (post.channelId) return post.channelId === channel.id
+      if (post.channelName) return post.channelName === channel.name
+      return true
+    })
+  }, [channel, summary.topPosts])
   const channelCount = summary.channels.length
   const portfolioViewsAverage =
     channelCount > 0
@@ -71,24 +61,34 @@ export const Channel = () => {
       ? summary.channels.reduce((total, item) => total + item.engagementRate, 0) / channelCount
       : 0
   const normalizedSeries = useMemo(() => {
-    const fallbackYear = new Date().getFullYear()
     return summary.timeSeries
       .map((point) => ({
         ...point,
-        isoDate: normalizeIsoDate(point.date, fallbackYear),
+        isoDate: normalizeSummaryIsoDate(point.date, today),
         label: point.date,
       }))
       .filter((point) => point.isoDate)
-  }, [summary.timeSeries])
+  }, [summary.timeSeries, today])
+  const selectedChannelFirstVideoDate = useMemo(
+    () => normalizeSummaryIsoDate(channel?.firstVideoUploadDate, today),
+    [channel?.firstVideoUploadDate, today],
+  )
+  const fallbackFirstVideoUploadDate = useMemo(
+    () => normalizeSummaryIsoDate(summary.firstVideoUploadDate, today),
+    [summary.firstVideoUploadDate, today],
+  )
   const dateBounds = useMemo(() => {
     const orderedDates = normalizedSeries.map((record) => record.isoDate).sort((a, b) => a.localeCompare(b))
-    const today = todayIso()
-    if (!orderedDates.length) return { min: '', max: today }
+    const nonFutureDates = orderedDates.filter((value) => value <= today)
+    const earliestSeriesDate = nonFutureDates.length ? nonFutureDates[0] : ''
+    const firstUploadDate = selectedChannelFirstVideoDate || fallbackFirstVideoUploadDate
+    const minDate = firstUploadDate || earliestSeriesDate
+    if (!minDate) return { min: '', max: today }
     return {
-      min: orderedDates[0],
-      max: orderedDates[orderedDates.length - 1] > today ? orderedDates[orderedDates.length - 1] : today,
+      min: minDate,
+      max: today,
     }
-  }, [normalizedSeries])
+  }, [fallbackFirstVideoUploadDate, normalizedSeries, selectedChannelFirstVideoDate, today])
   const hasDateBounds = Boolean(dateBounds.min && dateBounds.max)
   const boundedStartDate = useMemo(() => {
     if (!dateBounds.min) return startDate
@@ -177,7 +177,35 @@ export const Channel = () => {
       <SectionHeader
         title={hasChannel ? `${channel?.name ?? 'YouTube Channel'} (${channel?.platform ?? 'YouTube'})` : 'YouTube Channel'}
         subtitle="Per-channel drilldown with audience insights."
-        actions={<Badge tone={hasChannel ? 'success' : 'default'} label={channel?.status ?? 'Not connected'} />}
+        actions={(
+          <div className="filter-bar">
+            <select
+              className="select"
+              value={channel?.id ?? ''}
+              onChange={(event) => {
+                const nextChannelId = event.target.value
+                if (channelOptions.some((entry) => entry.id === nextChannelId)) {
+                  setSelectedChannelId(nextChannelId)
+                  return
+                }
+                setSelectedChannelId('')
+              }}
+              disabled={!channelOptions.length}
+              aria-label="Select channel"
+            >
+              {channelOptions.length ? (
+                channelOptions.map((entry) => (
+                  <option key={entry.id} value={entry.id}>
+                    {`${entry.name} [${entry.platform}]`}
+                  </option>
+                ))
+              ) : (
+                <option value="">No channels</option>
+              )}
+            </select>
+            <Badge tone={hasChannel ? 'success' : 'default'} label={channel?.status ?? 'Not connected'} />
+          </div>
+        )}
       />
 
       <div className="grid grid-3">
@@ -211,7 +239,14 @@ export const Channel = () => {
                   min={dateBounds.min || undefined}
                   max={dateBounds.max || undefined}
                   value={boundedStartDate}
-                  onChange={(event) => setStartDate(event.target.value)}
+                  onChange={(event) =>
+                    setStartDate(
+                      sanitizeDateInput(event.target.value, {
+                        fallback: boundedStartDate || dateBounds.min,
+                        min: dateBounds.min,
+                        max: dateBounds.max,
+                      }),
+                    )}
                   disabled={!dateBounds.min}
                   aria-label="Start date"
                 />
@@ -221,7 +256,14 @@ export const Channel = () => {
                   min={dateBounds.min || undefined}
                   max={dateBounds.max || undefined}
                   value={boundedEndDate}
-                  onChange={(event) => setEndDate(event.target.value)}
+                  onChange={(event) =>
+                    setEndDate(
+                      sanitizeDateInput(event.target.value, {
+                        fallback: boundedEndDate || dateBounds.max,
+                        min: dateBounds.min,
+                        max: dateBounds.max,
+                      }),
+                    )}
                   disabled={!dateBounds.min}
                   aria-label="End date"
                 />

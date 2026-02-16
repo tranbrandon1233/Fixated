@@ -15,6 +15,12 @@ export interface TimeSeriesPoint {
   views: number
   engagements: number
   posts: number
+  watchTimeHours?: number
+  followersNetChange?: number
+}
+
+export interface ChannelTimeSeriesPoint extends TimeSeriesPoint {
+  channelId: string
 }
 
 export interface ChannelSummary {
@@ -25,6 +31,7 @@ export interface ChannelSummary {
   engagementRate: number
   followers: number
   followersDelta30d?: number
+  firstVideoUploadDate?: string
   status: string
 }
 

@@ -1,4 +1,5 @@
 import { resolveAuthBaseUrl } from './baseUrl'
+import type { Role } from '../types/dashboard'
 
 export const getGoogleLoginUrl = () => `${resolveAuthBaseUrl()}/oauth/google`
 export const getYouTubeConnectUrl = () => {
@@ -13,6 +14,15 @@ export interface SessionStatus {
   authenticated: boolean
   userId?: string
   email?: string
+  role?: Role
+}
+
+const normalizeRole = (value: unknown): Role => {
+  if (typeof value !== 'string') return 'admin'
+  const normalized = value.trim().toLowerCase()
+  if (normalized.includes('admin')) return 'admin'
+  if (normalized.includes('brand')) return 'brand'
+  return 'internal'
 }
 
 export const fetchSessionStatus = async (): Promise<SessionStatus> => {
@@ -32,7 +42,10 @@ export const fetchSessionStatus = async (): Promise<SessionStatus> => {
     const email = payload && typeof payload === 'object' && typeof payload.email === 'string'
       ? payload.email
       : undefined
-    return { authenticated, userId, email }
+    const role = payload && typeof payload === 'object'
+      ? normalizeRole((payload as { role?: unknown }).role)
+      : 'admin'
+    return { authenticated, userId, email, role }
   } catch {
     return { authenticated: false }
   }
