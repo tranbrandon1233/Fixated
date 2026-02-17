@@ -15,7 +15,6 @@ import { fetchCampaigns } from '../utils/campaigns'
 import { sanitizeEmailInput, sanitizeTextInput, sanitizeTokenInput } from '../utils/sanitize'
 import type { Role } from '../types/dashboard'
 import {
-  addOrganizationConnection,
   createOrganization,
   deleteOrganization,
   fetchOrganizations,
@@ -187,7 +186,7 @@ const canEditOrganizationNameByRole = (viewerRole: OrganizationViewerRole) => vi
 const canManageOrganizationConnectionsByRole = (viewerRole: OrganizationViewerRole) =>
   viewerRole === 'admin' || viewerRole === 'internal'
 
-const connectionPlatformOptions: OrganizationConnectionPlatform[] = ['Instagram', 'X']
+// const connectionPlatformOptions: OrganizationConnectionPlatform[] = ['Instagram', 'X']
 
 const formatConnectedAccountLabel = (account: OrganizationConnectedAccount) =>
   `${sanitizeTextInput(account.accountName, { maxLength: 180 }) || 'Unknown account'} [${account.platform}]`
@@ -292,8 +291,8 @@ export const Organizations = ({ role }: OrganizationsProps) => {
   const [deleteError, setDeleteError] = useState<string | null>(null)
   const [deleteSubmitting, setDeleteSubmitting] = useState(false)
   const [connectionsOrg, setConnectionsOrg] = useState<OrganizationApiItem | null>(null)
-  const [connectionPlatform, setConnectionPlatform] = useState<OrganizationConnectionPlatform>('Instagram')
-  const [connectionAccountName, setConnectionAccountName] = useState('')
+  // const [connectionPlatform, setConnectionPlatform] = useState<OrganizationConnectionPlatform>('Instagram')
+  // const [connectionAccountName, setConnectionAccountName] = useState('')
   const [connectionsError, setConnectionsError] = useState<string | null>(null)
   const [connectionsSuccess, setConnectionsSuccess] = useState<string | null>(null)
   const [connectionsSubmitting, setConnectionsSubmitting] = useState(false)
@@ -581,8 +580,8 @@ export const Organizations = ({ role }: OrganizationsProps) => {
     const viewerOrganizationRole = resolveViewerOrganizationRole(organization, viewerUserId)
     if (!viewerOrganizationRole) return
     setConnectionsOrg(organization)
-    setConnectionPlatform('Instagram')
-    setConnectionAccountName('')
+    // setConnectionPlatform('Instagram')
+    // setConnectionAccountName('')
     setConnectionsError(null)
     setConnectionsSuccess(null)
     setConnectionsSubmitting(false)
@@ -592,8 +591,8 @@ export const Organizations = ({ role }: OrganizationsProps) => {
   const closeConnectionsModal = () => {
     if (connectionsSubmitting || removeConnectionIdSubmitting) return
     setConnectionsOrg(null)
-    setConnectionPlatform('Instagram')
-    setConnectionAccountName('')
+    // setConnectionPlatform('Instagram')
+    // setConnectionAccountName('')
     setConnectionsError(null)
     setConnectionsSuccess(null)
     setConnectionsSubmitting(false)
@@ -605,35 +604,7 @@ export const Organizations = ({ role }: OrganizationsProps) => {
     window.location.assign(getYouTubeConnectUrl({ organizationId: connectionsOrg.id, path: '/organizations' }))
   }
 
-  const handleAddConnection = async () => {
-    if (!connectionsOrg) return
-    if (!canManageConnectionsForConnectionsOrg) {
-      setConnectionsError('Brand viewers may view connected accounts but cannot edit them.')
-      return
-    }
-    const accountName = sanitizeTextInput(connectionAccountName, { maxLength: 180 })
-    if (!accountName) {
-      setConnectionsError('Account name is required.')
-      return
-    }
 
-    setConnectionsSubmitting(true)
-    setConnectionsError(null)
-    setConnectionsSuccess(null)
-    try {
-      const result = await addOrganizationConnection(connectionsOrg.id, {
-        platform: connectionPlatform,
-        accountName,
-      })
-      applyOrganizationUpdate(result.organization)
-      setConnectionAccountName('')
-      setConnectionsSuccess(`Connected ${accountName} [${connectionPlatform}].`)
-    } catch (err) {
-      setConnectionsError(err instanceof Error ? err.message : 'Unable to add connected account.')
-    } finally {
-      setConnectionsSubmitting(false)
-    }
-  }
 
   const handleRemoveConnection = async (connectionId: string) => {
     if (!connectionsOrg || !connectionId) return
