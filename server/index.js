@@ -3040,7 +3040,7 @@ const mapCampaignMembersForClient = (memberIds, userRows, memberRoles = {}) => {
   }))
 }
 
-const mapCampaignForClient = (row) => {
+const mapCampaignForClient = (row, options = {}) => {
   const creator = normalizeTextInput(row?.creator, { maxLength: 80 })
   const id = normalizeTextInput(row?.id, { maxLength: 80 })
   const createdAt = normalizeTextInput(row?.created_at, { maxLength: 64 })
@@ -3052,15 +3052,41 @@ const mapCampaignForClient = (row) => {
   const guaranteed = toNumber(row?.guaranteed)
   const engagementRate = toNumber(row?.engagement_rate)
   const distributionSources = readCampaignDistributionObject(row?.distribution_sources)
+  const visibleChannelIds = options?.visibleChannelIds instanceof Set ? options.visibleChannelIds : null
   const posts = readCampaignPostsByChannel(row?.posts)
+  const scopedPosts = visibleChannelIds
+    ? posts.filter((group) => {
+      const channelId = normalizeTextInput(group?.channelId, { maxLength: 300 })
+      return Boolean(channelId && visibleChannelIds.has(channelId))
+    })
+    : posts
   const selectedPostIdsFromPosts = flattenCampaignManagedPosts(posts).map((post) => post.id)
   const selectedPostIdsFromDistribution = readCampaignSelectedPostIds(distributionSources)
-  const selectedPostIds = uniqueValues(
+  const normalizedSelectedPostIds = uniqueValues(
     [...selectedPostIdsFromPosts, ...selectedPostIdsFromDistribution]
       .map((value) => normalizeTextInput(value, { maxLength: 300 }))
       .filter((value) => value.length > 0),
   )
-  const selectedChannelId = readCampaignSelectedChannelId(distributionSources)
+  const selectedPostIds = (() => {
+    if (!visibleChannelIds) return normalizedSelectedPostIds
+    const visiblePostIds = new Set(flattenCampaignManagedPosts(scopedPosts).map((post) => post.id))
+    return normalizedSelectedPostIds.filter((postId) => visiblePostIds.has(postId))
+  })()
+  const selectedChannelIdRaw = readCampaignSelectedChannelId(distributionSources)
+  const selectedChannelId = (() => {
+    const fallbackChannelId = selectedChannelIdRaw || scopedPosts[0]?.channelId || ''
+    if (!visibleChannelIds) return fallbackChannelId
+    return fallbackChannelId && visibleChannelIds.has(fallbackChannelId) ? fallbackChannelId : ''
+  })()
+  const distributionSourcesForClient = { ...distributionSources }
+  if (visibleChannelIds) {
+    distributionSourcesForClient[CAMPAIGN_SELECTED_POST_IDS_KEY] = selectedPostIds
+    if (selectedChannelId) {
+      distributionSourcesForClient[CAMPAIGN_SELECTED_CHANNEL_ID_KEY] = selectedChannelId
+    } else {
+      delete distributionSourcesForClient[CAMPAIGN_SELECTED_CHANNEL_ID_KEY]
+    }
+  }
   const allowedMemberRoles = normalizeCampaignMemberRoles(row?.allowed_members, creator)
 
   return {
@@ -3074,10 +3100,10 @@ const mapCampaignForClient = (row) => {
     guaranteed,
     engagementRate,
     allowedOrgs: normalizeUuidArray(row?.allowed_orgs),
-    distributionSources,
+    distributionSources: distributionSourcesForClient,
     selectedPostIds,
-    selectedChannelId: selectedChannelId || posts[0]?.channelId || '',
-    posts,
+    selectedChannelId,
+    posts: scopedPosts,
     allowedMembers: Object.keys(allowedMemberRoles),
     allowedMemberRoles,
     creator,
@@ -3364,6 +3390,11 @@ const canUserSeeOrganization = (row, userId) => {
   return Boolean(memberRoles[userId])
 }
 
+const canUserAccessOrganizationChannels = (row, userId) => {
+  const role = resolveOrganizationUserRole(row, userId)
+  return role === ORGANIZATION_MEMBER_ROLE_ADMIN || role === ORGANIZATION_MEMBER_ROLE_INTERNAL
+}
+
 const mapOrganizationForClient = (row, userRows = [], campaignNameById = new Map()) => {
   const id = normalizeTextInput(row?.id, { maxLength: 80 })
   const createdAt = normalizeTextInput(row?.created_at, { maxLength: 64 })
@@ -3509,6 +3540,259 @@ const resolveCampaignAllowedOrganizationIds = async (campaignRow) => {
   return derivedAllowedOrgs
 }
 
+const resolveCampaignAllowedOrganizationIdsFromRows = (
+  campaignRow,
+  organizationRows,
+  allowedOrgsByCampaignId = null,
+) => {
+  const allowedOrgsFromCampaign = normalizeUuidArray(campaignRow?.allowed_orgs)
+  if (allowedOrgsFromCampaign.length) return allowedOrgsFromCampaign
+
+  const campaignId = normalizeTextInput(campaignRow?.id, { maxLength: 80 })
+  if (!isUuid(campaignId)) return []
+
+  if (allowedOrgsByCampaignId instanceof Map) {
+    return [...(allowedOrgsByCampaignId.get(campaignId) ?? new Set())]
+  }
+
+  const derivedByCampaignId = buildAllowedOrgsByCampaignMap(
+    Array.isArray(organizationRows) ? organizationRows : [],
+    new Set([campaignId]),
+  )
+  return [...(derivedByCampaignId.get(campaignId) ?? new Set())]
+}
+
+const collectConnectedChannelIdsForOrganization = (row) => {
+  const connectedChannelIds = new Set()
+  const accounts = normalizeOrganizationConnectedAccounts(row?.connected_accounts)
+  for (const account of accounts) {
+    const platform = normalizeOrganizationConnectionPlatform(account?.platform)
+    if (platform === ORGANIZATION_CONNECTION_PLATFORM_YOUTUBE) {
+      const channelId = normalizeTextInput(account?.channelId, { maxLength: 300 })
+      if (channelId) {
+        connectedChannelIds.add(channelId)
+      }
+      continue
+    }
+    if (platform === ORGANIZATION_CONNECTION_PLATFORM_INSTAGRAM) {
+      const accountId = resolveInstagramAccountId(account)
+      if (accountId) {
+        connectedChannelIds.add(`instagram:${accountId}`)
+      }
+    }
+  }
+  return connectedChannelIds
+}
+
+const resolveVisibleCampaignChannelIdsForViewerFromRows = ({
+  campaignRow,
+  viewerUserId,
+  organizationRows,
+  allowedOrgsByCampaignId = null,
+}) => {
+  const normalizedViewerUserId = normalizeTextInput(viewerUserId, { maxLength: 80 })
+  if (!isUuid(normalizedViewerUserId)) return new Set()
+
+  const allowedOrganizationIds = resolveCampaignAllowedOrganizationIdsFromRows(
+    campaignRow,
+    organizationRows,
+    allowedOrgsByCampaignId,
+  )
+  if (!allowedOrganizationIds.length) return new Set()
+
+  const allowedOrganizationIdSet = new Set(allowedOrganizationIds)
+  const visibleChannelIds = new Set()
+  for (const row of Array.isArray(organizationRows) ? organizationRows : []) {
+    const organizationId = normalizeTextInput(row?.id, { maxLength: 80 })
+    if (!isUuid(organizationId) || !allowedOrganizationIdSet.has(organizationId)) continue
+    if (!canUserAccessOrganizationChannels(row, normalizedViewerUserId)) continue
+    const connectedChannelIds = collectConnectedChannelIdsForOrganization(row)
+    for (const channelId of connectedChannelIds) {
+      visibleChannelIds.add(channelId)
+    }
+  }
+  return visibleChannelIds
+}
+
+const resolveVisibleCampaignChannelIdsForViewer = async (campaignRow, viewerUserId) => {
+  const organizationsResult = await listOrganizationRows()
+  if (!organizationsResult.ok) return new Set()
+
+  const allowedOrgsByCampaignId = buildAllowedOrgsByCampaignMap(organizationsResult.rows)
+  return resolveVisibleCampaignChannelIdsForViewerFromRows({
+    campaignRow,
+    viewerUserId,
+    organizationRows: organizationsResult.rows,
+    allowedOrgsByCampaignId,
+  })
+}
+
+const serializeDemographicValueMap = (valueByLabel) =>
+  [...valueByLabel.entries()]
+    .map(([label, value]) => ({
+      label,
+      value: Math.max(0, toNumber(value)),
+    }))
+    .sort((left, right) => toNumber(right.value) - toNumber(left.value))
+
+const aggregateScopedDemographicsByChannel = (sourceByChannel, allowedChannelIds) => {
+  const overallByLabel = new Map()
+  const byChannel = {}
+  if (!sourceByChannel || typeof sourceByChannel !== 'object' || Array.isArray(sourceByChannel)) {
+    return { overall: [], byChannel: {} }
+  }
+
+  for (const [rawChannelId, rawRows] of Object.entries(sourceByChannel)) {
+    const channelId = normalizeTextInput(rawChannelId, { maxLength: 300 })
+    if (!channelId || !allowedChannelIds.has(channelId) || !Array.isArray(rawRows)) continue
+    const channelValueByLabel = new Map()
+    for (const row of rawRows) {
+      const label = normalizeTextInput(row?.label, { maxLength: 140 })
+      if (!label) continue
+      const value = Math.max(0, toNumber(row?.value))
+      channelValueByLabel.set(label, (channelValueByLabel.get(label) ?? 0) + value)
+      overallByLabel.set(label, (overallByLabel.get(label) ?? 0) + value)
+    }
+    if (channelValueByLabel.size > 0) {
+      byChannel[channelId] = serializeDemographicValueMap(channelValueByLabel)
+    }
+  }
+
+  return {
+    overall: serializeDemographicValueMap(overallByLabel),
+    byChannel,
+  }
+}
+
+const summarizeTimeSeriesFromChannelRows = (rows) => {
+  const byDate = new Map()
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const date = normalizeIsoDateOnly(row?.date)
+    if (!date) continue
+    const current = byDate.get(date) ?? {
+      date,
+      views: 0,
+      engagements: 0,
+      posts: 0,
+      watchTimeHours: 0,
+      followersNetChange: 0,
+    }
+    byDate.set(date, {
+      date,
+      views: current.views + Math.max(0, toNumber(row?.views)),
+      engagements: current.engagements + Math.max(0, toNumber(row?.engagements)),
+      posts: current.posts + Math.max(0, toNumber(row?.posts)),
+      watchTimeHours: current.watchTimeHours + Math.max(0, toNumber(row?.watchTimeHours)),
+      followersNetChange: current.followersNetChange + toNumber(row?.followersNetChange),
+    })
+  }
+  return [...byDate.values()].sort((left, right) => left.date.localeCompare(right.date))
+}
+
+const resolveFirstVideoUploadDateFromPosts = (posts) => {
+  const firstDates = (Array.isArray(posts) ? posts : [])
+    .map((post) => normalizeIsoDateOnly(post?.publishedAt))
+    .filter((value) => value)
+    .sort((left, right) => left.localeCompare(right))
+  return firstDates[0] || ''
+}
+
+const scopeCachedSummaryToConnectedChannelIds = (summaryPayload, connectedChannelIds) => {
+  const allowedChannelIds = connectedChannelIds instanceof Set ? connectedChannelIds : new Set()
+  if (!allowedChannelIds.size) return buildEmptyYouTubeSummary()
+
+  const channels = (Array.isArray(summaryPayload?.channels) ? summaryPayload.channels : []).filter((channel) => {
+    const channelId = normalizeTextInput(channel?.id, { maxLength: 300 })
+    return Boolean(channelId && allowedChannelIds.has(channelId))
+  })
+  const topPosts = (Array.isArray(summaryPayload?.topPosts) ? summaryPayload.topPosts : [])
+    .filter((post) => {
+      const channelId = normalizeTextInput(post?.channelId, { maxLength: 300 })
+      return Boolean(channelId && allowedChannelIds.has(channelId))
+    })
+    .sort((left, right) => toNumber(right?.views) - toNumber(left?.views))
+  const timeSeriesByChannel = (Array.isArray(summaryPayload?.timeSeriesByChannel)
+    ? summaryPayload.timeSeriesByChannel
+    : [])
+    .filter((row) => {
+      const channelId = normalizeTextInput(row?.channelId, { maxLength: 300 })
+      return Boolean(channelId && allowedChannelIds.has(channelId))
+    })
+    .sort((left, right) => {
+      const leftChannel = normalizeTextInput(left?.channelId, { maxLength: 300 })
+      const rightChannel = normalizeTextInput(right?.channelId, { maxLength: 300 })
+      const channelOrder = leftChannel.localeCompare(rightChannel)
+      if (channelOrder !== 0) return channelOrder
+      const leftDate = normalizeIsoDateOnly(left?.date)
+      const rightDate = normalizeIsoDateOnly(right?.date)
+      return leftDate.localeCompare(rightDate)
+    })
+  const timeSeries = summarizeTimeSeriesFromChannelRows(timeSeriesByChannel)
+  const ageScoped = aggregateScopedDemographicsByChannel(summaryPayload?.ageDistributionByChannel, allowedChannelIds)
+  const genderScoped = aggregateScopedDemographicsByChannel(summaryPayload?.genderDistributionByChannel, allowedChannelIds)
+  const geoScoped = aggregateScopedDemographicsByChannel(summaryPayload?.topGeosByChannel, allowedChannelIds)
+
+  return {
+    firstVideoUploadDate: resolveFirstVideoUploadDateFromPosts(topPosts),
+    channels,
+    topPosts,
+    timeSeries,
+    timeSeriesByChannel,
+    ageDistribution: ageScoped.overall,
+    ageDistributionByChannel: ageScoped.byChannel,
+    genderDistribution: genderScoped.overall,
+    genderDistributionByChannel: genderScoped.byChannel,
+    topGeos: geoScoped.overall.slice(0, 5),
+    topGeosByChannel: Object.fromEntries(
+      Object.entries(geoScoped.byChannel).map(([channelId, rows]) => [
+        channelId,
+        Array.isArray(rows) ? rows.slice(0, 5) : [],
+      ]),
+    ),
+  }
+}
+
+const listAccessibleYouTubeConnectionsByUserId = async (userId) => {
+  const normalizedUserId = normalizeTextInput(userId, { maxLength: 80 })
+  if (!isUuid(normalizedUserId)) return { ok: false, status: 400, connections: [] }
+  const organizationsResult = await listOrganizationRows()
+  if (!organizationsResult.ok) {
+    return {
+      ok: false,
+      status: organizationsResult.status || 500,
+      error: 'organizations_read_failed',
+      connections: [],
+    }
+  }
+
+  const connectionByKey = new Map()
+  for (const row of organizationsResult.rows) {
+    if (!canUserAccessOrganizationChannels(row, normalizedUserId)) continue
+    const organizationId = normalizeTextInput(row?.id, { maxLength: 80 })
+    const fallbackOwnerUserId = normalizeTextInput(row?.creator, { maxLength: 80 })
+    const accounts = normalizeOrganizationConnectedAccounts(row?.connected_accounts)
+    for (const account of accounts) {
+      if (normalizeOrganizationConnectionPlatform(account.platform) !== ORGANIZATION_CONNECTION_PLATFORM_YOUTUBE) continue
+      const channelId = normalizeTextInput(account.channelId, { maxLength: 300 })
+      if (!channelId) continue
+      const ownerUserIdRaw = normalizeTextInput(account.ownerUserId, { maxLength: 80 })
+      const ownerUserId =
+        isUuid(ownerUserIdRaw) ? ownerUserIdRaw : isUuid(fallbackOwnerUserId) ? fallbackOwnerUserId : ''
+      if (!isUuid(ownerUserId)) continue
+      const key = `${ownerUserId}:${channelId}`
+      if (connectionByKey.has(key)) continue
+      connectionByKey.set(key, {
+        channelId,
+        channelName: normalizeTextInput(account.accountName, { maxLength: 180 }) || 'YouTube Channel',
+        ownerUserId,
+        organizationId: isUuid(organizationId) ? organizationId : undefined,
+      })
+    }
+  }
+
+  return { ok: true, status: 200, connections: [...connectionByKey.values()] }
+}
+
 const collectYouTubeAccountsByChannelId = (organizationRows) => {
   const accountByChannelId = new Map()
   for (const row of organizationRows) {
@@ -3525,14 +3809,23 @@ const collectYouTubeAccountsByChannelId = (organizationRows) => {
   return accountByChannelId
 }
 
-const buildCampaignAvailableContent = async (campaignRow) => {
+const buildCampaignAvailableContent = async (campaignRow, options = {}) => {
   const allowedOrganizationIds = await resolveCampaignAllowedOrganizationIds(campaignRow)
   if (!allowedOrganizationIds.length) {
     return { accountLabels: [], channels: [], posts: [] }
   }
 
+  const viewerUserId = normalizeTextInput(options?.viewerUserId, { maxLength: 80 })
+  const hasViewerScope = Boolean(viewerUserId)
+  if (hasViewerScope && !isUuid(viewerUserId)) {
+    return { accountLabels: [], channels: [], posts: [] }
+  }
+
   const organizationRows = await fetchOrganizationsByIds(allowedOrganizationIds)
-  const connectedAccounts = organizationRows.flatMap((row) => {
+  const scopedOrganizationRows = hasViewerScope
+    ? organizationRows.filter((row) => canUserAccessOrganizationChannels(row, viewerUserId))
+    : organizationRows
+  const connectedAccounts = scopedOrganizationRows.flatMap((row) => {
     const fallbackOwnerUserId = normalizeTextInput(row?.creator, { maxLength: 80 })
     return normalizeOrganizationConnectedAccounts(row?.connected_accounts).map((account) => {
       const ownerUserId = normalizeTextInput(account?.ownerUserId, { maxLength: 80 })
@@ -3708,11 +4001,16 @@ const buildCampaignAvailableContent = async (campaignRow) => {
   }
 }
 
-const resolveCampaignAllowedYouTubeChannelIds = async (campaignRow) => {
+const resolveCampaignAllowedYouTubeChannelIds = async (campaignRow, viewerUserId = '') => {
   const allowedOrganizationIds = await resolveCampaignAllowedOrganizationIds(campaignRow)
   if (!allowedOrganizationIds.length) return new Set()
   const organizationRows = await fetchOrganizationsByIds(allowedOrganizationIds)
-  const accountsByChannelId = collectYouTubeAccountsByChannelId(organizationRows)
+  const normalizedViewerUserId = normalizeTextInput(viewerUserId, { maxLength: 80 })
+  const hasViewerScope = isUuid(normalizedViewerUserId)
+  const scopedOrganizationRows = hasViewerScope
+    ? organizationRows.filter((row) => canUserAccessOrganizationChannels(row, normalizedViewerUserId))
+    : organizationRows
+  const accountsByChannelId = collectYouTubeAccountsByChannelId(scopedOrganizationRows)
   return new Set(accountsByChannelId.keys())
 }
 
@@ -3737,9 +4035,30 @@ app.get('/api/campaigns', async (req, res) => {
     return
   }
 
+  const organizationsResult = await listOrganizationRows()
+  if (!organizationsResult.ok) {
+    console.error('Unable to resolve campaign channel visibility scope:', {
+      viewerUserId: viewer.userId,
+      status: organizationsResult.status,
+      details: organizationsResult.payload,
+    })
+  }
+  const organizationRows = organizationsResult.ok ? organizationsResult.rows : []
+  const allowedOrgsByCampaignId = organizationsResult.ok
+    ? buildAllowedOrgsByCampaignMap(organizationRows)
+    : new Map()
+
   const visibleCampaigns = campaignsResult.rows
     .filter((row) => canUserSeeCampaign(row, viewer.userId, viewer.organizationIds, viewer.appRole))
-    .map((row) => mapCampaignForClient(row))
+    .map((row) => {
+      const visibleChannelIds = resolveVisibleCampaignChannelIdsForViewerFromRows({
+        campaignRow: row,
+        viewerUserId: viewer.userId,
+        organizationRows,
+        allowedOrgsByCampaignId,
+      })
+      return mapCampaignForClient(row, { visibleChannelIds })
+    })
   res.json({ campaigns: visibleCampaigns, viewerUserId: viewer.userId })
 })
 
@@ -3923,8 +4242,9 @@ app.post('/api/campaigns', async (req, res) => {
   }
 
   const createdRow = inserted.row ?? rowToInsert
+  const visibleChannelIds = await resolveVisibleCampaignChannelIdsForViewer(createdRow, viewer.userId)
   res.status(201).json({
-    campaign: mapCampaignForClient(createdRow),
+    campaign: mapCampaignForClient(createdRow, { visibleChannelIds }),
     viewerUserId: viewer.userId,
     memberResolution,
   })
@@ -4049,8 +4369,9 @@ app.post('/api/campaigns/:campaignId/details', async (req, res) => {
     guaranteed,
     engagement_rate: engagementRate,
   }
+  const visibleChannelIds = await resolveVisibleCampaignChannelIdsForViewer(updatedRow, viewer.userId)
   res.json({
-    campaign: mapCampaignForClient(updatedRow),
+    campaign: mapCampaignForClient(updatedRow, { visibleChannelIds }),
   })
 })
 
@@ -4653,7 +4974,7 @@ app.get('/api/campaigns/:campaignId/available-posts', async (req, res) => {
     return
   }
 
-  const content = await buildCampaignAvailableContent(campaignRow)
+  const content = await buildCampaignAvailableContent(campaignRow, { viewerUserId: viewer.userId })
   res.json(content)
 })
 
@@ -4726,7 +5047,7 @@ app.post('/api/campaigns/:campaignId/posts', async (req, res) => {
     return
   }
 
-  const allowedChannelIds = await resolveCampaignAllowedYouTubeChannelIds(campaignRow)
+  const allowedChannelIds = await resolveCampaignAllowedYouTubeChannelIds(campaignRow, viewer.userId)
   if (selectedPostIds.length && !allowedChannelIds.size) {
     res.status(400).json({
       error: 'invalid_campaign_posts_payload',
@@ -4806,9 +5127,13 @@ app.post('/api/campaigns/:campaignId/posts', async (req, res) => {
     distribution_sources: distributionSourcesForWrite,
     posts: postsByChannelForWrite,
   }
+  const visibleChannelIds = await resolveVisibleCampaignChannelIdsForViewer(
+    updatedCampaignRow,
+    viewer.userId,
+  )
 
   res.json({
-    campaign: mapCampaignForClient(updatedCampaignRow),
+    campaign: mapCampaignForClient(updatedCampaignRow, { visibleChannelIds }),
   })
 })
 
@@ -8677,7 +9002,7 @@ const listAccessibleInstagramConnectionsByUserId = async (userId) => {
   }
   const connectionByKey = new Map()
   for (const row of organizationsResult.rows) {
-    if (!canUserSeeOrganization(row, normalizedUserId)) continue
+    if (!canUserAccessOrganizationChannels(row, normalizedUserId)) continue
     const organizationId = normalizeTextInput(row?.id, { maxLength: 80 })
     const fallbackOwnerUserId = normalizeTextInput(row?.creator, { maxLength: 80 })
     const accounts = normalizeOrganizationConnectedAccounts(row?.connected_accounts)
@@ -10174,19 +10499,30 @@ app.get('/api/instagram/summary', async (req, res) => {
   }
 
   const userId = viewerResult.viewer.userId
-  const cachedResult = await getCachedInstagramSummaryByUserId(userId)
-  if (!cachedResult.ok) {
-    res.status(cachedResult.status || 500).json({
+  const connectionsResult = await listAccessibleInstagramConnectionsByUserId(userId)
+  if (!connectionsResult.ok) {
+    res.status(connectionsResult.status || 500).json({
       ...buildEmptyInstagramSummary(),
-      error: 'instagram_cache_read_failed',
+      error: 'instagram_scope_lookup_failed',
       cacheStatus: 'error',
     })
     return
   }
 
+  const connections = connectionsResult.connections
+  const accountIdsByOwnerUserId = new Map()
+  for (const connection of connections) {
+    const ownerUserId = normalizeTextInput(connection.ownerUserId, { maxLength: 80 })
+    const accountId = normalizeTextInput(connection.accountId, { maxLength: 300 }).toLowerCase()
+    if (!isUuid(ownerUserId) || !accountId) continue
+    const channelId = `instagram:${accountId}`
+    const existing = accountIdsByOwnerUserId.get(ownerUserId) ?? new Set()
+    existing.add(channelId)
+    accountIdsByOwnerUserId.set(ownerUserId, existing)
+  }
   const autoRefresh = { queued: false }
 
-  if (!cachedResult.row?.summary_json) {
+  if (!accountIdsByOwnerUserId.size) {
     res.json({
       ...buildEmptyInstagramSummary(),
       cacheStatus: 'empty',
@@ -10202,11 +10538,51 @@ app.get('/api/instagram/summary', async (req, res) => {
     return
   }
 
-  const summary = normalizeCachedInstagramSummaryPayload(cachedResult.row.summary_json)
+  const summaryParts = []
+  let latestGeneratedAt = null
+  let latestGeneratedAtMs = 0
+  for (const [ownerUserId, allowedChannelIds] of accountIdsByOwnerUserId.entries()) {
+    const cachedResult = await getCachedInstagramSummaryByUserId(ownerUserId)
+    if (!cachedResult.ok || !cachedResult.row?.summary_json) continue
+    const normalizedSummary = normalizeCachedInstagramSummaryPayload(cachedResult.row.summary_json)
+    const scopedSummary = scopeCachedSummaryToConnectedChannelIds(normalizedSummary, allowedChannelIds)
+    if (
+      scopedSummary.channels.length
+      || scopedSummary.topPosts.length
+      || scopedSummary.timeSeries.length
+      || scopedSummary.timeSeriesByChannel.length
+    ) {
+      summaryParts.push(scopedSummary)
+    }
+    const generatedAtRaw = normalizeTextInput(cachedResult.row.generated_at, { maxLength: 64 })
+    const generatedAtMs = parseIsoTime(generatedAtRaw)
+    if (generatedAtMs > latestGeneratedAtMs) {
+      latestGeneratedAtMs = generatedAtMs
+      latestGeneratedAt = generatedAtRaw || null
+    }
+  }
+
+  if (!summaryParts.length) {
+    res.json({
+      ...buildEmptyInstagramSummary(),
+      cacheStatus: 'empty',
+      generatedAt: latestGeneratedAt,
+      autoRefresh: autoRefresh.queued
+        ? {
+            queued: true,
+            jobId: autoRefresh.jobId ?? null,
+            status: autoRefresh.status ?? 'queued',
+          }
+        : { queued: false },
+    })
+    return
+  }
+
+  const summary = mergeInstagramSummaryParts(summaryParts)
   res.json({
     ...summary,
     cacheStatus: 'ready',
-    generatedAt: cachedResult.row.generated_at ?? null,
+    generatedAt: latestGeneratedAt,
     autoRefresh: autoRefresh.queued
       ? {
           queued: true,
@@ -10690,19 +11066,28 @@ app.get('/api/youtube/summary', async (req, res) => {
   }
 
   const userId = viewerResult.viewer.userId
-  const cachedResult = await getCachedYouTubeSummaryByUserId(userId)
-  if (!cachedResult.ok) {
-    res.status(cachedResult.status || 500).json({
+  const connectionsResult = await listAccessibleYouTubeConnectionsByUserId(userId)
+  if (!connectionsResult.ok) {
+    res.status(connectionsResult.status || 500).json({
       ...buildEmptyYouTubeSummary(),
-      error: 'youtube_cache_read_failed',
+      error: 'youtube_scope_lookup_failed',
       cacheStatus: 'error',
     })
     return
   }
 
+  const channelIdsByOwnerUserId = new Map()
+  for (const connection of connectionsResult.connections) {
+    const ownerUserId = normalizeTextInput(connection.ownerUserId, { maxLength: 80 })
+    const channelId = normalizeTextInput(connection.channelId, { maxLength: 300 })
+    if (!isUuid(ownerUserId) || !channelId) continue
+    const existing = channelIdsByOwnerUserId.get(ownerUserId) ?? new Set()
+    existing.add(channelId)
+    channelIdsByOwnerUserId.set(ownerUserId, existing)
+  }
   const autoRefresh = { queued: false }
 
-  if (!cachedResult.row?.summary_json) {
+  if (!channelIdsByOwnerUserId.size) {
     res.json({
       ...buildEmptyYouTubeSummary(),
       cacheStatus: 'empty',
@@ -10718,11 +11103,51 @@ app.get('/api/youtube/summary', async (req, res) => {
     return
   }
 
-  const summary = normalizeCachedSummaryPayload(cachedResult.row.summary_json)
+  const summaryParts = []
+  let latestGeneratedAt = null
+  let latestGeneratedAtMs = 0
+  for (const [ownerUserId, allowedChannelIds] of channelIdsByOwnerUserId.entries()) {
+    const cachedResult = await getCachedYouTubeSummaryByUserId(ownerUserId)
+    if (!cachedResult.ok || !cachedResult.row?.summary_json) continue
+    const normalizedSummary = normalizeCachedSummaryPayload(cachedResult.row.summary_json)
+    const scopedSummary = scopeCachedSummaryToConnectedChannelIds(normalizedSummary, allowedChannelIds)
+    if (
+      scopedSummary.channels.length
+      || scopedSummary.topPosts.length
+      || scopedSummary.timeSeries.length
+      || scopedSummary.timeSeriesByChannel.length
+    ) {
+      summaryParts.push(scopedSummary)
+    }
+    const generatedAtRaw = normalizeTextInput(cachedResult.row.generated_at, { maxLength: 64 })
+    const generatedAtMs = parseIsoTime(generatedAtRaw)
+    if (generatedAtMs > latestGeneratedAtMs) {
+      latestGeneratedAtMs = generatedAtMs
+      latestGeneratedAt = generatedAtRaw || null
+    }
+  }
+
+  if (!summaryParts.length) {
+    res.json({
+      ...buildEmptyYouTubeSummary(),
+      cacheStatus: 'empty',
+      generatedAt: latestGeneratedAt,
+      autoRefresh: autoRefresh.queued
+        ? {
+            queued: true,
+            jobId: autoRefresh.jobId ?? null,
+            status: autoRefresh.status ?? 'queued',
+          }
+        : { queued: false },
+    })
+    return
+  }
+
+  const summary = mergeYouTubeSummaryParts(summaryParts)
   res.json({
     ...summary,
     cacheStatus: 'ready',
-    generatedAt: cachedResult.row.generated_at ?? null,
+    generatedAt: latestGeneratedAt,
     autoRefresh: autoRefresh.queued
       ? {
           queued: true,
