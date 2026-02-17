@@ -43,6 +43,14 @@ export interface PostSummary {
   channelName?: string
   views: number
   engagementRate: number
+  likes?: number
+  comments?: number
+  shares?: number
+  saves?: number
+  reposts?: number
+  engagements?: number
+  publishedAt?: string
+  url?: string
   campaignTag?: string
 }
 

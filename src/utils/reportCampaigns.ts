@@ -4,6 +4,7 @@ import type {
   CampaignChannelPostsGroup,
   CampaignMemberRole,
 } from './campaigns'
+import { resolveCampaignLifecycle } from './campaignPerformance'
 import { sanitizeDateInput, sanitizeTextInput, sanitizeTokenInput } from './sanitize'
 
 export interface ReportCampaign {
@@ -44,25 +45,6 @@ const resolveDistribution = (value: unknown) => {
   }
 }
 
-const resolveStatus = (startDate: string, endDate: string, deliveryPercent: number): CampaignStatus => {
-  const startTime = Date.parse(`${startDate}T00:00:00Z`)
-  const endTime = Date.parse(`${endDate}T00:00:00Z`)
-  const now = Date.now()
-  if (!Number.isNaN(startTime) && now < startTime) return 'Draft'
-  if (!Number.isNaN(endTime) && now > endTime) return 'Completed'
-  if (deliveryPercent >= 100) return 'Overdelivering'
-  if (deliveryPercent < 50) return 'At Risk'
-  return 'Active'
-}
-
-const resolvePacing = (status: CampaignStatus) => {
-  if (status === 'Draft') return 'Not started'
-  if (status === 'Completed') return 'Finished'
-  if (status === 'Overdelivering') return 'Ahead'
-  if (status === 'At Risk') return 'Behind'
-  return 'On track'
-}
-
 export const resolveViewerCampaignRole = (
   campaign: CampaignApiItem,
   viewerUserId: string,
@@ -86,8 +68,12 @@ export const mapCampaignForReport = (
   const engagementRate = toNumber(campaign.engagementRate)
   const guaranteedEngagements = Math.round((guaranteedViews * engagementRate) / 100)
   const deliveredEngagements = Math.round((deliveredViews * engagementRate) / 100)
-  const deliveryPercent = guaranteedViews > 0 ? (deliveredViews / guaranteedViews) * 100 : 0
-  const status = resolveStatus(campaign.startDate, campaign.endDate, deliveryPercent)
+  const lifecycle = resolveCampaignLifecycle({
+    startDate: campaign.startDate,
+    endDate: campaign.endDate,
+    guaranteedViews,
+    deliveredViews,
+  })
 
   return {
     id: campaign.id,
@@ -102,8 +88,8 @@ export const mapCampaignForReport = (
     guaranteedEngagements,
     deliveredEngagements,
     distribution: resolveDistribution(campaign.distributionSources),
-    status,
-    pacing: resolvePacing(status),
+    status: lifecycle.status,
+    pacing: lifecycle.pacing,
     selectedPostIds: Array.isArray(campaign.selectedPostIds)
       ? campaign.selectedPostIds
         .map((value) => sanitizeTokenInput(value, 300))

@@ -6,6 +6,7 @@ import { TopBar } from './TopBar'
 interface AppLayoutProps {
   role: Role
   lastDataRefreshAt: number | null
+  onDataRefreshed: (timestamp?: number) => void
   themeMode: 'light' | 'dark'
   onToggleTheme: () => void
   onLogout: () => void
@@ -23,6 +24,7 @@ const routeTitles: Record<string, string> = {
 export const AppLayout = ({
   role,
   lastDataRefreshAt,
+  onDataRefreshed,
   themeMode,
   onToggleTheme,
   onLogout,
@@ -36,7 +38,9 @@ export const AppLayout = ({
       <div className="content-area">
         <TopBar
           title={title}
+          role={role}
           lastDataRefreshAt={lastDataRefreshAt}
+          onDataRefreshed={onDataRefreshed}
           themeMode={themeMode}
           onToggleTheme={onToggleTheme}
           onLogout={onLogout}

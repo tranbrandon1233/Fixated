@@ -21,6 +21,7 @@ import {
   type MemberResolutionSummary,
 } from '../utils/campaigns'
 import { formatNumber, formatPercent } from '../utils/format'
+import { resolveCampaignLifecycle } from '../utils/campaignPerformance'
 import {
   sanitizeDateInput,
   sanitizeEmailInput,
@@ -173,48 +174,33 @@ const resolveDistribution = (value: unknown) => {
   }
 }
 
-const resolveStatus = (startDate: string, endDate: string, deliveryPercent: number): CampaignSummary['status'] => {
-  const startTime = Date.parse(`${startDate}T00:00:00Z`)
-  const endTime = Date.parse(`${endDate}T00:00:00Z`)
-  const now = Date.now()
-  if (!Number.isNaN(startTime) && now < startTime) return 'Draft'
-  if (!Number.isNaN(endTime) && now > endTime) return 'Completed'
-  if (deliveryPercent >= 100) return 'Overdelivering'
-  if (deliveryPercent < 50) return 'At Risk'
-  return 'Active'
-}
-
-const resolvePacing = (status: CampaignSummary['status']) => {
-  if (status === 'Draft') return 'Not started'
-  if (status === 'Completed') return 'Finished'
-  if (status === 'Overdelivering') return 'Ahead'
-  if (status === 'At Risk') return 'Behind'
-  return 'On track'
-}
-
 const mapCampaignToCard = (campaign: CampaignApiItem): CampaignCardModel => {
   const guaranteedViews = toNumber(campaign.guaranteed)
   const deliveredViews = toNumber(campaign.viewsDelivered)
   const engagementRate = toNumber(campaign.engagementRate)
   const deliveredEngagements = deliveredViews > 0 ? Math.round((deliveredViews * engagementRate) / 100) : 0
   const guaranteedEngagements = guaranteedViews > 0 ? Math.round((guaranteedViews * engagementRate) / 100) : 0
-  const deliveryPercent = guaranteedViews > 0 ? (deliveredViews / guaranteedViews) * 100 : 0
   const distribution = resolveDistribution(campaign.distributionSources)
-  const status = resolveStatus(campaign.startDate, campaign.endDate, deliveryPercent)
+  const lifecycle = resolveCampaignLifecycle({
+    startDate: campaign.startDate,
+    endDate: campaign.endDate,
+    guaranteedViews,
+    deliveredViews,
+  })
   const sanitizedSelectedChannelId = sanitizeTokenInput(campaign.selectedChannelId, 300)
 
   return {
     id: campaign.id,
     name: sanitizeTextInput(campaign.campaignName, { maxLength: 140 }) || 'Untitled campaign',
     brand: sanitizeTextInput(campaign.brand, { maxLength: 140 }) || distribution.brand,
-    status,
+    status: lifecycle.status,
     startDate: sanitizeTokenInput(campaign.startDate, 32),
     endDate: sanitizeTokenInput(campaign.endDate, 32),
     guaranteedViews,
     deliveredViews,
     guaranteedEngagements,
     deliveredEngagements,
-    pacing: resolvePacing(status),
+    pacing: lifecycle.pacing,
     distribution: {
       ono: distribution.ono,
       clipper: distribution.clipper,

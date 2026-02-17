@@ -2,13 +2,8 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { SectionHeader } from '../components/ui/SectionHeader'
 import type { Role } from '../types/dashboard'
 import { formatRelativeRefreshTime } from '../utils/refresh'
-import { bumpRefreshCounter } from '../utils/refreshCounter'
-import {
-  clearYouTubeSummaryCache,
-  fetchAndCacheYouTubeSummary,
-  startYouTubeRefresh,
-  waitForYouTubeRefresh,
-} from '../utils/youtube'
+import { refreshAllConnectedAccountData } from '../utils/dataRefresh'
+import { fetchRefreshCounterStatus, RefreshCounterLimitError } from '../utils/refreshCounter'
 
 interface SettingsProps {
   role: Role
@@ -37,46 +32,60 @@ export const Settings = ({ role, lastDataRefreshAt, onDataRefreshed }: SettingsP
 
   const recordSuccessfulRefresh = useCallback((refreshedAt: number) => {
     onDataRefreshed(refreshedAt)
-    void bumpRefreshCounter()
-      .then((payload) => {
-        setRefreshCount24h(payload.refreshCount)
-      })
-      .catch(() => null)
   }, [onDataRefreshed])
+
+  const formatNextWindowLabel = (isoTimestamp: string | null) => {
+    if (!isoTimestamp) return 'in 24 hours'
+    const parsed = Date.parse(isoTimestamp)
+    if (!Number.isFinite(parsed)) return 'in 24 hours'
+    return new Date(parsed).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' })
+  }
 
   const handleRefreshNow = () => {
     if (!canRefreshData) return
     if (isRefreshing) return
-    setIsRefreshing(true)
-    setRefreshMessage('Refreshing data...')
-    void startYouTubeRefresh()
-      .then((job) =>
-        waitForYouTubeRefresh(job.jobId, {
-          onProgress: (status) => {
-            if (status.status === 'running' && status.channelsTotal > 0) {
-              setRefreshMessage(
-                `Refreshing data... ${Math.min(status.channelsProcessed, status.channelsTotal)}/${status.channelsTotal} channels`,
-              )
-            }
-          },
-        }),
-      )
-      .then((status) => {
-        if (status.status === 'failed') {
-          throw new Error(status.errorMessage || 'Refresh failed.')
+    void (async () => {
+      setIsRefreshing(true)
+      try {
+        setRefreshMessage('Checking refresh allowance...')
+        const status = await fetchRefreshCounterStatus()
+        if (status.refreshesRemaining <= 0) {
+          const nextWindowLabel = formatNextWindowLabel(status.nextWindowStartsAt)
+          window.alert(`Daily refresh limit reached. You can refresh again ${nextWindowLabel}.`)
+          setRefreshMessage(`Daily refresh limit reached. Next window: ${nextWindowLabel}.`)
+          return
         }
-        const refreshedAt = Date.now()
-        clearYouTubeSummaryCache()
-        return fetchAndCacheYouTubeSummary({ force: true }).then(() => refreshedAt)
-      })
-      .then((refreshedAt) => {
-        recordSuccessfulRefresh(refreshedAt)
-        setRefreshMessage('Data refreshed successfully.')
-      })
-      .catch(() => {
-        setRefreshMessage('Unable to refresh data.')
-      })
-      .finally(() => setIsRefreshing(false))
+
+        const shouldRefresh = window.confirm(
+          `You have ${status.refreshesRemaining} of ${status.refreshLimit} refreshes remaining in this 24-hour window. Refresh now?`,
+        )
+        if (!shouldRefresh) {
+          setRefreshMessage(null)
+          return
+        }
+
+        const result = await refreshAllConnectedAccountData({
+          onProgress: (message) => setRefreshMessage(message),
+        })
+        recordSuccessfulRefresh(result.refreshedAt)
+        if (result.refreshCount24h !== null) {
+          setRefreshCount24h(result.refreshCount24h)
+        }
+        const remainingLabel =
+          result.refreshesRemaining !== null ? ` ${result.refreshesRemaining} remaining today.` : ''
+        setRefreshMessage(`Data refreshed successfully.${remainingLabel}`)
+      } catch (error) {
+        if (error instanceof RefreshCounterLimitError) {
+          const nextWindowLabel = formatNextWindowLabel(error.payload.nextWindowStartsAt)
+          window.alert(`Daily refresh limit reached. You can refresh again ${nextWindowLabel}.`)
+          setRefreshMessage(`Daily refresh limit reached. Next window: ${nextWindowLabel}.`)
+        } else {
+          setRefreshMessage('Unable to refresh data.')
+        }
+      } finally {
+        setIsRefreshing(false)
+      }
+    })()
   }
 
   return (

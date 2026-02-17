@@ -5,6 +5,8 @@ import { URLSearchParams } from 'node:url'
 import path from 'node:path'
 import cookieParser from 'cookie-parser'
 import express from 'express'
+import { collectInstagramMetricsWithPlaywright } from './instagramCollector.js'
+import { INSTAGRAM_SELECTOR_VERSION } from './instagramSelectors.js'
 
 const app = express()
 
@@ -62,6 +64,69 @@ const youtubeReportChannelDaily = getEnv('YOUTUBE_REPORT_CHANNEL_DAILY', 'channe
 const youtubeReportVideoDaily = getEnv('YOUTUBE_REPORT_VIDEO_DAILY', 'video_basic_a2')
 const youtubeReportDemographics = getEnv('YOUTUBE_REPORT_DEMOGRAPHICS', 'channel_demographics_a1')
 const youtubeReportGeo = getEnv('YOUTUBE_REPORT_GEO', 'channel_geography_a1')
+const instagramCollectorMode = getEnv('INSTAGRAM_COLLECTOR_MODE', 'playwright').toLowerCase()
+const instagramSessionEncryptionKey = getEnv('INSTAGRAM_SESSION_ENCRYPTION_KEY')
+const instagramCollectorMaxPosts = Math.max(1, Math.min(50, Number(getEnv('INSTAGRAM_COLLECTOR_MAX_POSTS', '12')) || 12))
+const instagramCollectorTimeoutMs = Math.max(
+  10_000,
+  Math.min(120_000, Number(getEnv('INSTAGRAM_COLLECTOR_TIMEOUT_MS', '45000')) || 45_000),
+)
+const instagramRefreshMaxConcurrency = Math.max(
+  1,
+  Math.min(8, Number(getEnv('INSTAGRAM_REFRESH_MAX_CONCURRENCY', '2')) || 2),
+)
+const instagramCollectorMaxRetries = Math.max(
+  0,
+  Math.min(4, Number(getEnv('INSTAGRAM_COLLECTOR_MAX_RETRIES', '2')) || 2),
+)
+const instagramCollectorRetryBaseDelayMs = Math.max(
+  200,
+  Math.min(15_000, Number(getEnv('INSTAGRAM_COLLECTOR_RETRY_BASE_DELAY_MS', '1200')) || 1200),
+)
+const instagramCollectorRetryJitterMs = Math.max(
+  50,
+  Math.min(15_000, Number(getEnv('INSTAGRAM_COLLECTOR_RETRY_JITTER_MS', '500')) || 500),
+)
+const instagramRateLimitWindowMs = Math.max(
+  10_000,
+  Math.min(10 * 60 * 1000, Number(getEnv('INSTAGRAM_RATE_LIMIT_WINDOW_MS', '60000')) || 60_000),
+)
+const instagramRefreshRateLimitMax = Math.max(
+  1,
+  Math.min(60, Number(getEnv('INSTAGRAM_REFRESH_RATE_LIMIT_MAX', '8')) || 8),
+)
+const instagramSessionRateLimitMax = Math.max(
+  1,
+  Math.min(60, Number(getEnv('INSTAGRAM_SESSION_RATE_LIMIT_MAX', '12')) || 12),
+)
+const instagramAlertFailureStreakThreshold = Math.max(
+  2,
+  Math.min(20, Number(getEnv('INSTAGRAM_ALERT_FAILURE_STREAK_THRESHOLD', '3')) || 3),
+)
+const instagramAlertFailureRateThresholdPct = Math.max(
+  5,
+  Math.min(100, Number(getEnv('INSTAGRAM_ALERT_FAILURE_RATE_THRESHOLD_PCT', '50')) || 50),
+)
+const instagramOpsRunWindowMs = Math.max(
+  60_000,
+  Math.min(24 * 60 * 60 * 1000, Number(getEnv('INSTAGRAM_OPS_RUN_WINDOW_MS', '21600000')) || 6 * 60 * 60 * 1000),
+)
+const instagramOpsRecentRunLimit = Math.max(
+  20,
+  Math.min(1000, Number(getEnv('INSTAGRAM_OPS_RECENT_RUN_LIMIT', '200')) || 200),
+)
+const instagramOpsRecentAlertLimit = Math.max(
+  10,
+  Math.min(500, Number(getEnv('INSTAGRAM_OPS_RECENT_ALERT_LIMIT', '100')) || 100),
+)
+const instagramOpsRecentRunsPerAccount = Math.max(
+  3,
+  Math.min(50, Number(getEnv('INSTAGRAM_OPS_RECENT_RUNS_PER_ACCOUNT', '15')) || 15),
+)
+const instagramOpsRecentAlertsPerAccount = Math.max(
+  3,
+  Math.min(50, Number(getEnv('INSTAGRAM_OPS_RECENT_ALERTS_PER_ACCOUNT', '12')) || 12),
+)
 const supabaseUrl = withFallbackUrl(getEnv('SUPABASE_URL'), '')
 const supabasePublishableKey = getEnv('SUPABASE_PUBLISHABLE_KEY', getEnv('SUPABASE_ANON_KEY'))
 const supabaseSecretKey = getEnv('SUPABASE_SECRET_KEY', getEnv('SUPABASE_SERVICE_ROLE_KEY'))
@@ -79,8 +144,17 @@ const APP_REDIRECT_COOKIE = 'app_redirect_origin'
 const YOUTUBE_OAUTH_CONTEXT_COOKIE = 'youtube_oauth_context'
 const SUPABASE_ACCESS_TOKEN_COOKIE = 'sb_access_token'
 const SUPABASE_REFRESH_TOKEN_COOKIE = 'sb_refresh_token'
-const YOUTUBE_AUTO_REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000
+const YOUTUBE_AUTO_REFRESH_INTERVAL_MS = 60 * 60 * 1000
 const YOUTUBE_AUTO_REFRESH_RETRY_COOLDOWN_MS = 10 * 60 * 1000
+const INSTAGRAM_AUTO_REFRESH_INTERVAL_MS = 60 * 60 * 1000
+const INSTAGRAM_AUTO_REFRESH_RETRY_COOLDOWN_MS = 10 * 60 * 1000
+const REFRESH_JOB_STALE_TIMEOUT_MS = 15 * 60 * 1000
+const YOUTUBE_CHANNEL_REFRESH_TIMEOUT_MS = Math.max(
+  30_000,
+  Math.min(10 * 60 * 1000, Number(getEnv('YOUTUBE_CHANNEL_REFRESH_TIMEOUT_MS', '180000')) || 180_000),
+)
+const REFRESH_LIMIT_PER_24H = 10
+const REFRESH_WINDOW_DURATION_MS = 24 * 60 * 60 * 1000
 const EXPORT_PREVIEW_TTL_MS = 30 * 60 * 1000
 const EXPORT_PREVIEW_MAX_ENTRIES = 64
 const EXPORT_PREVIEW_MAX_BASE64_SIZE = 20 * 1024 * 1024
@@ -89,6 +163,13 @@ const exportPreviewStore = new Map()
 const ORGANIZATION_CONNECTION_PLATFORM_YOUTUBE = 'YouTube'
 const ORGANIZATION_CONNECTION_PLATFORM_INSTAGRAM = 'Instagram'
 const ORGANIZATION_CONNECTION_PLATFORM_X = 'X'
+const instagramEndpointRateLimitBuckets = new Map()
+const instagramRefreshRunningUsers = new Set()
+const instagramOpsState = {
+  runs: [],
+  alerts: [],
+  failureStreakByUser: new Map(),
+}
 
 const buildAppRedirect = ({
   status,
@@ -108,6 +189,25 @@ const buildAppRedirect = ({
 }
 
 const normalizeChannelName = (value) => String(value ?? '').trim().toLowerCase()
+const normalizeInstagramHandle = (value) =>
+  normalizeTextInput(value, { maxLength: 120 })
+    .replace(/^@+/, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9._]/g, '')
+
+const resolveInstagramAccountId = (account) => {
+  const explicitId = normalizeTextInput(account?.channelId, { maxLength: 300 })
+  if (explicitId) return explicitId.toLowerCase()
+  const fromName = normalizeInstagramHandle(account?.accountName)
+  return fromName
+}
+
+const buildInstagramVaultKey = ({ ownerUserId = '', accountId = '' }) => {
+  const normalizedOwner = normalizeTextInput(ownerUserId, { maxLength: 80 })
+  const normalizedAccountId = normalizeTextInput(accountId, { maxLength: 300 }).toLowerCase()
+  if (!normalizedOwner || !normalizedAccountId) return ''
+  return `${normalizedOwner}:${normalizedAccountId}`
+}
 
 const normalizeOrganizationConnectionPlatform = (value) => {
   const normalized = normalizeTextInput(value, { maxLength: 24 }).toLowerCase()
@@ -130,6 +230,84 @@ const formatOrganizationConnectedAccountLabel = (account) => {
   return `${accountName} [${platform}]`
 }
 
+const normalizeInstagramOpsRunEntry = (value) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const runId = normalizeTextInput(value.runId, { maxLength: 80 })
+    || normalizeTextInput(value.id, { maxLength: 80 })
+  const jobId = normalizeTextInput(value.jobId, { maxLength: 80 })
+  const status = normalizeTextInput(value.status, { maxLength: 32 })
+  const startedAt = normalizeTextInput(value.startedAt, { maxLength: 64 })
+  const finishedAt = normalizeTextInput(value.finishedAt, { maxLength: 64 })
+  const partialFailureCount = Math.max(0, Number(value.partialFailureCount) || 0)
+  const errorCode = normalizeTextInput(value.errorCode, { maxLength: 80 })
+  const errorMessage = normalizeTextInput(value.errorMessage, { maxLength: 240 })
+  if (!runId && !jobId && !startedAt && !finishedAt) return null
+  return {
+    runId,
+    jobId: isUuid(jobId) ? jobId : '',
+    status,
+    startedAt,
+    finishedAt,
+    partialFailureCount,
+    errorCode,
+    errorMessage,
+  }
+}
+
+const normalizeInstagramOpsAlertEntry = (value) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const id = normalizeTextInput(value.id, { maxLength: 80 }) || crypto.randomUUID()
+  const type = normalizeTextInput(value.type, { maxLength: 64 })
+  const createdAt = normalizeTextInput(value.createdAt, { maxLength: 64 }) || new Date().toISOString()
+  const payload = value.payload && typeof value.payload === 'object' && !Array.isArray(value.payload)
+    ? value.payload
+    : {}
+  return {
+    id,
+    type,
+    createdAt,
+    payload,
+  }
+}
+
+const normalizeInstagramOpsSnapshot = (value) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const updatedAt = normalizeTextInput(value.updatedAt, { maxLength: 64 }) || ''
+  const lastStatus = normalizeTextInput(value.lastStatus, { maxLength: 32 }) || ''
+  const lastRunAt = normalizeTextInput(value.lastRunAt, { maxLength: 64 }) || ''
+  const lastErrorCode = normalizeTextInput(value.lastErrorCode, { maxLength: 80 }) || ''
+  const lastErrorMessage = normalizeTextInput(value.lastErrorMessage, { maxLength: 240 }) || ''
+  const failureStreak = Math.max(0, Math.min(5000, Number(value.failureStreak) || 0))
+  const recentRuns = (Array.isArray(value.recentRuns) ? value.recentRuns : [])
+    .map((entry) => normalizeInstagramOpsRunEntry(entry))
+    .filter((entry) => Boolean(entry))
+    .sort((left, right) => {
+      const leftTime = Date.parse(left.finishedAt || left.startedAt || '')
+      const rightTime = Date.parse(right.finishedAt || right.startedAt || '')
+      return (Number.isFinite(rightTime) ? rightTime : 0) - (Number.isFinite(leftTime) ? leftTime : 0)
+    })
+    .slice(0, instagramOpsRecentRunsPerAccount)
+  const recentAlerts = (Array.isArray(value.recentAlerts) ? value.recentAlerts : [])
+    .map((entry) => normalizeInstagramOpsAlertEntry(entry))
+    .filter((entry) => Boolean(entry))
+    .sort((left, right) => {
+      const leftTime = Date.parse(left.createdAt || '')
+      const rightTime = Date.parse(right.createdAt || '')
+      return (Number.isFinite(rightTime) ? rightTime : 0) - (Number.isFinite(leftTime) ? leftTime : 0)
+    })
+    .slice(0, instagramOpsRecentAlertsPerAccount)
+  return {
+    updatedAt: updatedAt || new Date().toISOString(),
+    lastStatus,
+    lastRunAt,
+    lastErrorCode,
+    lastErrorMessage,
+    failureStreak,
+    recentRuns,
+    recentAlerts,
+  }
+}
+
 const normalizeOrganizationConnectedAccounts = (value) => {
   if (!Array.isArray(value)) return []
   const accountsById = new Map()
@@ -143,14 +321,21 @@ const normalizeOrganizationConnectedAccounts = (value) => {
     const fallbackId = `${platform.toLowerCase()}:${channelId || accountName.toLowerCase().replace(/\s+/g, '-')}`
     const id = normalizeOrganizationConnectionId(entry.id) || fallbackId
     if (!id || !accountName) continue
-    accountsById.set(id, {
+    const normalizedAccount = {
       id,
       platform,
       accountName,
       channelId: channelId || undefined,
       ownerUserId: isUuid(ownerUserId) ? ownerUserId : undefined,
       connectedAt: connectedAt || undefined,
-    })
+    }
+    if (platform === ORGANIZATION_CONNECTION_PLATFORM_INSTAGRAM) {
+      const instagramOps = normalizeInstagramOpsSnapshot(entry.instagramOps)
+      if (instagramOps) {
+        normalizedAccount.instagramOps = instagramOps
+      }
+    }
+    accountsById.set(id, normalizedAccount)
   }
   return [...accountsById.values()]
 }
@@ -217,7 +402,29 @@ let reportingStore = null
 const buildEmptyReportingStore = () => ({
   reportTypesCache: null,
   sessions: {},
+  instagram: {
+    sessionVault: {},
+    jobs: {},
+    summaries: {},
+  },
 })
+
+const ensureInstagramReportingStore = (store) => {
+  if (!store || typeof store !== 'object') return buildEmptyReportingStore()
+  if (!store.instagram || typeof store.instagram !== 'object' || Array.isArray(store.instagram)) {
+    store.instagram = { sessionVault: {}, jobs: {}, summaries: {} }
+  }
+  if (!store.instagram.sessionVault || typeof store.instagram.sessionVault !== 'object' || Array.isArray(store.instagram.sessionVault)) {
+    store.instagram.sessionVault = {}
+  }
+  if (!store.instagram.jobs || typeof store.instagram.jobs !== 'object' || Array.isArray(store.instagram.jobs)) {
+    store.instagram.jobs = {}
+  }
+  if (!store.instagram.summaries || typeof store.instagram.summaries !== 'object' || Array.isArray(store.instagram.summaries)) {
+    store.instagram.summaries = {}
+  }
+  return store
+}
 
 const loadReportingStore = async () => {
   if (reportingStore) return reportingStore
@@ -228,7 +435,7 @@ const loadReportingStore = async () => {
   try {
     const raw = await readFile(reportingStorePath, 'utf8')
     const parsed = JSON.parse(raw)
-    reportingStore = parsed && typeof parsed === 'object' ? parsed : buildEmptyReportingStore()
+    reportingStore = parsed && typeof parsed === 'object' ? ensureInstagramReportingStore(parsed) : buildEmptyReportingStore()
   } catch (err) {
     if (err && err.code !== 'ENOENT') {
       reportingStore = buildEmptyReportingStore()
@@ -237,6 +444,7 @@ const loadReportingStore = async () => {
     }
     await writeFile(reportingStorePath, JSON.stringify(reportingStore, null, 2))
   }
+  ensureInstagramReportingStore(reportingStore)
   return reportingStore
 }
 
@@ -392,6 +600,46 @@ const listYouTubeConnectionRowsByUserId = async (userId) => {
   return {
     ...result,
     rows: Array.isArray(result.payload) ? result.payload : [],
+  }
+}
+
+const listYouTubeConnectionRowsByChannelIds = async (channelIds) => {
+  const normalizedChannelIds = uniqueValues(
+    (Array.isArray(channelIds) ? channelIds : [])
+      .map((value) => normalizeTextInput(value, { maxLength: 300 }))
+      .filter((value) => Boolean(value)),
+  )
+  if (!normalizedChannelIds.length) {
+    return { ok: true, status: 200, payload: [], rows: [] }
+  }
+
+  const selectFields = encodeURIComponent(
+    'id,user_id,channel_id,channel_name,access_token,refresh_token,token_expires_at,connected_at,updated_at',
+  )
+  const rows = []
+  const chunkSize = 100
+
+  for (let index = 0; index < normalizedChannelIds.length; index += chunkSize) {
+    const chunk = normalizedChannelIds.slice(index, index + chunkSize)
+    const channelFilter = encodeURIComponent(
+      `in.(${chunk.map((value) => value.replace(/,/g, '')).join(',')})`,
+    )
+    const query = `select=${selectFields}&channel_id=${channelFilter}`
+    const result = await requestSupabaseTable('youtube_connections', { query })
+    if (!result.ok) {
+      return {
+        ...result,
+        rows: [],
+      }
+    }
+    rows.push(...(Array.isArray(result.payload) ? result.payload : []))
+  }
+
+  return {
+    ok: true,
+    status: 200,
+    payload: rows,
+    rows,
   }
 }
 
@@ -761,36 +1009,145 @@ const ensureSupabaseUserRow = async (sessionPayload) => {
   }
 }
 
-const bumpRefreshCounter24h = async (accessToken) => {
-  if (!isSupabaseConfigured || !accessToken) {
-    return {
-      ok: false,
-      status: 401,
-      payload: null,
-    }
+const updateUsersRowById = async (userId, payload) => {
+  const normalizedUserId = normalizeTextInput(userId, { maxLength: 80 })
+  if (!isUuid(normalizedUserId)) {
+    return { ok: false, status: 400, payload: null, row: null }
   }
-  try {
-    const response = await fetch(`${supabaseUrl}/rest/v1/rpc/bump_refresh_count_24h`, {
-      method: 'POST',
+  const userFilter = encodeURIComponent(normalizedUserId)
+  const endpoints = buildSupabaseTableEndpoints('Users', `id=eq.${userFilter}`)
+  let lastResult = { ok: false, status: 500, payload: null, row: null }
+  for (const endpoint of endpoints) {
+    const response = await fetch(endpoint, {
+      method: 'PATCH',
       headers: {
-        apikey: supabasePublishableKey,
-        Authorization: `Bearer ${accessToken}`,
+        apikey: supabaseSecretKey,
+        Authorization: `Bearer ${supabaseSecretKey}`,
         'Content-Type': 'application/json',
+        Prefer: 'return=representation',
       },
-      body: '{}',
+      body: JSON.stringify(payload && typeof payload === 'object' ? payload : {}),
     })
-    const payload = await response.json().catch(() => null)
-    return {
+    const responsePayload = await response.json().catch(() => null)
+    const row = Array.isArray(responsePayload) ? responsePayload[0] ?? null : null
+    const result = {
       ok: response.ok,
       status: response.status,
-      payload,
+      payload: responsePayload,
+      row,
     }
-  } catch (_err) {
+    if (result.ok) return result
+    lastResult = result
+    if (response.status !== 404) break
+  }
+  return lastResult
+}
+
+const normalizeRefreshCounterState = (row, nowMs = Date.now()) => {
+  const nowIso = new Date(nowMs).toISOString()
+  const currentCount = Math.max(0, Math.floor(toNumber(row?.refresh_count)))
+  const currentWindowStartedAtRaw = normalizeTextInput(row?.refresh_window_started_at, { maxLength: 64 })
+  const currentWindowStartedAtMs = parseIsoTime(currentWindowStartedAtRaw)
+  const hasValidWindow =
+    currentWindowStartedAtMs > 0 && nowMs - currentWindowStartedAtMs < REFRESH_WINDOW_DURATION_MS
+  const refreshCount = hasValidWindow ? currentCount : 0
+  const refreshWindowStartedAt = hasValidWindow ? currentWindowStartedAtRaw : nowIso
+  const wasReset = !hasValidWindow || currentCount !== refreshCount
+  const refreshesRemaining = Math.max(0, REFRESH_LIMIT_PER_24H - refreshCount)
+  const nextWindowStartsAt = new Date(parseIsoTime(refreshWindowStartedAt) + REFRESH_WINDOW_DURATION_MS).toISOString()
+  return {
+    refreshCount,
+    refreshWindowStartedAt,
+    refreshesRemaining,
+    refreshLimit: REFRESH_LIMIT_PER_24H,
+    nextWindowStartsAt,
+    wasReset,
+    nowIso,
+  }
+}
+
+const getRefreshCounterStatusForUser = async (userId) => {
+  let usersRowResult = await fetchUsersRowById(userId)
+  if (usersRowResult.ok && !usersRowResult.row && isUuid(userId)) {
+    await tryInsertUsersRow(userId, '')
+    usersRowResult = await fetchUsersRowById(userId)
+  }
+  if (!usersRowResult.ok || !usersRowResult.row) {
     return {
       ok: false,
-      status: 500,
-      payload: null,
+      status: usersRowResult.status || 500,
+      error: 'refresh_count_read_failed',
+      details: usersRowResult.payload,
     }
+  }
+
+  const normalized = normalizeRefreshCounterState(usersRowResult.row)
+  if (normalized.wasReset) {
+    const resetResult = await updateUsersRowById(userId, {
+      refresh_count: 0,
+      refresh_window_started_at: normalized.refreshWindowStartedAt,
+    })
+    if (!resetResult.ok) {
+      return {
+        ok: false,
+        status: resetResult.status || 500,
+        error: 'refresh_count_reset_failed',
+        details: resetResult.payload,
+      }
+    }
+  }
+
+  return {
+    ok: true,
+    status: 200,
+    state: {
+      refreshCount: normalized.refreshCount,
+      refreshWindowStartedAt: normalized.refreshWindowStartedAt,
+      refreshesRemaining: normalized.refreshesRemaining,
+      refreshLimit: normalized.refreshLimit,
+      nextWindowStartsAt: normalized.nextWindowStartsAt,
+    },
+  }
+}
+
+const consumeRefreshCounterForUser = async (userId) => {
+  const statusResult = await getRefreshCounterStatusForUser(userId)
+  if (!statusResult.ok) return statusResult
+  const state = statusResult.state
+  if (state.refreshesRemaining <= 0) {
+    return {
+      ok: false,
+      status: 429,
+      error: 'refresh_limit_reached',
+      state,
+      nextWindowStartsAt: state.nextWindowStartsAt,
+    }
+  }
+
+  const nextCount = state.refreshCount + 1
+  const updateResult = await updateUsersRowById(userId, {
+    refresh_count: nextCount,
+    refresh_window_started_at: state.refreshWindowStartedAt,
+  })
+  if (!updateResult.ok) {
+    return {
+      ok: false,
+      status: updateResult.status || 500,
+      error: 'refresh_count_update_failed',
+      details: updateResult.payload,
+    }
+  }
+
+  return {
+    ok: true,
+    status: 200,
+    state: {
+      refreshCount: nextCount,
+      refreshWindowStartedAt: state.refreshWindowStartedAt,
+      refreshesRemaining: Math.max(0, REFRESH_LIMIT_PER_24H - nextCount),
+      refreshLimit: REFRESH_LIMIT_PER_24H,
+      nextWindowStartsAt: state.nextWindowStartsAt,
+    },
   }
 }
 
@@ -944,7 +1301,20 @@ app.use('/api', (req, res, next) => {
 })
 
 app.get('/health', (_req, res) => {
-  res.json({ ok: true })
+  trimInstagramOpsState()
+  const instagramFailureRatePct = Number(getInstagramFailureRatePct().toFixed(2))
+  const highestFailureStreak = [...instagramOpsState.failureStreakByUser.values()]
+    .reduce((max, streak) => Math.max(max, Math.max(0, toNumber(streak?.count))), 0)
+  res.json({
+    ok: true,
+    instagram: {
+      collectorMode: instagramCollectorMode,
+      selectorVersion: INSTAGRAM_SELECTOR_VERSION,
+      failureRatePct: instagramFailureRatePct,
+      highestFailureStreak,
+      runningUsers: instagramRefreshRunningUsers.size,
+    },
+  })
 })
 
 app.get('/auth/session', async (req, res) => {
@@ -972,68 +1342,94 @@ app.get('/auth/session', async (req, res) => {
   })
 })
 
-app.post('/api/refresh-counter/bump', async (req, res) => {
+const resolveRefreshCounterViewer = async (req, res) => {
   if (!isSupabaseConfigured) {
-    res.status(500).json({
+    return {
+      ok: false,
+      status: 500,
       error: 'supabase_not_configured',
       message: 'Supabase config is missing. Set SUPABASE_URL and API keys.',
-    })
-    return
-  }
-
-  const { accessToken, refreshToken } = readSupabaseSessionTokens(req)
-
-  if (!accessToken) {
-    res.status(401).json({
-      error: 'not_authenticated',
-      message: 'Missing Supabase session token.',
-    })
-    return
+    }
   }
   const viewer = await resolveAuthedUserContext(req, res)
   if (!viewer.ok) {
-    res.status(viewer.status || 500).json({
+    return {
+      ok: false,
+      status: viewer.status || 500,
       error: viewer.error || 'refresh_count_update_failed',
       message: viewer.message || 'Unable to verify user role.',
       details: viewer.details ?? null,
-    })
-    return
-  }
-  if (!canRoleConnectAccounts(viewer.appRole)) {
-    res.status(403).json({
-      error: 'forbidden',
-      message: 'Only admins can refresh connected account data.',
-    })
-    return
-  }
-
-  let rpcResult = await bumpRefreshCounter24h(accessToken)
-  if (!rpcResult.ok && rpcResult.status === 401 && refreshToken) {
-    const refreshedSession = await refreshSupabaseSession(refreshToken)
-    if (refreshedSession?.access_token) {
-      setSupabaseSessionCookies(res, refreshedSession)
-      rpcResult = await bumpRefreshCounter24h(refreshedSession.access_token)
     }
   }
+  if (!canRoleConnectAccounts(viewer.appRole)) {
+    return {
+      ok: false,
+      status: 403,
+      error: 'forbidden',
+      message: 'Only admins can refresh connected account data.',
+    }
+  }
+  return { ok: true, viewer }
+}
 
-  if (!rpcResult.ok) {
-    if (rpcResult.status === 401) clearSupabaseSessionCookies(res)
-    res.status(rpcResult.status || 500).json({
-      error: 'refresh_count_update_failed',
-      details: rpcResult.payload,
+app.get('/api/refresh-counter/status', async (req, res) => {
+  const viewerResult = await resolveRefreshCounterViewer(req, res)
+  if (!viewerResult.ok) {
+    res.status(viewerResult.status || 500).json({
+      error: viewerResult.error || 'refresh_count_read_failed',
+      message: viewerResult.message || 'Unable to read refresh counter.',
+      details: viewerResult.details ?? null,
     })
     return
   }
 
-  const row = Array.isArray(rpcResult.payload) ? rpcResult.payload[0] : rpcResult.payload
-  const refreshCount = toNumber(row?.refresh_count)
-  const refreshWindowStartedAt =
-    typeof row?.refresh_window_started_at === 'string' ? row.refresh_window_started_at : null
+  const statusResult = await getRefreshCounterStatusForUser(viewerResult.viewer.userId)
+  if (!statusResult.ok) {
+    res.status(statusResult.status || 500).json({
+      error: statusResult.error || 'refresh_count_read_failed',
+      message: 'Unable to read refresh counter.',
+      details: statusResult.details ?? null,
+    })
+    return
+  }
 
-  res.json({
-    refreshCount,
-    refreshWindowStartedAt,
-  })
+  res.json(statusResult.state)
+})
+
+app.post('/api/refresh-counter/bump', async (req, res) => {
+  const viewerResult = await resolveRefreshCounterViewer(req, res)
+  if (!viewerResult.ok) {
+    res.status(viewerResult.status || 500).json({
+      error: viewerResult.error || 'refresh_count_update_failed',
+      message: viewerResult.message || 'Unable to update refresh counter.',
+      details: viewerResult.details ?? null,
+    })
+    return
+  }
+
+  const bumpResult = await consumeRefreshCounterForUser(viewerResult.viewer.userId)
+  if (!bumpResult.ok) {
+    const basePayload = {
+      error: bumpResult.error || 'refresh_count_update_failed',
+      details: bumpResult.details ?? null,
+    }
+    if (bumpResult.status === 429) {
+      res.status(429).json({
+        ...basePayload,
+        message: 'You have reached the 2 refreshes per 24 hours limit.',
+        refreshCount: bumpResult.state?.refreshCount ?? REFRESH_LIMIT_PER_24H,
+        refreshWindowStartedAt: bumpResult.state?.refreshWindowStartedAt ?? null,
+        refreshesRemaining: 0,
+        refreshLimit: REFRESH_LIMIT_PER_24H,
+        nextWindowStartsAt: bumpResult.nextWindowStartsAt ?? null,
+      })
+      return
+    }
+    res.status(bumpResult.status || 500).json(basePayload)
+    return
+  }
+
+  res.json(bumpResult.state)
 })
 
 app.post('/api/exports/preview', async (req, res) => {
@@ -2278,6 +2674,103 @@ const listCampaignRows = async () => {
   return lastResult
 }
 
+const buildCampaignNameById = (rows) => {
+  const campaignNameById = new Map()
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const id = normalizeTextInput(row?.id, { maxLength: 80 })
+    if (!isUuid(id)) continue
+    const name = normalizeTextInput(row?.campaign_name ?? row?.campaignName, { maxLength: 140 })
+    if (!name) continue
+    campaignNameById.set(id, name)
+  }
+  return campaignNameById
+}
+
+const summarizeInvalidCampaignNames = (invalidCampaignIds, campaignRows) => {
+  const campaignNameById = buildCampaignNameById(campaignRows)
+  const invalidCampaignNames = uniqueValues(
+    invalidCampaignIds
+      .map((campaignId) => campaignNameById.get(campaignId) || '')
+      .filter((name) => Boolean(name)),
+  )
+  return invalidCampaignNames.slice(0, 5)
+}
+
+const listCampaignNameRowsByIds = async (campaignIds) => {
+  const normalizedCampaignIds = uniqueValues(normalizeUuidArray(campaignIds))
+  if (!normalizedCampaignIds.length) {
+    return { ok: true, status: 200, payload: [], rows: [] }
+  }
+
+  const selectFields = encodeURIComponent('id,campaign_name')
+  const rows = []
+  const chunkSize = 100
+
+  for (let index = 0; index < normalizedCampaignIds.length; index += chunkSize) {
+    const chunk = normalizedCampaignIds.slice(index, index + chunkSize)
+    const campaignFilter = encodeURIComponent(
+      `in.(${chunk.map((value) => value.replace(/,/g, '')).join(',')})`,
+    )
+    const endpoints = buildSupabaseTableEndpoints(
+      'Campaigns',
+      `select=${selectFields}&id=${campaignFilter}`,
+    )
+
+    let lastResult = { ok: false, status: 500, payload: null }
+    for (const endpoint of endpoints) {
+      const response = await fetch(endpoint, {
+        headers: {
+          apikey: supabaseSecretKey,
+          Authorization: `Bearer ${supabaseSecretKey}`,
+        },
+      })
+      const payload = await response.json().catch(() => null)
+      const result = {
+        ok: response.ok,
+        status: response.status,
+        payload,
+      }
+      if (result.ok) {
+        rows.push(...(Array.isArray(payload) ? payload : []))
+        lastResult = result
+        break
+      }
+      lastResult = result
+      if (response.status !== 404) break
+    }
+
+    if (!lastResult.ok) {
+      return { ...lastResult, rows: [] }
+    }
+  }
+
+  return {
+    ok: true,
+    status: 200,
+    payload: rows,
+    rows,
+  }
+}
+
+const resolveCampaignNameByIdForOrganizations = async (organizationRows) => {
+  const campaignIds = uniqueValues(
+    (Array.isArray(organizationRows) ? organizationRows : [])
+      .flatMap((row) => normalizeUuidArray(row?.campaigns)),
+  )
+  if (!campaignIds.length) return new Map()
+
+  const campaignNameResult = await listCampaignNameRowsByIds(campaignIds)
+  if (!campaignNameResult.ok) {
+    console.error('Unable to resolve campaign names for organizations:', {
+      status: campaignNameResult.status,
+      details: campaignNameResult.payload,
+    })
+    return new Map()
+  }
+
+  return buildCampaignNameById(campaignNameResult.rows)
+}
+
 const insertCampaignRow = async (row) => {
   const endpoints = buildSupabaseTableEndpoints('Campaigns')
 
@@ -2872,13 +3365,20 @@ const canUserSeeOrganization = (row, userId) => {
   return Boolean(memberRoles[userId])
 }
 
-const mapOrganizationForClient = (row, userRows = []) => {
+const mapOrganizationForClient = (row, userRows = [], campaignNameById = new Map()) => {
   const id = normalizeTextInput(row?.id, { maxLength: 80 })
   const createdAt = normalizeTextInput(row?.created_at, { maxLength: 64 })
   const name = normalizeTextInput(row?.name, { maxLength: 140 })
   const creator = normalizeTextInput(row?.creator, { maxLength: 80 })
   const members = normalizeOrganizationMemberRoles(row?.members, creator)
   const campaigns = normalizeUuidArray(row?.campaigns)
+  const campaignDirectory = campaigns
+    .map((campaignId) => {
+      const campaignName = campaignNameById.get(campaignId) || ''
+      if (!campaignName) return null
+      return { id: campaignId, name: campaignName }
+    })
+    .filter((entry) => Boolean(entry))
   const connectedAccounts = normalizeOrganizationConnectedAccounts(row?.connected_accounts)
   const userEmailById = new Map(
     (Array.isArray(userRows) ? userRows : [])
@@ -2895,6 +3395,7 @@ const mapOrganizationForClient = (row, userRows = []) => {
     createdAt,
     name,
     campaigns,
+    campaignDirectory,
     members,
     memberDirectory: mapOrganizationMembersForClient(members, userRows),
     connectedAccounts,
@@ -2903,12 +3404,19 @@ const mapOrganizationForClient = (row, userRows = []) => {
   }
 }
 
-const mapOrganizationForClientWithResolvedUsers = async (organizationRow) => {
+const mapOrganizationForClientWithResolvedUsers = async (organizationRow, campaignNameById = null) => {
   const creatorId = normalizeTextInput(organizationRow?.creator, { maxLength: 80 })
   const memberRoles = normalizeOrganizationMemberRoles(organizationRow?.members, creatorId)
   const memberIds = Object.keys(memberRoles)
   const usersResult = await fetchUsersRowsByIds(memberIds)
-  return mapOrganizationForClient(organizationRow, usersResult.ok ? usersResult.rows : [])
+  const resolvedCampaignNameById = campaignNameById instanceof Map
+    ? campaignNameById
+    : await resolveCampaignNameByIdForOrganizations([organizationRow])
+  return mapOrganizationForClient(
+    organizationRow,
+    usersResult.ok ? usersResult.rows : [],
+    resolvedCampaignNameById,
+  )
 }
 
 const fetchOrganizationsByIds = async (organizationIds) => {
@@ -3046,7 +3554,12 @@ const buildCampaignAvailableContent = async (campaignRow) => {
     (account) =>
       normalizeOrganizationConnectionPlatform(account.platform) === ORGANIZATION_CONNECTION_PLATFORM_YOUTUBE,
   )
+  const instagramAccounts = connectedAccounts.filter(
+    (account) =>
+      normalizeOrganizationConnectionPlatform(account.platform) === ORGANIZATION_CONNECTION_PLATFORM_INSTAGRAM,
+  )
   const youtubeAccountByChannelId = new Map()
+  const configuredOwnerByChannelId = new Map()
   const channelIdsByOwnerUserId = new Map()
   for (const account of youtubeAccounts) {
     const channelId = normalizeTextInput(account.channelId, { maxLength: 300 })
@@ -3055,16 +3568,78 @@ const buildCampaignAvailableContent = async (campaignRow) => {
       youtubeAccountByChannelId.set(channelId, account)
     }
     const ownerUserId = normalizeTextInput(account.ownerUserId, { maxLength: 80 })
-    if (!isUuid(ownerUserId)) continue
-    const existing = channelIdsByOwnerUserId.get(ownerUserId) ?? new Set()
-    existing.add(channelId)
-    channelIdsByOwnerUserId.set(ownerUserId, existing)
+    if (isUuid(ownerUserId)) {
+      configuredOwnerByChannelId.set(channelId, ownerUserId)
+    }
   }
-  const channelOptions = [...youtubeAccountByChannelId.entries()]
-    .map(([channelId, account]) => ({
+  const youtubeChannelIds = [...youtubeAccountByChannelId.keys()]
+  if (youtubeChannelIds.length) {
+    const channelConnectionsResult = await listYouTubeConnectionRowsByChannelIds(youtubeChannelIds)
+    const ownersByChannelId = new Map()
+    const latestOwnerByChannelId = new Map()
+
+    if (channelConnectionsResult.ok) {
+      for (const row of channelConnectionsResult.rows) {
+        const channelId = normalizeTextInput(row?.channel_id, { maxLength: 300 })
+        const ownerUserId = normalizeTextInput(row?.user_id, { maxLength: 80 })
+        if (!channelId || !isUuid(ownerUserId)) continue
+        const ownerSet = ownersByChannelId.get(channelId) ?? new Set()
+        ownerSet.add(ownerUserId)
+        ownersByChannelId.set(channelId, ownerSet)
+
+        const updatedAtRaw =
+          normalizeTextInput(row?.updated_at, { maxLength: 64 })
+          || normalizeTextInput(row?.connected_at, { maxLength: 64 })
+        const updatedAt = Number.isFinite(Date.parse(updatedAtRaw)) ? Date.parse(updatedAtRaw) : 0
+        const existingLatest = latestOwnerByChannelId.get(channelId)
+        if (!existingLatest || updatedAt >= existingLatest.updatedAt) {
+          latestOwnerByChannelId.set(channelId, { ownerUserId, updatedAt })
+        }
+      }
+    }
+
+    // Prefer the account owner linked in the organization record, but auto-fallback by channel id.
+    for (const channelId of youtubeChannelIds) {
+      const configuredOwnerUserId = configuredOwnerByChannelId.get(channelId) ?? ''
+      const knownOwners = ownersByChannelId.get(channelId) ?? new Set()
+      let resolvedOwnerUserId = ''
+      if (configuredOwnerUserId && knownOwners.has(configuredOwnerUserId)) {
+        resolvedOwnerUserId = configuredOwnerUserId
+      } else {
+        resolvedOwnerUserId =
+          latestOwnerByChannelId.get(channelId)?.ownerUserId || configuredOwnerUserId
+      }
+      if (!isUuid(resolvedOwnerUserId)) continue
+      const existing = channelIdsByOwnerUserId.get(resolvedOwnerUserId) ?? new Set()
+      existing.add(channelId)
+      channelIdsByOwnerUserId.set(resolvedOwnerUserId, existing)
+    }
+  }
+  const instagramAccountById = new Map()
+  const instagramAccountIdsByOwnerUserId = new Map()
+  for (const account of instagramAccounts) {
+    const accountId = resolveInstagramAccountId(account)
+    if (!accountId) continue
+    if (!instagramAccountById.has(accountId)) {
+      instagramAccountById.set(accountId, account)
+    }
+    const ownerUserId = normalizeTextInput(account.ownerUserId, { maxLength: 80 })
+    if (!isUuid(ownerUserId)) continue
+    const existing = instagramAccountIdsByOwnerUserId.get(ownerUserId) ?? new Set()
+    existing.add(accountId)
+    instagramAccountIdsByOwnerUserId.set(ownerUserId, existing)
+  }
+
+  const channelOptions = [
+    ...[...youtubeAccountByChannelId.entries()].map(([channelId, account]) => ({
       id: channelId,
       label: formatOrganizationConnectedAccountLabel(account),
-    }))
+    })),
+    ...[...instagramAccountById.entries()].map(([accountId, account]) => ({
+      id: `instagram:${accountId}`,
+      label: formatOrganizationConnectedAccountLabel(account),
+    })),
+  ]
     .sort((left, right) => left.label.localeCompare(right.label))
 
   const postsById = new Map()
@@ -3074,33 +3649,6 @@ const buildCampaignAvailableContent = async (campaignRow) => {
     const cachedResult = await getCachedYouTubeSummaryByUserId(ownerUserId)
     if (cachedResult.ok && cachedResult.row?.summary_json) {
       summary = normalizeCachedSummaryPayload(cachedResult.row.summary_json)
-    }
-    const needsLiveFallback = !summary || !Array.isArray(summary.topPosts) || summary.topPosts.length === 0
-    if (needsLiveFallback) {
-      const connectionResult = await loadSupabaseYouTubeConnections(ownerUserId)
-      if (connectionResult.ok && connectionResult.connections.length) {
-        const scopedConnections = connectionResult.connections.filter((connection) =>
-          scopedChannelIds.has(connection.channelId),
-        )
-        if (scopedConnections.length) {
-          try {
-            const liveSummary = await buildLiveYouTubeSummary({
-              sessionId: `sb-${ownerUserId}`,
-              connections: scopedConnections,
-              resolveAccessToken: (connection) => ensureValidAccessTokenForUser(ownerUserId, connection),
-            })
-            summary = liveSummary
-            await upsertCachedYouTubeSummary({
-              userId: ownerUserId,
-              summary: liveSummary,
-              generatedAt: new Date().toISOString(),
-              refreshJobId: null,
-            })
-          } catch {
-            // Ignore fallback errors so other organizations can still contribute posts.
-          }
-        }
-      }
     }
     if (!summary) continue
     const summaryTopPosts = Array.isArray(summary.topPosts) ? summary.topPosts : []
@@ -3118,6 +3666,34 @@ const buildCampaignAvailableContent = async (campaignRow) => {
         title: normalizeTextInput(post.title, { maxLength: 300 }) || 'Untitled video',
         platform: ORGANIZATION_CONNECTION_PLATFORM_YOUTUBE,
         channelId,
+        channelName: formatOrganizationConnectedAccountLabel(account),
+        views: Math.max(0, toNumber(post.views)),
+        engagementRate: Math.max(0, toNumber(post.engagementRate)),
+      })
+    }
+  }
+
+  for (const [ownerUserId, accountIdSet] of instagramAccountIdsByOwnerUserId.entries()) {
+    const scopedAccountIds = new Set([...accountIdSet.values()])
+    const cachedResult = await getCachedInstagramSummaryByUserId(ownerUserId)
+    if (!cachedResult.ok || !cachedResult.row?.summary_json) continue
+    const summary = normalizeCachedInstagramSummaryPayload(cachedResult.row.summary_json)
+    const summaryTopPosts = Array.isArray(summary.topPosts) ? summary.topPosts : []
+    for (const post of summaryTopPosts) {
+      if (!post || typeof post !== 'object') continue
+      const postId = normalizeTextInput(post.id, { maxLength: 300 })
+      const rawChannelId = normalizeTextInput(post.channelId, { maxLength: 300 })
+      const accountId = rawChannelId.replace(/^instagram:/i, '').toLowerCase()
+      if (!postId || !accountId || !scopedAccountIds.has(accountId)) continue
+      const account = instagramAccountById.get(accountId)
+      if (!account) continue
+      const postKey = `instagram:${postId}`
+      if (postsById.has(postKey)) continue
+      postsById.set(postKey, {
+        id: postKey,
+        title: normalizeTextInput(post.title, { maxLength: 300 }) || 'Untitled Instagram post',
+        platform: ORGANIZATION_CONNECTION_PLATFORM_INSTAGRAM,
+        channelId: `instagram:${accountId}`,
         channelName: formatOrganizationConnectedAccountLabel(account),
         views: Math.max(0, toNumber(post.views)),
         engagementRate: Math.max(0, toNumber(post.engagementRate)),
@@ -4274,9 +4850,11 @@ app.get('/api/organizations', async (req, res) => {
     })
   }
 
+  const campaignNameById = await resolveCampaignNameByIdForOrganizations(visibleOrganizations)
+
   res.json({
     organizations: visibleOrganizations.map((row) =>
-      mapOrganizationForClient(row, usersResult.ok ? usersResult.rows : []),
+      mapOrganizationForClient(row, usersResult.ok ? usersResult.rows : [], campaignNameById),
     ),
     viewerUserId: viewer.userId,
   })
@@ -4372,10 +4950,14 @@ app.post('/api/organizations', async (req, res) => {
   )
   const invalidCampaignIds = campaigns.filter((campaignId) => !visibleCampaignIds.has(campaignId))
   if (invalidCampaignIds.length) {
+    const invalidCampaignNames = summarizeInvalidCampaignNames(invalidCampaignIds, campaignsResult.rows)
+    const invalidCampaignMessage = invalidCampaignNames.length
+      ? `One or more selected campaigns are invalid or inaccessible: ${invalidCampaignNames.join(', ')}.`
+      : 'One or more selected campaigns are invalid or inaccessible.'
     res.status(400).json({
       error: 'invalid_organization_payload',
-      message: 'One or more selected campaigns are invalid or inaccessible.',
-      invalidCampaignIds,
+      message: invalidCampaignMessage,
+      invalidCampaignNames,
     })
     return
   }
@@ -4461,8 +5043,10 @@ app.post('/api/organizations', async (req, res) => {
       })
     }
   }
+  const campaignNameById = buildCampaignNameById(campaignsResult.rows)
+
   res.status(201).json({
-    organization: mapOrganizationForClient(createdRow, usersResult.rows),
+    organization: mapOrganizationForClient(createdRow, usersResult.rows, campaignNameById),
     viewerUserId: viewer.userId,
     memberResolution,
   })
@@ -4579,10 +5163,14 @@ app.post('/api/organizations/:organizationId/details', async (req, res) => {
   )
   const invalidCampaignIds = nextCampaigns.filter((campaignId) => !visibleCampaignIds.has(campaignId))
   if (invalidCampaignIds.length) {
+    const invalidCampaignNames = summarizeInvalidCampaignNames(invalidCampaignIds, campaignsResult.rows)
+    const invalidCampaignMessage = invalidCampaignNames.length
+      ? `One or more selected campaigns are invalid or inaccessible: ${invalidCampaignNames.join(', ')}.`
+      : 'One or more selected campaigns are invalid or inaccessible.'
     res.status(400).json({
       error: 'invalid_organization_payload',
-      message: 'One or more selected campaigns are invalid or inaccessible.',
-      invalidCampaignIds,
+      message: invalidCampaignMessage,
+      invalidCampaignNames,
     })
     return
   }
@@ -4633,8 +5221,14 @@ app.post('/api/organizations/:organizationId/details', async (req, res) => {
     })
   }
 
+  const campaignNameById = buildCampaignNameById(campaignsResult.rows)
+
   res.json({
-    organization: mapOrganizationForClient(updatedOrganizationRow, usersResult.ok ? usersResult.rows : []),
+    organization: mapOrganizationForClient(
+      updatedOrganizationRow,
+      usersResult.ok ? usersResult.rows : [],
+      campaignNameById,
+    ),
   })
 })
 
@@ -5051,8 +5645,14 @@ app.post('/api/organizations/:organizationId/members', async (req, res) => {
     })
   }
 
+  const campaignNameById = await resolveCampaignNameByIdForOrganizations([updatedOrganizationRow])
+
   res.json({
-    organization: mapOrganizationForClient(updatedOrganizationRow, usersResult.ok ? usersResult.rows : []),
+    organization: mapOrganizationForClient(
+      updatedOrganizationRow,
+      usersResult.ok ? usersResult.rows : [],
+      campaignNameById,
+    ),
     updateResult: memberUpdateResult,
   })
 })
@@ -7322,6 +7922,165 @@ const buildEmptyYouTubeSummary = () => ({
   topGeosByChannel: {},
 })
 
+const mergeYouTubeDemographicRows = (targetMap, rows) => {
+  if (!Array.isArray(rows)) return
+  for (const row of rows) {
+    const label = normalizeTextInput(row?.label, { maxLength: 140 })
+    if (!label) continue
+    targetMap.set(label, (targetMap.get(label) ?? 0) + Math.max(0, toNumber(row?.value)))
+  }
+}
+
+const mergeYouTubeDemographicByChannel = (targetMap, byChannel) => {
+  if (!byChannel || typeof byChannel !== 'object' || Array.isArray(byChannel)) return
+  for (const [rawChannelId, rows] of Object.entries(byChannel)) {
+    const channelId = normalizeTextInput(rawChannelId, { maxLength: 300 })
+    if (!channelId) continue
+    const channelMap = targetMap.get(channelId) ?? new Map()
+    mergeYouTubeDemographicRows(channelMap, rows)
+    targetMap.set(channelId, channelMap)
+  }
+}
+
+const serializeYouTubeDemographicMap = (sourceMap) =>
+  [...sourceMap.entries()]
+    .map(([label, value]) => ({ label, value: Math.max(0, toNumber(value)) }))
+    .sort((left, right) => toNumber(right.value) - toNumber(left.value))
+
+const serializeYouTubeDemographicByChannelMap = (sourceMap) => {
+  const output = {}
+  for (const [channelId, rowsMap] of sourceMap.entries()) {
+    const normalizedChannelId = normalizeTextInput(channelId, { maxLength: 300 })
+    if (!normalizedChannelId) continue
+    output[normalizedChannelId] = serializeYouTubeDemographicMap(rowsMap)
+  }
+  return output
+}
+
+const mergeYouTubeSummaryParts = (parts) => {
+  const normalizedParts = (Array.isArray(parts) ? parts : []).filter(
+    (part) => part && typeof part === 'object',
+  )
+  if (!normalizedParts.length) return buildEmptyYouTubeSummary()
+
+  const firstDates = []
+  const channelByKey = new Map()
+  const postByKey = new Map()
+  const timeSeriesByDate = new Map()
+  const timeSeriesByChannelDate = new Map()
+  const ageDistributionMap = new Map()
+  const genderDistributionMap = new Map()
+  const topGeosMap = new Map()
+  const ageDistributionByChannelMap = new Map()
+  const genderDistributionByChannelMap = new Map()
+  const topGeosByChannelMap = new Map()
+
+  for (const part of normalizedParts) {
+    const firstDate = normalizeIsoDateOnly(part.firstVideoUploadDate)
+    if (firstDate) firstDates.push(firstDate)
+
+    const channels = Array.isArray(part.channels) ? part.channels : []
+    for (const channel of channels) {
+      const channelId = normalizeTextInput(channel?.id, { maxLength: 300 })
+      const platform = normalizeTextInput(channel?.platform, { maxLength: 40 }) || 'YouTube'
+      if (!channelId) continue
+      channelByKey.set(`${platform}:${channelId}`, channel)
+    }
+
+    const topPosts = Array.isArray(part.topPosts) ? part.topPosts : []
+    for (const post of topPosts) {
+      const postId = normalizeTextInput(post?.id, { maxLength: 300 })
+      const platform = normalizeTextInput(post?.platform, { maxLength: 40 }) || 'YouTube'
+      if (!postId) continue
+      const key = `${platform}:${postId}`
+      const existing = postByKey.get(key)
+      if (!existing || toNumber(post?.views) >= toNumber(existing?.views)) {
+        postByKey.set(key, post)
+      }
+    }
+
+    const timeSeriesRows = Array.isArray(part.timeSeries) ? part.timeSeries : []
+    for (const row of timeSeriesRows) {
+      const date = normalizeIsoDateOnly(row?.date)
+      if (!date) continue
+      const current = timeSeriesByDate.get(date) ?? {
+        date,
+        views: 0,
+        engagements: 0,
+        posts: 0,
+        watchTimeHours: 0,
+        followersNetChange: 0,
+      }
+      timeSeriesByDate.set(date, {
+        date,
+        views: current.views + Math.max(0, toNumber(row?.views)),
+        engagements: current.engagements + Math.max(0, toNumber(row?.engagements)),
+        posts: current.posts + Math.max(0, toNumber(row?.posts)),
+        watchTimeHours: current.watchTimeHours + Math.max(0, toNumber(row?.watchTimeHours)),
+        followersNetChange: current.followersNetChange + toNumber(row?.followersNetChange),
+      })
+    }
+
+    const seriesByChannelRows = Array.isArray(part.timeSeriesByChannel) ? part.timeSeriesByChannel : []
+    for (const row of seriesByChannelRows) {
+      const channelId = normalizeTextInput(row?.channelId, { maxLength: 300 })
+      const date = normalizeIsoDateOnly(row?.date)
+      if (!channelId || !date) continue
+      const key = `${channelId}:${date}`
+      const current = timeSeriesByChannelDate.get(key) ?? {
+        channelId,
+        date,
+        views: 0,
+        engagements: 0,
+        posts: 0,
+        watchTimeHours: 0,
+        followersNetChange: 0,
+      }
+      timeSeriesByChannelDate.set(key, {
+        channelId,
+        date,
+        views: current.views + Math.max(0, toNumber(row?.views)),
+        engagements: current.engagements + Math.max(0, toNumber(row?.engagements)),
+        posts: current.posts + Math.max(0, toNumber(row?.posts)),
+        watchTimeHours: current.watchTimeHours + Math.max(0, toNumber(row?.watchTimeHours)),
+        followersNetChange: current.followersNetChange + toNumber(row?.followersNetChange),
+      })
+    }
+
+    mergeYouTubeDemographicRows(ageDistributionMap, part.ageDistribution)
+    mergeYouTubeDemographicRows(genderDistributionMap, part.genderDistribution)
+    mergeYouTubeDemographicRows(topGeosMap, part.topGeos)
+    mergeYouTubeDemographicByChannel(ageDistributionByChannelMap, part.ageDistributionByChannel)
+    mergeYouTubeDemographicByChannel(genderDistributionByChannelMap, part.genderDistributionByChannel)
+    mergeYouTubeDemographicByChannel(topGeosByChannelMap, part.topGeosByChannel)
+  }
+
+  firstDates.sort((left, right) => left.localeCompare(right))
+
+  return {
+    firstVideoUploadDate: firstDates[0] || '',
+    channels: [...channelByKey.values()],
+    topPosts: [...postByKey.values()].sort((left, right) => toNumber(right?.views) - toNumber(left?.views)),
+    timeSeries: [...timeSeriesByDate.values()].sort((left, right) => left.date.localeCompare(right.date)),
+    timeSeriesByChannel: [...timeSeriesByChannelDate.values()].sort((left, right) => {
+      const channelOrder = left.channelId.localeCompare(right.channelId)
+      if (channelOrder !== 0) return channelOrder
+      return left.date.localeCompare(right.date)
+    }),
+    ageDistribution: serializeYouTubeDemographicMap(ageDistributionMap),
+    ageDistributionByChannel: serializeYouTubeDemographicByChannelMap(ageDistributionByChannelMap),
+    genderDistribution: serializeYouTubeDemographicMap(genderDistributionMap),
+    genderDistributionByChannel: serializeYouTubeDemographicByChannelMap(genderDistributionByChannelMap),
+    topGeos: serializeYouTubeDemographicMap(topGeosMap).slice(0, 5),
+    topGeosByChannel: Object.fromEntries(
+      Object.entries(serializeYouTubeDemographicByChannelMap(topGeosByChannelMap)).map(([channelId, rows]) => [
+        channelId,
+        Array.isArray(rows) ? rows.slice(0, 5) : [],
+      ]),
+    ),
+  }
+}
+
 const normalizeCachedSummaryPayload = (payload) => {
   if (!payload || typeof payload !== 'object') return buildEmptyYouTubeSummary()
   const parsed = payload
@@ -7371,6 +8130,1569 @@ const parseIsoTime = (value) => {
   return Number.isFinite(parsed) ? parsed : 0
 }
 
+const waitForDelay = (delayMs) =>
+  new Promise((resolve) => setTimeout(resolve, Math.max(0, toNumber(delayMs))))
+
+const withTimeout = async (promise, timeoutMs, timeoutMessage) => {
+  const safeTimeoutMs = Math.max(1_000, toNumber(timeoutMs) || 60_000)
+  let timeoutId = null
+  try {
+    const timeoutPromise = new Promise((_, reject) => {
+      timeoutId = setTimeout(() => {
+        reject(new Error(timeoutMessage || 'Operation timed out.'))
+      }, safeTimeoutMs)
+    })
+    return await Promise.race([promise, timeoutPromise])
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId)
+  }
+}
+
+const getInstagramRequestIp = (req) => {
+  const forwardedFor = normalizeTextInput(req.headers?.['x-forwarded-for'], { maxLength: 300 })
+  const forwarded = normalizeTextInput(req.headers?.forwarded, { maxLength: 300 })
+  const ipFromForwarded = forwardedFor.split(',')[0]?.trim() || ''
+  const ip = ipFromForwarded || normalizeTextInput(req.ip, { maxLength: 120 }) || normalizeTextInput(req.socket?.remoteAddress, { maxLength: 120 })
+  return ip || 'unknown'
+}
+
+const pruneInstagramRateLimitBuckets = (nowMs) => {
+  for (const [bucketKey, bucket] of instagramEndpointRateLimitBuckets.entries()) {
+    if (!bucket || typeof bucket !== 'object') {
+      instagramEndpointRateLimitBuckets.delete(bucketKey)
+      continue
+    }
+    if (nowMs - toNumber(bucket.lastSeenAt) > instagramRateLimitWindowMs * 3) {
+      instagramEndpointRateLimitBuckets.delete(bucketKey)
+    }
+  }
+}
+
+const enforceInstagramEndpointRateLimit = (req, res, options = {}) => {
+  const maxRequests = Math.max(1, toNumber(options.maxRequests || instagramRefreshRateLimitMax))
+  const windowMs = Math.max(1000, toNumber(options.windowMs || instagramRateLimitWindowMs))
+  const scope = normalizeTextInput(options.scope, { maxLength: 64 }) || 'instagram'
+  const userId = normalizeTextInput(options.userId, { maxLength: 80 }) || 'anonymous'
+  const clientIp = getInstagramRequestIp(req)
+  const bucketKey = `${scope}:${userId}:${clientIp}`
+  const nowMs = Date.now()
+  pruneInstagramRateLimitBuckets(nowMs)
+  const bucket = instagramEndpointRateLimitBuckets.get(bucketKey) ?? { count: 0, resetAt: nowMs + windowMs, lastSeenAt: nowMs }
+  if (nowMs > toNumber(bucket.resetAt)) {
+    bucket.count = 0
+    bucket.resetAt = nowMs + windowMs
+  }
+  bucket.count += 1
+  bucket.lastSeenAt = nowMs
+  instagramEndpointRateLimitBuckets.set(bucketKey, bucket)
+  const remaining = Math.max(0, maxRequests - bucket.count)
+  res.setHeader('X-RateLimit-Limit', String(maxRequests))
+  res.setHeader('X-RateLimit-Remaining', String(remaining))
+  res.setHeader('X-RateLimit-Reset', String(Math.ceil(toNumber(bucket.resetAt) / 1000)))
+  if (bucket.count <= maxRequests) return true
+  const retryAfterSeconds = Math.max(1, Math.ceil((toNumber(bucket.resetAt) - nowMs) / 1000))
+  res.setHeader('Retry-After', String(retryAfterSeconds))
+  res.status(429).json({
+    error: 'rate_limited',
+    message: 'Too many Instagram requests. Try again shortly.',
+    retryAfterSeconds,
+  })
+  return false
+}
+
+const trimInstagramOpsState = () => {
+  const nowMs = Date.now()
+  instagramOpsState.runs = instagramOpsState.runs
+    .filter((entry) => nowMs - toNumber(entry.finishedAtMs || entry.startedAtMs) <= instagramOpsRunWindowMs * 2)
+    .slice(-instagramOpsRecentRunLimit)
+  instagramOpsState.alerts = instagramOpsState.alerts
+    .filter((entry) => nowMs - toNumber(entry.createdAtMs) <= instagramOpsRunWindowMs * 2)
+    .slice(-instagramOpsRecentAlertLimit)
+  for (const [userId, streak] of instagramOpsState.failureStreakByUser.entries()) {
+    if (!streak || typeof streak !== 'object') {
+      instagramOpsState.failureStreakByUser.delete(userId)
+      continue
+    }
+    if (nowMs - toNumber(streak.updatedAtMs) > instagramOpsRunWindowMs * 2) {
+      instagramOpsState.failureStreakByUser.delete(userId)
+    }
+  }
+}
+
+const redactInstagramErrorMessage = (value) => {
+  const normalized = normalizeTextInput(value, { maxLength: 240 })
+  if (!normalized) return ''
+  return normalized
+    .replace(/[A-Za-z0-9+/_-]{24,}/g, '[redacted]')
+    .replace(/(sessionid|csrftoken|ds_user_id)\s*=\s*[^;\s]+/gi, '$1=[redacted]')
+}
+
+const getInstagramFailureRatePct = () => {
+  trimInstagramOpsState()
+  const nowMs = Date.now()
+  const recentRuns = instagramOpsState.runs.filter(
+    (entry) => nowMs - toNumber(entry.finishedAtMs || entry.startedAtMs) <= instagramOpsRunWindowMs,
+  )
+  if (!recentRuns.length) return 0
+  const failedRuns = recentRuns.filter((entry) => entry.status !== 'succeeded').length
+  return (failedRuns / recentRuns.length) * 100
+}
+
+const recordInstagramAlert = (type, payload = {}) => {
+  const nowIso = new Date().toISOString()
+  const alert = {
+    id: crypto.randomUUID(),
+    type: normalizeTextInput(type, { maxLength: 64 }) || 'instagram_alert',
+    createdAt: nowIso,
+    createdAtMs: Date.now(),
+    payload: payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : {},
+  }
+  instagramOpsState.alerts.push(alert)
+  trimInstagramOpsState()
+  console.error('Instagram guardrail alert:', {
+    type: alert.type,
+    createdAt: alert.createdAt,
+    payload: alert.payload,
+  })
+  const alertUserId = normalizeTextInput(alert.payload?.userId, { maxLength: 80 })
+  if (isUuid(alertUserId)) {
+    void persistInstagramAlertForUser(alertUserId, {
+      id: alert.id,
+      type: alert.type,
+      createdAt: alert.createdAt,
+      payload: alert.payload,
+    })
+  }
+}
+
+const updateInstagramFailureStreak = (userId, status, details = {}) => {
+  const normalizedUserId = normalizeTextInput(userId, { maxLength: 80 })
+  if (!isUuid(normalizedUserId)) return
+  const nowMs = Date.now()
+  const existing = instagramOpsState.failureStreakByUser.get(normalizedUserId) ?? {
+    count: 0,
+    updatedAtMs: nowMs,
+    lastStatus: 'idle',
+  }
+  if (status === 'succeeded') {
+    instagramOpsState.failureStreakByUser.set(normalizedUserId, {
+      count: 0,
+      updatedAtMs: nowMs,
+      lastStatus: 'succeeded',
+    })
+    return
+  }
+  const next = {
+    count: toNumber(existing.count) + 1,
+    updatedAtMs: nowMs,
+    lastStatus: normalizeTextInput(status, { maxLength: 32 }) || 'failed',
+  }
+  instagramOpsState.failureStreakByUser.set(normalizedUserId, next)
+  if (next.count >= instagramAlertFailureStreakThreshold) {
+    recordInstagramAlert('instagram_failure_streak_threshold', {
+      userId: normalizedUserId,
+      streakCount: next.count,
+      details,
+    })
+  }
+}
+
+const maybeAlertInstagramFailureRate = () => {
+  const failureRatePct = getInstagramFailureRatePct()
+  if (failureRatePct < instagramAlertFailureRateThresholdPct) return
+  const existingRecentAlert = instagramOpsState.alerts.find((entry) =>
+    entry.type === 'instagram_failure_rate_threshold'
+    && Date.now() - toNumber(entry.createdAtMs) <= Math.max(60_000, instagramOpsRunWindowMs / 2),
+  )
+  if (existingRecentAlert) return
+  recordInstagramAlert('instagram_failure_rate_threshold', {
+    failureRatePct: Number(failureRatePct.toFixed(2)),
+    thresholdPct: instagramAlertFailureRateThresholdPct,
+    windowMs: instagramOpsRunWindowMs,
+  })
+}
+
+const recordInstagramRun = async (entry) => {
+  const normalized = {
+    runId: normalizeTextInput(entry?.runId, { maxLength: 80 }) || crypto.randomUUID(),
+    userId: normalizeTextInput(entry?.userId, { maxLength: 80 }),
+    jobId: normalizeTextInput(entry?.jobId, { maxLength: 80 }),
+    status: normalizeTextInput(entry?.status, { maxLength: 32 }) || 'unknown',
+    startedAt: normalizeTextInput(entry?.startedAt, { maxLength: 64 }) || '',
+    finishedAt: normalizeTextInput(entry?.finishedAt, { maxLength: 64 }) || '',
+    startedAtMs: parseIsoTime(entry?.startedAt),
+    finishedAtMs: parseIsoTime(entry?.finishedAt),
+    channelsTotal: Math.max(0, toNumber(entry?.channelsTotal)),
+    channelsProcessed: Math.max(0, toNumber(entry?.channelsProcessed)),
+    partialFailureCount: Math.max(0, toNumber(entry?.partialFailureCount)),
+    errorCode: normalizeTextInput(entry?.errorCode, { maxLength: 80 }),
+    errorMessage: redactInstagramErrorMessage(entry?.errorMessage),
+    accountOutcomes: Array.isArray(entry?.accountOutcomes)
+      ? entry.accountOutcomes
+        .map((item) => {
+          if (!item || typeof item !== 'object' || Array.isArray(item)) return null
+          const ownerUserId = normalizeTextInput(item.ownerUserId, { maxLength: 80 })
+          const accountId = normalizeTextInput(item.accountId, { maxLength: 300 }).toLowerCase()
+          if (!isUuid(ownerUserId) || !accountId) return null
+          return {
+            ownerUserId,
+            accountId,
+            accountName: normalizeTextInput(item.accountName, { maxLength: 180 }),
+            status: normalizeTextInput(item.status, { maxLength: 32 }) || 'unknown',
+            errorCode: normalizeTextInput(item.errorCode, { maxLength: 80 }),
+            errorMessage: redactInstagramErrorMessage(item.errorMessage),
+          }
+        })
+        .filter((item) => Boolean(item))
+      : [],
+  }
+  instagramOpsState.runs.push(normalized)
+  updateInstagramFailureStreak(normalized.userId, normalized.status, {
+    jobId: normalized.jobId,
+    errorCode: normalized.errorCode,
+    partialFailureCount: normalized.partialFailureCount,
+  })
+  trimInstagramOpsState()
+  maybeAlertInstagramFailureRate()
+  if (normalized.accountOutcomes.length) {
+    const seenAccounts = new Set()
+    for (const outcome of normalized.accountOutcomes) {
+      const dedupeKey = `${outcome.ownerUserId}:${outcome.accountId}`
+      if (seenAccounts.has(dedupeKey)) continue
+      seenAccounts.add(dedupeKey)
+      await persistInstagramOpsSnapshotForAccount({
+        ownerUserId: outcome.ownerUserId,
+        accountId: outcome.accountId,
+        runEntry: {
+          runId: normalized.runId,
+          jobId: normalized.jobId,
+          status: outcome.status,
+          startedAt: normalized.startedAt,
+          finishedAt: normalized.finishedAt,
+          partialFailureCount: normalized.partialFailureCount,
+          errorCode: outcome.errorCode || normalized.errorCode,
+          errorMessage: outcome.errorMessage || normalized.errorMessage,
+        },
+        lastStatus: outcome.status,
+        lastErrorCode: outcome.errorCode || normalized.errorCode,
+        lastErrorMessage: outcome.errorMessage || normalized.errorMessage,
+      })
+    }
+  }
+}
+
+const buildEmptyInstagramSummary = () => ({
+  firstVideoUploadDate: '',
+  channels: [],
+  topPosts: [],
+  timeSeries: [],
+  timeSeriesByChannel: [],
+  ageDistribution: [],
+  ageDistributionByChannel: {},
+  genderDistribution: [],
+  genderDistributionByChannel: {},
+  topGeos: [],
+  topGeosByChannel: {},
+})
+
+const normalizeCachedInstagramSummaryPayload = (payload) => {
+  if (!payload || typeof payload !== 'object') return buildEmptyInstagramSummary()
+  const parsed = payload
+  return {
+    firstVideoUploadDate: normalizeIsoDateOnly(parsed.firstVideoUploadDate),
+    channels: Array.isArray(parsed.channels) ? parsed.channels : [],
+    topPosts: Array.isArray(parsed.topPosts) ? parsed.topPosts : [],
+    timeSeries: Array.isArray(parsed.timeSeries) ? parsed.timeSeries : [],
+    timeSeriesByChannel: Array.isArray(parsed.timeSeriesByChannel) ? parsed.timeSeriesByChannel : [],
+    ageDistribution: Array.isArray(parsed.ageDistribution) ? parsed.ageDistribution : [],
+    ageDistributionByChannel:
+      parsed.ageDistributionByChannel && typeof parsed.ageDistributionByChannel === 'object'
+        ? parsed.ageDistributionByChannel
+        : {},
+    genderDistribution: Array.isArray(parsed.genderDistribution) ? parsed.genderDistribution : [],
+    genderDistributionByChannel:
+      parsed.genderDistributionByChannel && typeof parsed.genderDistributionByChannel === 'object'
+        ? parsed.genderDistributionByChannel
+        : {},
+    topGeos: Array.isArray(parsed.topGeos) ? parsed.topGeos : [],
+    topGeosByChannel:
+      parsed.topGeosByChannel && typeof parsed.topGeosByChannel === 'object'
+        ? parsed.topGeosByChannel
+        : {},
+  }
+}
+
+const instagramSessionEncryptionKeyBuffer = instagramSessionEncryptionKey
+  ? crypto.createHash('sha256').update(instagramSessionEncryptionKey).digest()
+  : null
+
+const encryptInstagramSessionPayload = (payload) => {
+  if (!instagramSessionEncryptionKeyBuffer) return ''
+  const iv = crypto.randomBytes(12)
+  const cipher = crypto.createCipheriv('aes-256-gcm', instagramSessionEncryptionKeyBuffer, iv)
+  const serialized = JSON.stringify(payload ?? [])
+  const ciphertext = Buffer.concat([cipher.update(serialized, 'utf8'), cipher.final()])
+  const tag = cipher.getAuthTag()
+  return `v1:${iv.toString('base64')}:${tag.toString('base64')}:${ciphertext.toString('base64')}`
+}
+
+const decryptInstagramSessionPayload = (value) => {
+  if (!instagramSessionEncryptionKeyBuffer || typeof value !== 'string') return []
+  const parts = value.split(':')
+  if (parts.length !== 4 || parts[0] !== 'v1') return []
+  try {
+    const iv = Buffer.from(parts[1], 'base64')
+    const tag = Buffer.from(parts[2], 'base64')
+    const ciphertext = Buffer.from(parts[3], 'base64')
+    const decipher = crypto.createDecipheriv('aes-256-gcm', instagramSessionEncryptionKeyBuffer, iv)
+    decipher.setAuthTag(tag)
+    const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8')
+    const parsed = JSON.parse(plaintext)
+    return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
+  }
+}
+
+const normalizeInstagramCookieList = (value) => {
+  if (!Array.isArray(value)) return []
+  const dedupedByKey = new Map()
+  for (const entry of value.slice(0, 120)) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue
+    const name = normalizeTextInput(entry.name, { maxLength: 120 })
+    const cookieValue = normalizeTextInput(entry.value, { maxLength: 5000, trim: false })
+    const domain = normalizeTextInput(entry.domain, { maxLength: 180 }).toLowerCase() || '.instagram.com'
+    if (!name || !cookieValue || !domain) continue
+    const pathValue = normalizeTextInput(entry.path, { maxLength: 120 }) || '/'
+    const sameSiteRaw = normalizeTextInput(entry.sameSite, { maxLength: 24 }).toLowerCase()
+    const sameSite = sameSiteRaw === 'strict' ? 'Strict' : sameSiteRaw === 'none' ? 'None' : 'Lax'
+    const expires = Number.isFinite(Number(entry.expires)) ? Number(entry.expires) : -1
+    const cookie = {
+      name,
+      value: cookieValue,
+      domain,
+      path: pathValue,
+      expires,
+      httpOnly: Boolean(entry.httpOnly),
+      secure: Boolean(entry.secure),
+      sameSite,
+    }
+    const dedupeKey = `${cookie.name}:${cookie.domain}:${cookie.path}`
+    dedupedByKey.set(dedupeKey, cookie)
+  }
+  return [...dedupedByKey.values()]
+}
+
+const getInstagramStore = async () => {
+  const store = await loadReportingStore()
+  ensureInstagramReportingStore(store)
+  return store.instagram
+}
+
+const upsertInstagramSessionVaultEntry = async ({ ownerUserId, accountId, accountName, cookies }) => {
+  const vaultKey = buildInstagramVaultKey({ ownerUserId, accountId })
+  if (!vaultKey) return { ok: false, status: 400, error: 'invalid_instagram_vault_key' }
+  const normalizedCookies = normalizeInstagramCookieList(cookies)
+  if (!normalizedCookies.length) return { ok: false, status: 400, error: 'invalid_instagram_session_cookies' }
+  const encryptedCookies = encryptInstagramSessionPayload(normalizedCookies)
+  if (!encryptedCookies) return { ok: false, status: 500, error: 'instagram_session_encryption_not_configured' }
+
+  const instagramStore = await getInstagramStore()
+  instagramStore.sessionVault[vaultKey] = {
+    ownerUserId: normalizeTextInput(ownerUserId, { maxLength: 80 }),
+    accountId: normalizeTextInput(accountId, { maxLength: 300 }).toLowerCase(),
+    accountName: normalizeTextInput(accountName, { maxLength: 180 }) || normalizeTextInput(accountId, { maxLength: 180 }),
+    encryptedCookies,
+    updatedAt: new Date().toISOString(),
+  }
+  await persistReportingStore()
+  return { ok: true, status: 200 }
+}
+
+const getInstagramSessionVaultCookies = async ({ ownerUserId, accountId }) => {
+  const vaultKey = buildInstagramVaultKey({ ownerUserId, accountId })
+  if (!vaultKey) return []
+  const instagramStore = await getInstagramStore()
+  const row = instagramStore.sessionVault[vaultKey]
+  if (!row || typeof row !== 'object') return []
+  return normalizeInstagramCookieList(decryptInstagramSessionPayload(row.encryptedCookies))
+}
+
+const deleteInstagramSessionVaultEntries = async (predicate) => {
+  const instagramStore = await getInstagramStore()
+  const keys = Object.keys(instagramStore.sessionVault || {})
+  let removed = 0
+  for (const key of keys) {
+    const entry = instagramStore.sessionVault[key]
+    if (!entry || typeof entry !== 'object') continue
+    if (typeof predicate === 'function' && !predicate(entry, key)) continue
+    delete instagramStore.sessionVault[key]
+    removed += 1
+  }
+  if (removed > 0) {
+    await persistReportingStore()
+  }
+  return removed
+}
+
+const getCachedInstagramSummaryByUserId = async (userId) => {
+  const normalizedUserId = normalizeTextInput(userId, { maxLength: 80 })
+  if (!isUuid(normalizedUserId)) return { ok: false, status: 400, row: null, payload: null }
+  const userFilter = encodeURIComponent(normalizedUserId)
+  const selectFields = encodeURIComponent('id,user_id,summary_json,generated_at,refresh_job_id')
+  const query = `select=${selectFields}&user_id=eq.${userFilter}&limit=1`
+  const result = await requestSupabaseTable('instagram_cached_summaries', { query })
+  return {
+    ...result,
+    row: Array.isArray(result.payload) ? result.payload[0] ?? null : null,
+  }
+}
+
+const upsertCachedInstagramSummary = async ({ userId, summary, generatedAt, refreshJobId = null }) => {
+  const normalizedUserId = normalizeTextInput(userId, { maxLength: 80 })
+  if (!isUuid(normalizedUserId)) return { ok: false, status: 400, row: null, payload: null }
+  const normalizedSummary = normalizeCachedInstagramSummaryPayload(summary)
+  const result = await requestSupabaseTable('instagram_cached_summaries', {
+    method: 'POST',
+    query: 'on_conflict=user_id',
+    body: [
+      {
+        user_id: normalizedUserId,
+        summary_json: normalizedSummary,
+        generated_at: normalizeTextInput(generatedAt, { maxLength: 64 }) || new Date().toISOString(),
+        refresh_job_id: isUuid(refreshJobId) ? refreshJobId : null,
+      },
+    ],
+    prefer: 'resolution=merge-duplicates,return=representation',
+  })
+  return {
+    ...result,
+    row: Array.isArray(result.payload) ? result.payload[0] ?? null : null,
+  }
+}
+
+const deleteCachedInstagramSummaryByUserId = async (userId) => {
+  const normalizedUserId = normalizeTextInput(userId, { maxLength: 80 })
+  if (!isUuid(normalizedUserId)) return { ok: false, status: 400 }
+  const userFilter = encodeURIComponent(normalizedUserId)
+  const query = `user_id=eq.${userFilter}`
+  return requestSupabaseTable('instagram_cached_summaries', { method: 'DELETE', query })
+}
+
+const insertInstagramRefreshJob = async (job) => {
+  const result = await requestSupabaseTable('instagram_refresh_jobs', {
+    method: 'POST',
+    body: [job],
+    prefer: 'return=representation',
+  })
+  return {
+    ...result,
+    row: Array.isArray(result.payload) ? result.payload[0] ?? null : null,
+  }
+}
+
+const updateInstagramRefreshJob = async (userId, jobId, payload) => {
+  const normalizedUserId = normalizeTextInput(userId, { maxLength: 80 })
+  const normalizedJobId = normalizeTextInput(jobId, { maxLength: 80 })
+  if (!isUuid(normalizedUserId) || !isUuid(normalizedJobId)) {
+    return { ok: false, status: 400, row: null, payload: null }
+  }
+  const userFilter = encodeURIComponent(normalizedUserId)
+  const jobFilter = encodeURIComponent(normalizedJobId)
+  const query = `user_id=eq.${userFilter}&id=eq.${jobFilter}`
+  const result = await requestSupabaseTable('instagram_refresh_jobs', {
+    method: 'PATCH',
+    query,
+    body: payload,
+    prefer: 'return=representation',
+  })
+  return {
+    ...result,
+    row: Array.isArray(result.payload) ? result.payload[0] ?? null : null,
+  }
+}
+
+const getInstagramRefreshJob = async (userId, jobId) => {
+  const normalizedUserId = normalizeTextInput(userId, { maxLength: 80 })
+  const normalizedJobId = normalizeTextInput(jobId, { maxLength: 80 })
+  if (!isUuid(normalizedUserId) || !isUuid(normalizedJobId)) {
+    return { ok: false, status: 400, row: null, payload: null }
+  }
+  const userFilter = encodeURIComponent(normalizedUserId)
+  const jobFilter = encodeURIComponent(normalizedJobId)
+  const selectFields = encodeURIComponent(
+    'id,user_id,status,requested_at,started_at,finished_at,error_message,channels_total,channels_processed,meta',
+  )
+  const query = `select=${selectFields}&user_id=eq.${userFilter}&id=eq.${jobFilter}&limit=1`
+  const result = await requestSupabaseTable('instagram_refresh_jobs', { query })
+  return {
+    ...result,
+    row: Array.isArray(result.payload) ? result.payload[0] ?? null : null,
+  }
+}
+
+const getLatestInstagramRefreshJobByUserId = async (userId) => {
+  const normalizedUserId = normalizeTextInput(userId, { maxLength: 80 })
+  if (!isUuid(normalizedUserId)) return { ok: false, status: 400, row: null, payload: null }
+  const userFilter = encodeURIComponent(normalizedUserId)
+  const selectFields = encodeURIComponent(
+    'id,user_id,status,requested_at,started_at,finished_at,error_message,channels_total,channels_processed,meta',
+  )
+  const query = `select=${selectFields}&user_id=eq.${userFilter}&order=requested_at.desc&limit=1`
+  const result = await requestSupabaseTable('instagram_refresh_jobs', { query })
+  return {
+    ...result,
+    row: Array.isArray(result.payload) ? result.payload[0] ?? null : null,
+  }
+}
+
+const getInstagramRefreshJobQueueStats = async () => {
+  const selectFields = encodeURIComponent('status')
+  const statusFilter = encodeURIComponent('in.(queued,running)')
+  const query = `select=${selectFields}&status=${statusFilter}`
+  const result = await requestSupabaseTable('instagram_refresh_jobs', { query })
+  if (!result.ok || !Array.isArray(result.payload)) {
+    return { runningJobs: 0, queuedJobs: 0 }
+  }
+  let runningJobs = 0
+  let queuedJobs = 0
+  for (const entry of result.payload) {
+    const status = normalizeTextInput(entry?.status, { maxLength: 32 })
+    if (status === 'running') runningJobs += 1
+    if (status === 'queued') queuedJobs += 1
+  }
+  return { runningJobs, queuedJobs }
+}
+
+const listAccessibleInstagramConnectionsByUserId = async (userId) => {
+  const normalizedUserId = normalizeTextInput(userId, { maxLength: 80 })
+  if (!isUuid(normalizedUserId)) return { ok: false, status: 400, connections: [] }
+  const organizationsResult = await listOrganizationRows()
+  if (!organizationsResult.ok) {
+    return {
+      ok: false,
+      status: organizationsResult.status || 500,
+      error: 'organizations_read_failed',
+      connections: [],
+    }
+  }
+  const connectionByKey = new Map()
+  for (const row of organizationsResult.rows) {
+    if (!canUserSeeOrganization(row, normalizedUserId)) continue
+    const organizationId = normalizeTextInput(row?.id, { maxLength: 80 })
+    const fallbackOwnerUserId = normalizeTextInput(row?.creator, { maxLength: 80 })
+    const accounts = normalizeOrganizationConnectedAccounts(row?.connected_accounts)
+    for (const account of accounts) {
+      if (normalizeOrganizationConnectionPlatform(account.platform) !== ORGANIZATION_CONNECTION_PLATFORM_INSTAGRAM) continue
+      const accountId = resolveInstagramAccountId(account)
+      if (!accountId) continue
+      const accountName = normalizeTextInput(account.accountName, { maxLength: 180 }) || accountId
+      const ownerUserIdRaw = normalizeTextInput(account.ownerUserId, { maxLength: 80 })
+      const ownerUserId =
+        isUuid(ownerUserIdRaw) ? ownerUserIdRaw : isUuid(fallbackOwnerUserId) ? fallbackOwnerUserId : ''
+      if (!isUuid(ownerUserId)) continue
+      const key = `${ownerUserId}:${accountId}`
+      if (connectionByKey.has(key)) continue
+      connectionByKey.set(key, {
+        accountId,
+        accountName,
+        ownerUserId,
+        organizationId: isUuid(organizationId) ? organizationId : undefined,
+      })
+    }
+  }
+  return { ok: true, status: 200, connections: [...connectionByKey.values()] }
+}
+
+const mergeInstagramOpsRunEntries = (currentEntries, nextEntry) => {
+  const normalizedNextEntry = normalizeInstagramOpsRunEntry(nextEntry)
+  if (!normalizedNextEntry) return Array.isArray(currentEntries) ? currentEntries : []
+  const mapById = new Map()
+  const sourceEntries = Array.isArray(currentEntries) ? currentEntries : []
+  sourceEntries.forEach((entry) => {
+    const normalizedEntry = normalizeInstagramOpsRunEntry(entry)
+    if (!normalizedEntry) return
+    const dedupeKey = normalizedEntry.runId
+      || normalizedEntry.jobId
+      || `${normalizedEntry.startedAt}:${normalizedEntry.status}`
+    mapById.set(dedupeKey, normalizedEntry)
+  })
+  const nextDedupeKey = normalizedNextEntry.runId
+    || normalizedNextEntry.jobId
+    || `${normalizedNextEntry.startedAt}:${normalizedNextEntry.status}`
+  mapById.set(nextDedupeKey, normalizedNextEntry)
+  return [...mapById.values()]
+    .sort((left, right) => parseIsoTime(right.finishedAt || right.startedAt) - parseIsoTime(left.finishedAt || left.startedAt))
+    .slice(0, instagramOpsRecentRunsPerAccount)
+}
+
+const mergeInstagramOpsAlertEntries = (currentEntries, nextEntry) => {
+  const normalizedNextEntry = normalizeInstagramOpsAlertEntry(nextEntry)
+  if (!normalizedNextEntry) return Array.isArray(currentEntries) ? currentEntries : []
+  const mapById = new Map()
+  const sourceEntries = Array.isArray(currentEntries) ? currentEntries : []
+  sourceEntries.forEach((entry) => {
+    const normalizedEntry = normalizeInstagramOpsAlertEntry(entry)
+    if (!normalizedEntry) return
+    mapById.set(normalizedEntry.id, normalizedEntry)
+  })
+  mapById.set(normalizedNextEntry.id, normalizedNextEntry)
+  return [...mapById.values()]
+    .sort((left, right) => parseIsoTime(right.createdAt) - parseIsoTime(left.createdAt))
+    .slice(0, instagramOpsRecentAlertsPerAccount)
+}
+
+const mergeInstagramOpsSnapshot = (
+  existingSnapshot,
+  {
+    runEntry = null,
+    alertEntry = null,
+    lastStatus = '',
+    lastErrorCode = '',
+    lastErrorMessage = '',
+  } = {},
+) => {
+  const snapshot = normalizeInstagramOpsSnapshot(existingSnapshot) ?? {
+    updatedAt: new Date().toISOString(),
+    lastStatus: '',
+    lastRunAt: '',
+    lastErrorCode: '',
+    lastErrorMessage: '',
+    failureStreak: 0,
+    recentRuns: [],
+    recentAlerts: [],
+  }
+
+  let nextFailureStreak = Math.max(0, Number(snapshot.failureStreak) || 0)
+  let resolvedLastStatus = normalizeTextInput(lastStatus, { maxLength: 32 }) || snapshot.lastStatus
+  let resolvedLastErrorCode = normalizeTextInput(lastErrorCode, { maxLength: 80 }) || snapshot.lastErrorCode
+  let resolvedLastErrorMessage = normalizeTextInput(lastErrorMessage, { maxLength: 240 }) || snapshot.lastErrorMessage
+  const recentRuns = mergeInstagramOpsRunEntries(snapshot.recentRuns, runEntry)
+  const recentAlerts = mergeInstagramOpsAlertEntries(snapshot.recentAlerts, alertEntry)
+
+  if (runEntry) {
+    const normalizedRunEntry = normalizeInstagramOpsRunEntry(runEntry)
+    const runStatus = normalizeTextInput(normalizedRunEntry?.status, { maxLength: 32 })
+    if (runStatus) {
+      resolvedLastStatus = runStatus
+      if (runStatus === 'succeeded') {
+        nextFailureStreak = 0
+      } else {
+        nextFailureStreak += 1
+      }
+    }
+    const runFinishedAt = normalizeTextInput(normalizedRunEntry?.finishedAt, { maxLength: 64 })
+      || normalizeTextInput(normalizedRunEntry?.startedAt, { maxLength: 64 })
+    if (runFinishedAt) {
+      snapshot.lastRunAt = runFinishedAt
+    }
+    const runErrorCode = normalizeTextInput(normalizedRunEntry?.errorCode, { maxLength: 80 })
+    const runErrorMessage = normalizeTextInput(normalizedRunEntry?.errorMessage, { maxLength: 240 })
+    if (runErrorCode) resolvedLastErrorCode = runErrorCode
+    if (runErrorMessage) resolvedLastErrorMessage = runErrorMessage
+  }
+
+  return {
+    updatedAt: new Date().toISOString(),
+    lastStatus: resolvedLastStatus,
+    lastRunAt: snapshot.lastRunAt || normalizeTextInput(snapshot.updatedAt, { maxLength: 64 }),
+    lastErrorCode: resolvedLastErrorCode,
+    lastErrorMessage: resolvedLastErrorMessage,
+    failureStreak: Math.max(0, Math.min(5000, nextFailureStreak)),
+    recentRuns,
+    recentAlerts,
+  }
+}
+
+const persistInstagramOpsSnapshotForAccount = async ({
+  ownerUserId,
+  accountId,
+  runEntry = null,
+  alertEntry = null,
+  lastStatus = '',
+  lastErrorCode = '',
+  lastErrorMessage = '',
+}) => {
+  const normalizedOwnerUserId = normalizeTextInput(ownerUserId, { maxLength: 80 })
+  const normalizedAccountId = normalizeTextInput(accountId, { maxLength: 300 }).toLowerCase()
+  if (!isUuid(normalizedOwnerUserId) || !normalizedAccountId) {
+    return { ok: false, status: 400, matchedAccounts: 0, updatedOrganizations: 0 }
+  }
+  const organizationsResult = await listOrganizationRows()
+  if (!organizationsResult.ok) {
+    return {
+      ok: false,
+      status: organizationsResult.status || 500,
+      matchedAccounts: 0,
+      updatedOrganizations: 0,
+    }
+  }
+
+  let matchedAccounts = 0
+  let updatedOrganizations = 0
+  for (const row of organizationsResult.rows) {
+    const organizationId = normalizeTextInput(row?.id, { maxLength: 80 })
+    if (!isUuid(organizationId)) continue
+    const fallbackOwnerUserId = normalizeTextInput(row?.creator, { maxLength: 80 })
+    const accounts = normalizeOrganizationConnectedAccounts(row?.connected_accounts)
+    let changed = false
+    const nextAccounts = accounts.map((account) => {
+      if (normalizeOrganizationConnectionPlatform(account.platform) !== ORGANIZATION_CONNECTION_PLATFORM_INSTAGRAM) {
+        return account
+      }
+      const resolvedOwnerUserId = isUuid(normalizeTextInput(account.ownerUserId, { maxLength: 80 }))
+        ? normalizeTextInput(account.ownerUserId, { maxLength: 80 })
+        : isUuid(fallbackOwnerUserId)
+          ? fallbackOwnerUserId
+          : ''
+      if (resolvedOwnerUserId !== normalizedOwnerUserId) return account
+      const resolvedAccountId = resolveInstagramAccountId(account)
+      if (resolvedAccountId !== normalizedAccountId) return account
+      matchedAccounts += 1
+      changed = true
+      const nextInstagramOps = mergeInstagramOpsSnapshot(account.instagramOps, {
+        runEntry,
+        alertEntry,
+        lastStatus,
+        lastErrorCode,
+        lastErrorMessage,
+      })
+      return {
+        ...account,
+        instagramOps: nextInstagramOps,
+      }
+    })
+    if (!changed) continue
+    const updateResult = await updateOrganizationConnectedAccounts(organizationId, nextAccounts)
+    if (updateResult.ok) {
+      updatedOrganizations += 1
+    }
+  }
+  return {
+    ok: true,
+    status: 200,
+    matchedAccounts,
+    updatedOrganizations,
+  }
+}
+
+const persistInstagramAlertForUser = async (userId, alertEntry) => {
+  const normalizedUserId = normalizeTextInput(userId, { maxLength: 80 })
+  if (!isUuid(normalizedUserId)) return { ok: false, status: 400, persistedAccounts: 0 }
+  const connectionsResult = await listAccessibleInstagramConnectionsByUserId(normalizedUserId)
+  if (!connectionsResult.ok) {
+    return { ok: false, status: connectionsResult.status || 500, persistedAccounts: 0 }
+  }
+  const seen = new Set()
+  let persistedAccounts = 0
+  for (const connection of connectionsResult.connections) {
+    const dedupeKey = `${connection.ownerUserId}:${connection.accountId}`
+    if (seen.has(dedupeKey)) continue
+    seen.add(dedupeKey)
+    const persistResult = await persistInstagramOpsSnapshotForAccount({
+      ownerUserId: connection.ownerUserId,
+      accountId: connection.accountId,
+      alertEntry,
+    })
+    if (persistResult.ok && persistResult.matchedAccounts > 0) {
+      persistedAccounts += 1
+    }
+  }
+  return { ok: true, status: 200, persistedAccounts }
+}
+
+const loadPersistedInstagramOpsByUserId = async (viewerUserId) => {
+  const normalizedViewerUserId = normalizeTextInput(viewerUserId, { maxLength: 80 })
+  if (!isUuid(normalizedViewerUserId)) {
+    return { ok: false, status: 400, accountSnapshots: [], recentRuns: [], recentAlerts: [] }
+  }
+  const organizationsResult = await listOrganizationRows()
+  if (!organizationsResult.ok) {
+    return {
+      ok: false,
+      status: organizationsResult.status || 500,
+      accountSnapshots: [],
+      recentRuns: [],
+      recentAlerts: [],
+    }
+  }
+
+  const snapshotByAccount = new Map()
+  for (const row of organizationsResult.rows) {
+    if (!canUserSeeOrganization(row, normalizedViewerUserId)) continue
+    const organizationId = normalizeTextInput(row?.id, { maxLength: 80 })
+    const fallbackOwnerUserId = normalizeTextInput(row?.creator, { maxLength: 80 })
+    const accounts = normalizeOrganizationConnectedAccounts(row?.connected_accounts)
+    for (const account of accounts) {
+      if (normalizeOrganizationConnectionPlatform(account.platform) !== ORGANIZATION_CONNECTION_PLATFORM_INSTAGRAM) continue
+      const accountId = resolveInstagramAccountId(account)
+      if (!accountId) continue
+      const ownerUserId = isUuid(normalizeTextInput(account.ownerUserId, { maxLength: 80 }))
+        ? normalizeTextInput(account.ownerUserId, { maxLength: 80 })
+        : isUuid(fallbackOwnerUserId)
+          ? fallbackOwnerUserId
+          : ''
+      if (!isUuid(ownerUserId)) continue
+      const key = `${ownerUserId}:${accountId}`
+      const normalizedOps = normalizeInstagramOpsSnapshot(account.instagramOps)
+      if (!snapshotByAccount.has(key)) {
+        snapshotByAccount.set(key, {
+          ownerUserId,
+          accountId,
+          accountName: normalizeTextInput(account.accountName, { maxLength: 180 }) || accountId,
+          organizationIds: new Set(),
+          instagramOps: normalizedOps ?? {
+            updatedAt: '',
+            lastStatus: '',
+            lastRunAt: '',
+            lastErrorCode: '',
+            lastErrorMessage: '',
+            failureStreak: 0,
+            recentRuns: [],
+            recentAlerts: [],
+          },
+        })
+      }
+      const target = snapshotByAccount.get(key)
+      if (isUuid(organizationId)) {
+        target.organizationIds.add(organizationId)
+      }
+      if (normalizedOps) {
+        target.instagramOps = mergeInstagramOpsSnapshot(target.instagramOps, {
+          lastStatus: normalizedOps.lastStatus,
+          lastErrorCode: normalizedOps.lastErrorCode,
+          lastErrorMessage: normalizedOps.lastErrorMessage,
+        })
+        normalizedOps.recentRuns.forEach((entry) => {
+          target.instagramOps.recentRuns = mergeInstagramOpsRunEntries(target.instagramOps.recentRuns, entry)
+        })
+        normalizedOps.recentAlerts.forEach((entry) => {
+          target.instagramOps.recentAlerts = mergeInstagramOpsAlertEntries(target.instagramOps.recentAlerts, entry)
+        })
+        target.instagramOps.failureStreak = Math.max(
+          target.instagramOps.failureStreak,
+          Math.max(0, Number(normalizedOps.failureStreak) || 0),
+        )
+        if (parseIsoTime(normalizedOps.lastRunAt) > parseIsoTime(target.instagramOps.lastRunAt)) {
+          target.instagramOps.lastRunAt = normalizedOps.lastRunAt
+          target.instagramOps.lastStatus = normalizedOps.lastStatus
+          target.instagramOps.lastErrorCode = normalizedOps.lastErrorCode
+          target.instagramOps.lastErrorMessage = normalizedOps.lastErrorMessage
+        }
+      }
+    }
+  }
+
+  const accountSnapshots = [...snapshotByAccount.values()].map((entry) => ({
+    ownerUserId: entry.ownerUserId,
+    accountId: entry.accountId,
+    accountName: entry.accountName,
+    organizationIds: [...entry.organizationIds.values()],
+    instagramOps: normalizeInstagramOpsSnapshot(entry.instagramOps) ?? {
+      updatedAt: '',
+      lastStatus: '',
+      lastRunAt: '',
+      lastErrorCode: '',
+      lastErrorMessage: '',
+      failureStreak: 0,
+      recentRuns: [],
+      recentAlerts: [],
+    },
+  }))
+
+  const runMap = new Map()
+  const alertMap = new Map()
+  for (const snapshot of accountSnapshots) {
+    snapshot.instagramOps.recentRuns.forEach((runEntry) => {
+      const dedupeKey = runEntry.runId || runEntry.jobId || `${runEntry.startedAt}:${runEntry.status}`
+      if (!dedupeKey) return
+      runMap.set(dedupeKey, runEntry)
+    })
+    snapshot.instagramOps.recentAlerts.forEach((alertEntry) => {
+      const dedupeKey = alertEntry.id || `${alertEntry.type}:${alertEntry.createdAt}`
+      if (!dedupeKey) return
+      alertMap.set(dedupeKey, alertEntry)
+    })
+  }
+
+  const recentRuns = [...runMap.values()]
+    .sort((left, right) => parseIsoTime(right.finishedAt || right.startedAt) - parseIsoTime(left.finishedAt || left.startedAt))
+    .slice(0, instagramOpsRecentRunLimit)
+  const recentAlerts = [...alertMap.values()]
+    .sort((left, right) => parseIsoTime(right.createdAt) - parseIsoTime(left.createdAt))
+    .slice(0, instagramOpsRecentAlertLimit)
+  return {
+    ok: true,
+    status: 200,
+    accountSnapshots,
+    recentRuns,
+    recentAlerts,
+  }
+}
+
+const buildDeterministicInstagramFallback = (connection) => {
+  const accountId = resolveInstagramAccountId(connection) || normalizeInstagramHandle(connection?.accountName) || 'instagram'
+  const seedHash = crypto.createHash('sha256').update(accountId).digest('hex')
+  const seed = Number.parseInt(seedHash.slice(0, 8), 16)
+  const followers = 1_000 + (seed % 50_000)
+  const posts = [0, 1, 2].map((offset) => {
+    const views = 600 + ((seed >> (offset * 3)) % 20_000)
+    const likes = Math.max(10, Math.round(views * 0.08))
+    const comments = Math.max(3, Math.round(views * 0.01))
+    const reposts = Math.max(1, Math.round(views * 0.002))
+    const publishedAt = new Date(Date.now() - (offset + 1) * 3 * 24 * 60 * 60 * 1000).toISOString()
+    return {
+      id: `${accountId}-fallback-${offset + 1}`,
+      url: `https://www.instagram.com/${encodeURIComponent(accountId)}/`,
+      title: `Instagram Post ${offset + 1}`,
+      publishedAt,
+      views,
+      likes,
+      comments,
+      saves: 0,
+      shares: 0,
+      reposts,
+      engagements: likes + comments + reposts,
+    }
+  })
+  return {
+    account: {
+      accountId,
+      accountName: normalizeTextInput(connection?.accountName, { maxLength: 180 }) || accountId,
+      followers,
+      postsCount: posts.length,
+      reach: 0,
+      impressions: 0,
+    },
+    posts,
+    collectedAt: new Date().toISOString(),
+  }
+}
+
+const classifyInstagramCollectionError = (error) => {
+  const code = normalizeTextInput(error?.code, { maxLength: 160 }).toLowerCase()
+  if (code.includes('challenge')) return 'challenge_required'
+  if (code.includes('auth_required')) return 'auth_required'
+  if (code.includes('rate_limited')) return 'rate_limited'
+  if (code.includes('ui_changed')) return 'ui_changed'
+  if (code.includes('timeout')) return 'timeout'
+  if (code.includes('temporary_network')) return 'temporary_network'
+  if (code.includes('collector_unavailable') || code.includes('playwright_not_installed')) return 'collector_unavailable'
+
+  const message = normalizeTextInput(error instanceof Error ? error.message : '', { maxLength: 240 }).toLowerCase()
+  if (!message) return 'collection_failed'
+  if (message.includes('challenge')) return 'challenge_required'
+  if (message.includes('auth') || message.includes('login')) return 'auth_required'
+  if (message.includes('rate') || message.includes('too many')) return 'rate_limited'
+  if (message.includes('selector') || message.includes('ui')) return 'ui_changed'
+  if (message.includes('timeout')) return 'timeout'
+  if (message.includes('net::') || message.includes('network')) return 'temporary_network'
+  if (message.includes('playwright_not_installed')) return 'collector_unavailable'
+  return 'collection_failed'
+}
+
+const shouldRetryInstagramCollectionFailure = (failureCode) =>
+  ['rate_limited', 'timeout', 'temporary_network', 'collection_failed'].includes(failureCode)
+
+const getInstagramRetryDelayMs = (attempt) => {
+  const attemptNumber = Math.max(1, toNumber(attempt))
+  const exponentialDelay = instagramCollectorRetryBaseDelayMs * (2 ** (attemptNumber - 1))
+  const cappedDelay = Math.min(exponentialDelay, 20_000)
+  const jitter = Math.round(Math.random() * instagramCollectorRetryJitterMs)
+  return cappedDelay + jitter
+}
+
+const collectInstagramMetricsForConnection = async (connection) => {
+  if (instagramCollectorMode === 'disabled') {
+    return {
+      ...buildDeterministicInstagramFallback(connection),
+      collectionMode: 'disabled',
+    }
+  }
+  const cookies = await getInstagramSessionVaultCookies({
+    ownerUserId: connection.ownerUserId,
+    accountId: connection.accountId,
+  })
+  if (instagramCollectorMode === 'mock') {
+    return {
+      ...buildDeterministicInstagramFallback(connection),
+      collectionMode: 'mock',
+    }
+  }
+
+  const attemptsAllowed = Math.max(1, instagramCollectorMaxRetries + 1)
+  let lastError = null
+  for (let attempt = 1; attempt <= attemptsAllowed; attempt += 1) {
+    try {
+      const collected = await collectInstagramMetricsWithPlaywright({
+        accountHandle: connection.accountId,
+        accountName: connection.accountName,
+        cookies,
+        maxPosts: instagramCollectorMaxPosts,
+        timeoutMs: instagramCollectorTimeoutMs,
+      })
+      return {
+        ...collected,
+        collectionMode: instagramCollectorMode,
+      }
+    } catch (error) {
+      const failureCode = classifyInstagramCollectionError(error)
+      lastError = error
+      if (failureCode === 'collector_unavailable') {
+        return {
+          ...buildDeterministicInstagramFallback(connection),
+          collectionMode: 'fallback',
+        }
+      }
+      const canRetry = shouldRetryInstagramCollectionFailure(failureCode)
+      const hasAttemptsRemaining = attempt < attemptsAllowed
+      if (!canRetry || !hasAttemptsRemaining) break
+      await waitForDelay(getInstagramRetryDelayMs(attempt))
+    }
+  }
+
+  if (lastError instanceof Error) {
+    throw lastError
+  }
+  throw new Error('instagram_collection_failed')
+}
+
+const mapInstagramCollectionToSummaryPart = (connection, collected) => {
+  const accountId = resolveInstagramAccountId(connection) || normalizeInstagramHandle(connection.accountName)
+  const channelId = `instagram:${accountId}`
+  const accountName = normalizeTextInput(
+    collected?.account?.accountName ?? connection.accountName,
+    { maxLength: 180 },
+  ) || accountId
+  const followers = Math.max(0, toNumber(collected?.account?.followers))
+  const posts = Array.isArray(collected?.posts) ? collected.posts : []
+  const normalizedPosts = posts
+    .map((post) => {
+      const postId = normalizeTextInput(post?.id, { maxLength: 300 })
+      if (!postId) return null
+      const views = Math.max(0, toNumber(post?.views))
+      const likes = Math.max(0, toNumber(post?.likes))
+      const comments = Math.max(0, toNumber(post?.comments))
+      const saves = Math.max(0, toNumber(post?.saves))
+      const shares = Math.max(0, toNumber(post?.shares))
+      const reposts = Math.max(0, toNumber(post?.reposts))
+      const engagements = Math.max(0, toNumber(post?.engagements || likes + comments + saves + shares + reposts))
+      const title = normalizeTextInput(post?.title, { maxLength: 300 }) || 'Instagram post'
+      const publishedAt = normalizeTextInput(post?.publishedAt, { maxLength: 64 })
+      const url = normalizeTextInput(post?.url, { maxLength: 500 })
+      return {
+        id: `instagram:${postId}`,
+        title,
+        platform: ORGANIZATION_CONNECTION_PLATFORM_INSTAGRAM,
+        channelId,
+        channelName: accountName,
+        views,
+        engagementRate: views > 0 ? (engagements / views) * 100 : followers > 0 ? (engagements / followers) * 100 : 0,
+        publishedAt,
+        url,
+        likes,
+        comments,
+        saves,
+        shares,
+        reposts,
+        engagements,
+      }
+    })
+    .filter(Boolean)
+
+  const totalViews = normalizedPosts.reduce((sum, post) => sum + Math.max(0, toNumber(post.views)), 0)
+  const totalEngagements = normalizedPosts.reduce((sum, post) => sum + Math.max(0, toNumber(post.engagements)), 0)
+  const postsCount = normalizedPosts.length
+  const engagementRate = totalViews > 0
+    ? (totalEngagements / totalViews) * 100
+    : followers > 0 ? (totalEngagements / followers) * 100 : 0
+  const collectedDate = normalizeIsoDateOnly(collected?.collectedAt || new Date().toISOString())
+    || normalizeIsoDateOnly(new Date().toISOString())
+  const publishedDates = normalizedPosts
+    .map((post) => normalizeIsoDateOnly(post.publishedAt))
+    .filter((value) => value)
+    .sort()
+
+  return {
+    collectionMeta: {
+      selectorVersion: normalizeTextInput(collected?.selectorVersion, { maxLength: 64 }) || INSTAGRAM_SELECTOR_VERSION,
+      collectionMode: normalizeTextInput(collected?.collectionMode, { maxLength: 32 }) || instagramCollectorMode,
+    },
+    firstVideoUploadDate: publishedDates[0] || '',
+    channels: [{
+      id: channelId,
+      name: accountName,
+      platform: ORGANIZATION_CONNECTION_PLATFORM_INSTAGRAM,
+      views: totalViews,
+      engagementRate,
+      followers,
+      status: 'Connected',
+    }],
+    topPosts: normalizedPosts
+      .sort((left, right) => Math.max(0, toNumber(right.views)) - Math.max(0, toNumber(left.views)))
+      .map((post) => ({
+        id: post.id,
+        title: post.title,
+        platform: ORGANIZATION_CONNECTION_PLATFORM_INSTAGRAM,
+        channelId: post.channelId,
+        channelName: post.channelName,
+        views: Math.max(0, toNumber(post.views)),
+        engagementRate: Math.max(0, toNumber(post.engagementRate)),
+        publishedAt: normalizeTextInput(post.publishedAt, { maxLength: 64 }),
+        url: normalizeTextInput(post.url, { maxLength: 500 }),
+        likes: Math.max(0, toNumber(post.likes)),
+        comments: Math.max(0, toNumber(post.comments)),
+        saves: Math.max(0, toNumber(post.saves)),
+        shares: Math.max(0, toNumber(post.shares)),
+        reposts: Math.max(0, toNumber(post.reposts)),
+        engagements: Math.max(0, toNumber(post.engagements)),
+      })),
+    timeSeries: [{
+      date: collectedDate,
+      views: totalViews,
+      engagements: totalEngagements,
+      posts: postsCount,
+      watchTimeHours: 0,
+      followersNetChange: 0,
+    }],
+    timeSeriesByChannel: [{
+      channelId,
+      date: collectedDate,
+      views: totalViews,
+      engagements: totalEngagements,
+      posts: postsCount,
+      watchTimeHours: 0,
+      followersNetChange: 0,
+    }],
+    ageDistribution: [],
+    ageDistributionByChannel: {},
+    genderDistribution: [],
+    genderDistributionByChannel: {},
+    topGeos: [],
+    topGeosByChannel: {},
+  }
+}
+
+const mergeInstagramSummaryParts = (parts) => {
+  const normalizedParts = Array.isArray(parts) ? parts : []
+  if (!normalizedParts.length) return buildEmptyInstagramSummary()
+  const firstDates = normalizedParts
+    .map((part) => normalizeIsoDateOnly(part?.firstVideoUploadDate))
+    .filter((value) => value)
+    .sort()
+
+  const channelById = new Map()
+  const postById = new Map()
+  const timeSeriesByDate = new Map()
+  const timeSeriesByChannelDate = new Map()
+
+  for (const part of normalizedParts) {
+    const channels = Array.isArray(part.channels) ? part.channels : []
+    for (const channel of channels) {
+      const channelId = normalizeTextInput(channel?.id, { maxLength: 300 })
+      if (!channelId) continue
+      channelById.set(channelId, channel)
+    }
+
+    const topPosts = Array.isArray(part.topPosts) ? part.topPosts : []
+    for (const post of topPosts) {
+      const postId = normalizeTextInput(post?.id, { maxLength: 300 })
+      if (!postId || postById.has(postId)) continue
+      postById.set(postId, post)
+    }
+
+    const series = Array.isArray(part.timeSeries) ? part.timeSeries : []
+    for (const point of series) {
+      const date = normalizeIsoDateOnly(point?.date)
+      if (!date) continue
+      const current = timeSeriesByDate.get(date) ?? {
+        date,
+        views: 0,
+        engagements: 0,
+        posts: 0,
+        watchTimeHours: 0,
+        followersNetChange: 0,
+      }
+      timeSeriesByDate.set(date, {
+        date,
+        views: current.views + Math.max(0, toNumber(point?.views)),
+        engagements: current.engagements + Math.max(0, toNumber(point?.engagements)),
+        posts: current.posts + Math.max(0, toNumber(point?.posts)),
+        watchTimeHours: current.watchTimeHours + Math.max(0, toNumber(point?.watchTimeHours)),
+        followersNetChange: current.followersNetChange + toNumber(point?.followersNetChange),
+      })
+    }
+
+    const seriesByChannel = Array.isArray(part.timeSeriesByChannel) ? part.timeSeriesByChannel : []
+    for (const point of seriesByChannel) {
+      const channelId = normalizeTextInput(point?.channelId, { maxLength: 300 })
+      const date = normalizeIsoDateOnly(point?.date)
+      if (!channelId || !date) continue
+      const key = `${channelId}:${date}`
+      const current = timeSeriesByChannelDate.get(key) ?? {
+        channelId,
+        date,
+        views: 0,
+        engagements: 0,
+        posts: 0,
+        watchTimeHours: 0,
+        followersNetChange: 0,
+      }
+      timeSeriesByChannelDate.set(key, {
+        channelId,
+        date,
+        views: current.views + Math.max(0, toNumber(point?.views)),
+        engagements: current.engagements + Math.max(0, toNumber(point?.engagements)),
+        posts: current.posts + Math.max(0, toNumber(point?.posts)),
+        watchTimeHours: current.watchTimeHours + Math.max(0, toNumber(point?.watchTimeHours)),
+        followersNetChange: current.followersNetChange + toNumber(point?.followersNetChange),
+      })
+    }
+  }
+
+  return {
+    firstVideoUploadDate: firstDates[0] || '',
+    channels: [...channelById.values()],
+    topPosts: [...postById.values()].sort((left, right) => Math.max(0, toNumber(right.views)) - Math.max(0, toNumber(left.views))),
+    timeSeries: [...timeSeriesByDate.values()].sort((left, right) => left.date.localeCompare(right.date)),
+    timeSeriesByChannel: [...timeSeriesByChannelDate.values()].sort((left, right) => {
+      const byChannel = left.channelId.localeCompare(right.channelId)
+      if (byChannel !== 0) return byChannel
+      return left.date.localeCompare(right.date)
+    }),
+    ageDistribution: [],
+    ageDistributionByChannel: {},
+    genderDistribution: [],
+    genderDistributionByChannel: {},
+    topGeos: [],
+    topGeosByChannel: {},
+  }
+}
+
+const createAndStartInstagramRefreshJob = async (
+  userId,
+  options = {},
+) => {
+  const trigger = typeof options.trigger === 'string' ? options.trigger : 'manual'
+  const reuseRunning = options.reuseRunning !== false
+  const minIntervalMs = Number.isFinite(options.minIntervalMs) ? Number(options.minIntervalMs) : 0
+
+  const latestResult = await getLatestInstagramRefreshJobByUserId(userId)
+  if (latestResult.ok && latestResult.row) {
+    const latest = latestResult.row
+    const latestStatus = normalizeTextInput(latest.status, { maxLength: 32 })
+    if (reuseRunning && (latestStatus === 'queued' || latestStatus === 'running')) {
+      const latestActiveAt =
+        parseIsoTime(latest.started_at)
+        || parseIsoTime(latest.requested_at)
+      const isStaleRunningJob =
+        latestActiveAt > 0 && Date.now() - latestActiveAt >= REFRESH_JOB_STALE_TIMEOUT_MS
+      if (!isStaleRunningJob) {
+        return {
+          ok: true,
+          jobId: latest.id,
+          status: latestStatus,
+          deduped: true,
+        }
+      }
+      await updateInstagramRefreshJob(userId, latest.id, {
+        status: 'failed',
+        finished_at: new Date().toISOString(),
+        error_message: 'Refresh job timed out and was replaced by a new run.',
+      })
+    }
+
+    if (minIntervalMs > 0) {
+      const lastRequestedAt = parseIsoTime(latest.requested_at)
+      if (lastRequestedAt > 0 && Date.now() - lastRequestedAt < minIntervalMs) {
+        return {
+          ok: true,
+          jobId: latest.id,
+          status: latestStatus || 'queued',
+          deduped: true,
+        }
+      }
+    }
+  }
+
+  const nowIso = new Date().toISOString()
+  const insertResult = await insertInstagramRefreshJob({
+    user_id: userId,
+    status: 'queued',
+    requested_at: nowIso,
+    channels_total: 0,
+    channels_processed: 0,
+    meta: { trigger },
+  })
+  if (!insertResult.ok || !insertResult.row?.id) {
+    return {
+      ok: false,
+      status: insertResult.status || 500,
+      error: 'instagram_refresh_job_create_failed',
+      payload: insertResult.payload,
+    }
+  }
+
+  const jobId = insertResult.row.id
+  void runInstagramRefreshJob(jobId, userId)
+  return {
+    ok: true,
+    jobId,
+    status: 'queued',
+    deduped: false,
+  }
+}
+
+const maybeQueueAutoInstagramRefresh = async ({ userId, hasConnections, generatedAt }) => {
+  if (!userId || !hasConnections) return { queued: false }
+  const generatedAtMs = parseIsoTime(generatedAt)
+  const isStale =
+    generatedAtMs <= 0 || Date.now() - generatedAtMs >= INSTAGRAM_AUTO_REFRESH_INTERVAL_MS
+  if (!isStale) return { queued: false }
+
+  const queued = await createAndStartInstagramRefreshJob(userId, {
+    trigger: 'auto',
+    reuseRunning: true,
+    minIntervalMs: INSTAGRAM_AUTO_REFRESH_RETRY_COOLDOWN_MS,
+  })
+  if (!queued.ok) return { queued: false, error: queued.error || 'instagram_auto_refresh_enqueue_failed' }
+  return {
+    queued: true,
+    jobId: queued.jobId,
+    status: queued.status,
+    deduped: queued.deduped,
+  }
+}
+
+const runInstagramRefreshJob = async (jobId, userId) => {
+  if (!jobId || !userId) return
+  if (instagramRefreshRunningUsers.has(userId)) {
+    return
+  }
+  instagramRefreshRunningUsers.add(userId)
+  const startedAt = new Date().toISOString()
+  const runId = crypto.randomUUID()
+
+  await updateInstagramRefreshJob(userId, jobId, {
+    status: 'running',
+    started_at: startedAt,
+    error_message: null,
+    meta: {
+      runId,
+      selectorVersion: INSTAGRAM_SELECTOR_VERSION,
+      collectionMode: instagramCollectorMode,
+    },
+  })
+
+  try {
+    const connectionsResult = await listAccessibleInstagramConnectionsByUserId(userId)
+    if (!connectionsResult.ok) {
+      throw new Error('Unable to load connected Instagram accounts.')
+    }
+    const connections = connectionsResult.connections
+    await updateInstagramRefreshJob(userId, jobId, {
+      channels_total: connections.length,
+      channels_processed: 0,
+    })
+
+    if (!connections.length) {
+      const emptySummary = buildEmptyInstagramSummary()
+      const finishedAt = new Date().toISOString()
+      await upsertCachedInstagramSummary({
+        userId,
+        summary: emptySummary,
+        generatedAt: finishedAt,
+        refreshJobId: jobId,
+      })
+      await updateInstagramRefreshJob(userId, jobId, {
+        status: 'succeeded',
+        channels_processed: 0,
+        finished_at: finishedAt,
+        meta: {
+          runId,
+          message: 'No connected Instagram accounts.',
+          selectorVersion: INSTAGRAM_SELECTOR_VERSION,
+          collectionMode: instagramCollectorMode,
+        },
+      })
+      await recordInstagramRun({
+        runId,
+        userId,
+        jobId,
+        status: 'succeeded',
+        startedAt,
+        finishedAt,
+        channelsTotal: 0,
+        channelsProcessed: 0,
+        partialFailureCount: 0,
+      })
+      return
+    }
+
+    const parts = []
+    const failures = []
+    const failureByAccountKey = new Map()
+    const collectionModes = new Set()
+    const selectorVersions = new Set()
+    let processed = 0
+    const queue = [...connections]
+    const workerCount = Math.max(1, Math.min(instagramRefreshMaxConcurrency, queue.length))
+
+    const worker = async () => {
+      while (queue.length > 0) {
+        const connection = queue.shift()
+        if (!connection) return
+        try {
+          const collected = await collectInstagramMetricsForConnection(connection)
+          const part = mapInstagramCollectionToSummaryPart(connection, collected)
+          if (part.channels.length || part.topPosts.length || part.timeSeries.length) {
+            parts.push(part)
+          }
+          const collectionModeValue = normalizeTextInput(part.collectionMeta?.collectionMode, { maxLength: 32 })
+          if (collectionModeValue) collectionModes.add(collectionModeValue)
+          const selectorVersionValue = normalizeTextInput(part.collectionMeta?.selectorVersion, { maxLength: 64 })
+          if (selectorVersionValue) selectorVersions.add(selectorVersionValue)
+        } catch (error) {
+          const failureCode = classifyInstagramCollectionError(error)
+          const failureMessage = redactInstagramErrorMessage(error instanceof Error ? error.message : '')
+          const accountKey = `${connection.ownerUserId}:${connection.accountId}`
+          failureByAccountKey.set(accountKey, {
+            ownerUserId: connection.ownerUserId,
+            accountId: connection.accountId,
+            accountName: connection.accountName,
+            code: failureCode,
+            message: failureMessage,
+          })
+          failures.push({
+            accountId: connection.accountId,
+            accountName: connection.accountName,
+            code: failureCode,
+            message: failureMessage,
+          })
+        } finally {
+          processed += 1
+          await updateInstagramRefreshJob(userId, jobId, {
+            channels_processed: processed,
+          })
+        }
+      }
+    }
+
+    await Promise.all(Array.from({ length: workerCount }, () => worker()))
+    const accountOutcomes = connections.map((connection) => {
+      const accountKey = `${connection.ownerUserId}:${connection.accountId}`
+      const failure = failureByAccountKey.get(accountKey)
+      return {
+        ownerUserId: connection.ownerUserId,
+        accountId: connection.accountId,
+        accountName: connection.accountName,
+        status: failure ? 'failed' : 'succeeded',
+        errorCode: failure?.code || '',
+        errorMessage: failure?.message || '',
+      }
+    })
+
+    const summary = mergeInstagramSummaryParts(parts)
+    if (!summary.channels.length && failures.length) {
+      const dominantFailureCode = normalizeTextInput(failures[0]?.code, { maxLength: 80 }) || 'collection_failed'
+      const dominantFailureMessage = redactInstagramErrorMessage(failures[0]?.message || 'No Instagram metrics could be collected.')
+      const finishedAt = new Date().toISOString()
+      await updateInstagramRefreshJob(userId, jobId, {
+        status: 'failed',
+        finished_at: finishedAt,
+        error_message: dominantFailureMessage,
+        meta: {
+          runId,
+          errorCode: dominantFailureCode,
+          selectorVersion: selectorVersions.size ? [...selectorVersions] : [INSTAGRAM_SELECTOR_VERSION],
+          collectionMode: collectionModes.size ? [...collectionModes] : [instagramCollectorMode],
+          failedAccounts: failures.slice(0, 25),
+        },
+      })
+      await recordInstagramRun({
+        runId,
+        userId,
+        jobId,
+        status: 'failed',
+        startedAt,
+        finishedAt,
+        channelsTotal: connections.length,
+        channelsProcessed: processed,
+        partialFailureCount: failures.length,
+        errorCode: dominantFailureCode,
+        errorMessage: dominantFailureMessage,
+        accountOutcomes,
+      })
+      return
+    }
+
+    const finishedAt = new Date().toISOString()
+    await upsertCachedInstagramSummary({
+      userId,
+      summary,
+      generatedAt: finishedAt,
+      refreshJobId: jobId,
+    })
+    await updateInstagramRefreshJob(userId, jobId, {
+      status: 'succeeded',
+      finished_at: finishedAt,
+      error_message: null,
+      meta: {
+        runId,
+        channels: summary.channels.length,
+        topPosts: summary.topPosts.length,
+        failedAccountCount: failures.length,
+        failedAccounts: failures.slice(0, 25),
+        partialSuccess: failures.length > 0,
+        selectorVersion: selectorVersions.size ? [...selectorVersions] : [INSTAGRAM_SELECTOR_VERSION],
+        collectionMode: collectionModes.size ? [...collectionModes] : [instagramCollectorMode],
+      },
+    })
+    await recordInstagramRun({
+      runId,
+      userId,
+      jobId,
+      status: 'succeeded',
+      startedAt,
+      finishedAt,
+      channelsTotal: connections.length,
+      channelsProcessed: processed,
+      partialFailureCount: failures.length,
+      errorCode: failures.length > 0 ? 'partial_failure' : '',
+      errorMessage: failures.length > 0 ? `${failures.length} account(s) partially failed.` : '',
+      accountOutcomes,
+    })
+  } catch (error) {
+    const finishedAt = new Date().toISOString()
+    const failureCode = classifyInstagramCollectionError(error)
+    const failureMessage = redactInstagramErrorMessage(error instanceof Error ? error.message : 'Instagram refresh failed.')
+    await updateInstagramRefreshJob(userId, jobId, {
+      status: 'failed',
+      finished_at: finishedAt,
+      error_message: failureMessage,
+      meta: {
+        runId,
+        errorCode: failureCode,
+        selectorVersion: INSTAGRAM_SELECTOR_VERSION,
+        collectionMode: instagramCollectorMode,
+      },
+    })
+    await recordInstagramRun({
+      runId,
+      userId,
+      jobId,
+      status: 'failed',
+      startedAt,
+      finishedAt,
+      errorCode: failureCode,
+      errorMessage: failureMessage,
+      accountOutcomes: [],
+    })
+  } finally {
+    instagramRefreshRunningUsers.delete(userId)
+  }
+}
+
 const createAndStartYouTubeRefreshJob = async (
   userId,
   options = {},
@@ -7384,12 +9706,24 @@ const createAndStartYouTubeRefreshJob = async (
     const latest = latestResult.row
     const latestStatus = typeof latest.status === 'string' ? latest.status : ''
     if (reuseRunning && (latestStatus === 'queued' || latestStatus === 'running')) {
-      return {
-        ok: true,
-        jobId: latest.id,
-        status: latestStatus,
-        deduped: true,
+      const latestActiveAt =
+        parseIsoTime(latest.started_at)
+        || parseIsoTime(latest.requested_at)
+      const isStaleRunningJob =
+        latestActiveAt > 0 && Date.now() - latestActiveAt >= REFRESH_JOB_STALE_TIMEOUT_MS
+      if (!isStaleRunningJob) {
+        return {
+          ok: true,
+          jobId: latest.id,
+          status: latestStatus,
+          deduped: true,
+        }
       }
+      await updateYouTubeRefreshJob(userId, latest.id, {
+        status: 'failed',
+        finished_at: new Date().toISOString(),
+        error_message: 'Refresh job timed out and was replaced by a new run.',
+      })
     }
 
     if (minIntervalMs > 0) {
@@ -7494,11 +9828,54 @@ const runYouTubeRefreshJob = async (jobId, userId) => {
     }
 
     const sessionId = `sb-${userId}`
-    const summary = await buildLiveYouTubeSummary({
-      sessionId,
-      connections,
-      resolveAccessToken: (connection) => ensureValidAccessTokenForUser(userId, connection),
-    })
+    const summaryParts = []
+    const failures = []
+    let channelsProcessed = 0
+
+    for (const connection of connections) {
+      try {
+        const summaryPart = await withTimeout(
+          buildLiveYouTubeSummary({
+            sessionId,
+            connections: [connection],
+            resolveAccessToken: (item) => ensureValidAccessTokenForUser(userId, item),
+          }),
+          YOUTUBE_CHANNEL_REFRESH_TIMEOUT_MS,
+          `YouTube refresh timed out for channel ${connection.channelName || connection.channelId}.`,
+        )
+        if (
+          summaryPart
+          && typeof summaryPart === 'object'
+          && (
+            Array.isArray(summaryPart.channels)
+            || Array.isArray(summaryPart.topPosts)
+            || Array.isArray(summaryPart.timeSeries)
+          )
+        ) {
+          summaryParts.push(summaryPart)
+        }
+      } catch (error) {
+        failures.push({
+          channelId: connection.channelId,
+          channelName: connection.channelName || 'YouTube Channel',
+          message: error instanceof Error ? error.message : 'YouTube channel refresh failed.',
+        })
+      } finally {
+        channelsProcessed += 1
+        await updateYouTubeRefreshJob(userId, jobId, {
+          channels_processed: channelsProcessed,
+        })
+      }
+    }
+
+    if (!summaryParts.length && failures.length) {
+      throw new Error(
+        failures[0]?.message
+        || `Unable to refresh YouTube data for ${channelsTotal} channel(s).`,
+      )
+    }
+
+    const summary = mergeYouTubeSummaryParts(summaryParts)
 
     await upsertCachedYouTubeSummary({
       userId,
@@ -7514,6 +9891,9 @@ const runYouTubeRefreshJob = async (jobId, userId) => {
       error_message: null,
       meta: {
         channels: channelsTotal,
+        failedChannelCount: failures.length,
+        failedChannels: failures.slice(0, 25),
+        partialSuccess: failures.length > 0,
         timeSeriesPoints: summary.timeSeries.length,
         topPosts: summary.topPosts.length,
       },
@@ -7526,6 +9906,544 @@ const runYouTubeRefreshJob = async (jobId, userId) => {
     })
   }
 }
+
+app.post('/api/instagram/session', async (req, res) => {
+  const viewerResult = await resolveYouTubeViewer(req, res)
+  if (!viewerResult.ok) {
+    const viewer = viewerResult.viewer
+    res.status(viewer.status || 401).json({
+      ok: false,
+      error: viewer.error || 'not_authenticated',
+      message: viewer.message || 'Unable to authorize Instagram session update.',
+    })
+    return
+  }
+  if (!canRoleConnectAccounts(viewerResult.viewer.appRole)) {
+    res.status(403).json({
+      ok: false,
+      error: 'forbidden',
+      message: 'Only admins can update Instagram session vault entries.',
+    })
+    return
+  }
+  if (!enforceInstagramEndpointRateLimit(req, res, {
+    scope: 'instagram_session_update',
+    userId: viewerResult.viewer.userId,
+    maxRequests: instagramSessionRateLimitMax,
+  })) {
+    return
+  }
+  if (!instagramSessionEncryptionKeyBuffer) {
+    res.status(500).json({
+      ok: false,
+      error: 'instagram_session_encryption_not_configured',
+      message: 'Set INSTAGRAM_SESSION_ENCRYPTION_KEY before storing Instagram session cookies.',
+    })
+    return
+  }
+  if (!enforceInstagramEndpointRateLimit(req, res, {
+    scope: 'instagram_disconnect',
+    userId: viewerResult.viewer.userId,
+    maxRequests: instagramRefreshRateLimitMax,
+  })) {
+    return
+  }
+
+  const userId = viewerResult.viewer.userId
+  const connectionsResult = await listAccessibleInstagramConnectionsByUserId(userId)
+  if (!connectionsResult.ok) {
+    res.status(connectionsResult.status || 500).json({
+      ok: false,
+      error: 'instagram_connections_read_failed',
+      message: 'Unable to load connected Instagram accounts.',
+    })
+    return
+  }
+  const connections = connectionsResult.connections
+  if (!connections.length) {
+    res.status(400).json({
+      ok: false,
+      error: 'instagram_connection_not_found',
+      message: 'No connected Instagram account was found for this user.',
+    })
+    return
+  }
+
+  const payload = req.body ?? {}
+  const requestedAccountId = normalizeTextInput(payload.accountId, { maxLength: 300 }).toLowerCase()
+  const requestedAccountName = normalizeTextInput(payload.accountName, { maxLength: 180 })
+  const cookies = normalizeInstagramCookieList(payload.cookies)
+  if (!cookies.length) {
+    res.status(400).json({
+      ok: false,
+      error: 'invalid_instagram_session_cookies',
+      message: 'cookies[] is required and must contain valid cookie objects.',
+    })
+    return
+  }
+
+  let target = null
+  if (requestedAccountId) {
+    target = connections.find((connection) => connection.accountId.toLowerCase() === requestedAccountId) ?? null
+  } else if (requestedAccountName) {
+    const normalizedRequestedName = normalizeChannelName(requestedAccountName)
+    target = connections.find((connection) => normalizeChannelName(connection.accountName) === normalizedRequestedName) ?? null
+  } else if (connections.length === 1) {
+    target = connections[0]
+  }
+
+  if (!target) {
+    res.status(400).json({
+      ok: false,
+      error: 'instagram_connection_not_found',
+      message: connections.length > 1
+        ? 'Specify accountId or accountName when multiple Instagram accounts are connected.'
+        : 'Instagram connection not found.',
+    })
+    return
+  }
+
+  const upsertResult = await upsertInstagramSessionVaultEntry({
+    ownerUserId: target.ownerUserId,
+    accountId: target.accountId,
+    accountName: target.accountName,
+    cookies,
+  })
+  if (!upsertResult.ok) {
+    res.status(upsertResult.status || 500).json({
+      ok: false,
+      error: upsertResult.error || 'instagram_session_vault_update_failed',
+    })
+    return
+  }
+
+  res.json({
+    ok: true,
+    accountId: target.accountId,
+    accountName: target.accountName,
+    ownerUserId: target.ownerUserId,
+    storedCookies: cookies.length,
+  })
+})
+
+app.get('/api/instagram/connections', async (req, res) => {
+  const viewerResult = await resolveYouTubeViewer(req, res)
+  if (!viewerResult.ok) {
+    const viewer = viewerResult.viewer
+    res.status(viewer.status || 401).json({
+      count: 0,
+      connections: [],
+      error: viewer.error || 'not_authenticated',
+    })
+    return
+  }
+  if (!canRoleConnectAccounts(viewerResult.viewer.appRole)) {
+    res.status(403).json({
+      count: 0,
+      connections: [],
+      error: 'forbidden',
+      message: 'Only admins can manage connected platforms.',
+    })
+    return
+  }
+
+  const userId = viewerResult.viewer.userId
+  const connectionsResult = await listAccessibleInstagramConnectionsByUserId(userId)
+  if (!connectionsResult.ok) {
+    res.status(connectionsResult.status || 500).json({
+      count: 0,
+      connections: [],
+      error: 'instagram_connections_read_failed',
+    })
+    return
+  }
+
+  const summarized = connectionsResult.connections.map((connection) => ({
+    accountId: connection.accountId,
+    accountName: connection.accountName,
+  }))
+  res.json({ count: summarized.length, connections: summarized })
+})
+
+app.post('/api/instagram/refresh', async (req, res) => {
+  const viewerResult = await resolveYouTubeViewer(req, res)
+  if (!viewerResult.ok) {
+    const viewer = viewerResult.viewer
+    res.status(viewer.status || 401).json({
+      error: viewer.error || 'not_authenticated',
+      message: viewer.message || 'Unable to authorize refresh.',
+    })
+    return
+  }
+  if (!canRoleConnectAccounts(viewerResult.viewer.appRole)) {
+    res.status(403).json({
+      error: 'forbidden',
+      message: 'Only admins can refresh Instagram data.',
+    })
+    return
+  }
+  if (!enforceInstagramEndpointRateLimit(req, res, {
+    scope: 'instagram_refresh_trigger',
+    userId: viewerResult.viewer.userId,
+    maxRequests: instagramRefreshRateLimitMax,
+  })) {
+    return
+  }
+
+  const userId = viewerResult.viewer.userId
+  const queued = await createAndStartInstagramRefreshJob(userId, {
+    trigger: 'manual',
+    reuseRunning: true,
+    minIntervalMs: 0,
+  })
+  if (!queued.ok) {
+    res.status(queued.status || 500).json({
+      error: queued.error || 'instagram_refresh_job_create_failed',
+      details: queued.payload ?? null,
+    })
+    return
+  }
+
+  res.status(202).json({
+    ok: true,
+    jobId: queued.jobId,
+    status: queued.status,
+    deduped: Boolean(queued.deduped),
+  })
+})
+
+app.get('/api/instagram/refresh/:jobId', async (req, res) => {
+  const viewerResult = await resolveYouTubeViewer(req, res)
+  if (!viewerResult.ok) {
+    const viewer = viewerResult.viewer
+    res.status(viewer.status || 401).json({
+      error: viewer.error || 'not_authenticated',
+      message: viewer.message || 'Unable to authorize refresh status lookup.',
+    })
+    return
+  }
+  if (!canRoleConnectAccounts(viewerResult.viewer.appRole)) {
+    res.status(403).json({
+      error: 'forbidden',
+      message: 'Only admins can check Instagram refresh jobs.',
+    })
+    return
+  }
+
+  const userId = viewerResult.viewer.userId
+  const jobId = normalizeTextInput(req.params?.jobId, { maxLength: 80 })
+  if (!isUuid(jobId)) {
+    res.status(400).json({ error: 'invalid_job_id' })
+    return
+  }
+
+  const jobResult = await getInstagramRefreshJob(userId, jobId)
+  if (!jobResult.ok) {
+    res.status(jobResult.status || 500).json({
+      error: 'instagram_refresh_job_lookup_failed',
+    })
+    return
+  }
+  if (!jobResult.row) {
+    res.status(404).json({ error: 'instagram_refresh_job_not_found' })
+    return
+  }
+
+  res.json({
+    id: jobResult.row.id,
+    status: normalizeTextInput(jobResult.row.status, { maxLength: 32 }) || 'queued',
+    requestedAt: jobResult.row.requested_at ?? null,
+    startedAt: jobResult.row.started_at ?? null,
+    finishedAt: jobResult.row.finished_at ?? null,
+    channelsTotal: Math.max(0, toNumber(jobResult.row.channels_total)),
+    channelsProcessed: Math.max(0, toNumber(jobResult.row.channels_processed)),
+    errorMessage: normalizeTextInput(jobResult.row.error_message, { maxLength: 400 }),
+    meta: jobResult.row.meta && typeof jobResult.row.meta === 'object' ? jobResult.row.meta : {},
+  })
+})
+
+app.get('/api/instagram/summary', async (req, res) => {
+  const viewerResult = await resolveYouTubeViewer(req, res)
+  if (!viewerResult.ok) {
+    const viewer = viewerResult.viewer
+    res.status(viewer.status || 401).json({
+      ...buildEmptyInstagramSummary(),
+      error: viewer.error || 'not_authenticated',
+      cacheStatus: 'error',
+    })
+    return
+  }
+
+  const userId = viewerResult.viewer.userId
+  const cachedResult = await getCachedInstagramSummaryByUserId(userId)
+  if (!cachedResult.ok) {
+    res.status(cachedResult.status || 500).json({
+      ...buildEmptyInstagramSummary(),
+      error: 'instagram_cache_read_failed',
+      cacheStatus: 'error',
+    })
+    return
+  }
+
+  const autoRefresh = { queued: false }
+
+  if (!cachedResult.row?.summary_json) {
+    res.json({
+      ...buildEmptyInstagramSummary(),
+      cacheStatus: 'empty',
+      generatedAt: null,
+      autoRefresh: autoRefresh.queued
+        ? {
+            queued: true,
+            jobId: autoRefresh.jobId ?? null,
+            status: autoRefresh.status ?? 'queued',
+          }
+        : { queued: false },
+    })
+    return
+  }
+
+  const summary = normalizeCachedInstagramSummaryPayload(cachedResult.row.summary_json)
+  res.json({
+    ...summary,
+    cacheStatus: 'ready',
+    generatedAt: cachedResult.row.generated_at ?? null,
+    autoRefresh: autoRefresh.queued
+      ? {
+          queued: true,
+          jobId: autoRefresh.jobId ?? null,
+          status: autoRefresh.status ?? 'queued',
+        }
+      : { queued: false },
+  })
+})
+
+app.get('/api/instagram/ops', async (req, res) => {
+  const viewerResult = await resolveYouTubeViewer(req, res)
+  if (!viewerResult.ok) {
+    const viewer = viewerResult.viewer
+    res.status(viewer.status || 401).json({
+      ok: false,
+      error: viewer.error || 'not_authenticated',
+      message: viewer.message || 'Unable to authorize Instagram ops status lookup.',
+    })
+    return
+  }
+  if (!canRoleConnectAccounts(viewerResult.viewer.appRole)) {
+    res.status(403).json({
+      ok: false,
+      error: 'forbidden',
+      message: 'Only admins can view Instagram operations metrics.',
+    })
+    return
+  }
+
+  trimInstagramOpsState()
+  const persistedOpsResult = await loadPersistedInstagramOpsByUserId(viewerResult.viewer.userId)
+  if (!persistedOpsResult.ok) {
+    res.status(persistedOpsResult.status || 500).json({
+      ok: false,
+      error: 'instagram_ops_read_failed',
+      message: 'Unable to load persisted Instagram operations data.',
+    })
+    return
+  }
+  const nowMs = Date.now()
+  const localRuns = instagramOpsState.runs.filter(
+    (entry) => nowMs - toNumber(entry.finishedAtMs || entry.startedAtMs) <= instagramOpsRunWindowMs,
+  )
+  const combinedRunMap = new Map()
+  persistedOpsResult.recentRuns.forEach((entry) => {
+    const normalizedEntry = normalizeInstagramOpsRunEntry(entry)
+    if (!normalizedEntry) return
+    const key = normalizedEntry.runId || normalizedEntry.jobId || `${normalizedEntry.startedAt}:${normalizedEntry.status}`
+    if (!key) return
+    combinedRunMap.set(key, {
+      ...normalizedEntry,
+      startedAtMs: parseIsoTime(normalizedEntry.startedAt),
+      finishedAtMs: parseIsoTime(normalizedEntry.finishedAt),
+    })
+  })
+  localRuns.forEach((entry) => {
+    const key = normalizeTextInput(entry.runId, { maxLength: 80 })
+      || normalizeTextInput(entry.jobId, { maxLength: 80 })
+      || `${normalizeTextInput(entry.startedAt, { maxLength: 64 })}:${normalizeTextInput(entry.status, { maxLength: 32 })}`
+    if (!key) return
+    combinedRunMap.set(key, entry)
+  })
+  const recentRuns = [...combinedRunMap.values()]
+    .sort((left, right) => toNumber(right.finishedAtMs || right.startedAtMs) - toNumber(left.finishedAtMs || left.startedAtMs))
+    .slice(0, instagramOpsRecentRunLimit)
+  const successfulRuns = recentRuns.filter((entry) => normalizeTextInput(entry.status, { maxLength: 32 }) === 'succeeded').length
+  const failedRuns = recentRuns.length - successfulRuns
+
+  const combinedAlertMap = new Map()
+  persistedOpsResult.recentAlerts.forEach((entry) => {
+    const normalizedEntry = normalizeInstagramOpsAlertEntry(entry)
+    if (!normalizedEntry) return
+    const key = normalizedEntry.id || `${normalizedEntry.type}:${normalizedEntry.createdAt}`
+    combinedAlertMap.set(key, normalizedEntry)
+  })
+  instagramOpsState.alerts.forEach((entry) => {
+    const key = normalizeTextInput(entry.id, { maxLength: 80 }) || `${normalizeTextInput(entry.type, { maxLength: 64 })}:${normalizeTextInput(entry.createdAt, { maxLength: 64 })}`
+    if (!key) return
+    combinedAlertMap.set(key, entry)
+  })
+  const latestAlerts = [...combinedAlertMap.values()]
+    .sort((left, right) => parseIsoTime(right.createdAt) - parseIsoTime(left.createdAt))
+    .slice(0, 20)
+
+  const highestPersistedFailureStreak = persistedOpsResult.accountSnapshots.reduce(
+    (max, snapshot) => Math.max(max, Math.max(0, Number(snapshot.instagramOps?.failureStreak) || 0)),
+    0,
+  )
+  const highestInMemoryFailureStreak = [...instagramOpsState.failureStreakByUser.values()]
+    .reduce((max, streak) => Math.max(max, Math.max(0, toNumber(streak?.count))), 0)
+  const combinedFailureRatePct = recentRuns.length
+    ? (failedRuns / recentRuns.length) * 100
+    : 0
+  const queueStats = await getInstagramRefreshJobQueueStats()
+  const runningJobs = queueStats.runningJobs
+  const queuedJobs = queueStats.queuedJobs
+
+  res.json({
+    ok: true,
+    selectorVersion: INSTAGRAM_SELECTOR_VERSION,
+    collectorMode: instagramCollectorMode,
+    refreshMaxConcurrency: instagramRefreshMaxConcurrency,
+    retryPolicy: {
+      maxRetries: instagramCollectorMaxRetries,
+      baseDelayMs: instagramCollectorRetryBaseDelayMs,
+      jitterMs: instagramCollectorRetryJitterMs,
+    },
+    rateLimit: {
+      windowMs: instagramRateLimitWindowMs,
+      refreshMax: instagramRefreshRateLimitMax,
+      sessionMax: instagramSessionRateLimitMax,
+    },
+    alerts: {
+      failureStreakThreshold: instagramAlertFailureStreakThreshold,
+      failureRateThresholdPct: instagramAlertFailureRateThresholdPct,
+    },
+    persistence: {
+      source: 'Organizations.connected_accounts[].instagramOps',
+      accountSnapshots: persistedOpsResult.accountSnapshots.length,
+    },
+    windowMs: instagramOpsRunWindowMs,
+    recent: {
+      totalRuns: recentRuns.length,
+      successfulRuns,
+      failedRuns,
+      failureRatePct: Number(combinedFailureRatePct.toFixed(2)),
+      highestFailureStreak: Math.max(highestPersistedFailureStreak, highestInMemoryFailureStreak),
+      runningJobs,
+      queuedJobs,
+    },
+    latestRuns: recentRuns.slice(0, 20),
+    latestAlerts,
+    accountSnapshots: persistedOpsResult.accountSnapshots.slice(0, 50),
+  })
+})
+
+app.post('/api/instagram/disconnect', async (req, res) => {
+  const payload = req.body ?? {}
+  const accountNames = Array.isArray(payload.accountNames)
+    ? payload.accountNames
+      .map((name) => normalizeTextInput(name, { maxLength: 180 }))
+      .filter((name) => Boolean(name))
+    : []
+
+  const viewerResult = await resolveYouTubeViewer(req, res)
+  if (!viewerResult.ok) {
+    const viewer = viewerResult.viewer
+    res.status(viewer.status || 401).json({
+      ok: false,
+      error: viewer.error || 'not_authenticated',
+      message: viewer.message || 'Unable to disconnect Instagram accounts.',
+    })
+    return
+  }
+  if (!canRoleConnectAccounts(viewerResult.viewer.appRole)) {
+    res.status(403).json({
+      ok: false,
+      error: 'forbidden',
+      message: 'Only admins can disconnect Instagram accounts.',
+    })
+    return
+  }
+
+  const userId = viewerResult.viewer.userId
+  const organizationsResult = await listOrganizationRows()
+  if (!organizationsResult.ok) {
+    res.status(organizationsResult.status || 500).json({
+      ok: false,
+      error: 'organization_connections_update_failed',
+      message: 'Unable to load organizations from Supabase.',
+    })
+    return
+  }
+
+  const blockedNames = new Set(accountNames.map((name) => normalizeChannelName(name)))
+  const removedVaultKeys = new Set()
+  let removed = 0
+  let remaining = 0
+
+  for (const row of organizationsResult.rows) {
+    if (!canUserSeeOrganization(row, userId)) continue
+    if (!canUserManageOrganizationConnections(row, userId)) continue
+
+    const organizationId = normalizeTextInput(row?.id, { maxLength: 80 })
+    if (!isUuid(organizationId)) continue
+    const fallbackOwnerUserId = normalizeTextInput(row?.creator, { maxLength: 80 })
+    const accounts = normalizeOrganizationConnectedAccounts(row?.connected_accounts)
+    const nextAccounts = []
+
+    for (const account of accounts) {
+      const platform = normalizeOrganizationConnectionPlatform(account.platform)
+      if (platform !== ORGANIZATION_CONNECTION_PLATFORM_INSTAGRAM) {
+        nextAccounts.push(account)
+        continue
+      }
+      const normalizedAccountName = normalizeChannelName(account.accountName)
+      const shouldRemove = !blockedNames.size || blockedNames.has(normalizedAccountName)
+      if (!shouldRemove) {
+        remaining += 1
+        nextAccounts.push(account)
+        continue
+      }
+
+      const ownerUserIdRaw = normalizeTextInput(account.ownerUserId, { maxLength: 80 })
+      const ownerUserId =
+        isUuid(ownerUserIdRaw) ? ownerUserIdRaw : isUuid(fallbackOwnerUserId) ? fallbackOwnerUserId : ''
+      const accountId = resolveInstagramAccountId(account)
+      const vaultKey = buildInstagramVaultKey({ ownerUserId, accountId })
+      if (vaultKey) {
+        removedVaultKeys.add(vaultKey)
+      }
+      removed += 1
+    }
+
+    if (nextAccounts.length !== accounts.length) {
+      const updateResult = await updateOrganizationConnectedAccounts(organizationId, nextAccounts)
+      if (!updateResult.ok) {
+        res.status(updateResult.status || 500).json({
+          ok: false,
+          error: 'organization_connections_update_failed',
+          message: 'Unable to update organization connections in Supabase.',
+          details: updateResult.payload,
+        })
+        return
+      }
+    }
+  }
+
+  if (removedVaultKeys.size) {
+    await deleteInstagramSessionVaultEntries((_entry, key) => removedVaultKeys.has(key))
+  }
+  await deleteCachedInstagramSummaryByUserId(userId)
+
+  res.json({ ok: true, removed, remaining })
+})
 
 app.post('/api/youtube/reporting/init', async (req, res) => {
   const viewerResult = await resolveYouTubeViewer(req, res)
@@ -7783,18 +10701,7 @@ app.get('/api/youtube/summary', async (req, res) => {
     return
   }
 
-  const connectionsResult = await loadSupabaseYouTubeConnections(userId)
-  const hasConnections = connectionsResult.ok ? connectionsResult.connections.length > 0 : false
-  const generatedAtValue =
-    typeof cachedResult.row?.generated_at === 'string' ? cachedResult.row.generated_at : ''
-  const allowAutoRefresh = isTrustedRequestSource(req)
-  const autoRefresh = allowAutoRefresh
-    ? await maybeQueueAutoYouTubeRefresh({
-      userId,
-      hasConnections,
-      generatedAt: generatedAtValue,
-    })
-    : { queued: false }
+  const autoRefresh = { queued: false }
 
   if (!cachedResult.row?.summary_json) {
     res.json({
@@ -7926,10 +10833,45 @@ const runScheduledYouTubeAutoRefresh = async () => {
   }
 }
 
+const runScheduledInstagramAutoRefresh = async () => {
+  const organizationsResult = await listOrganizationRows()
+  if (!organizationsResult.ok) return
+  const ownerUserIds = new Set()
+  for (const row of organizationsResult.rows) {
+    const fallbackOwnerUserId = normalizeTextInput(row?.creator, { maxLength: 80 })
+    const accounts = normalizeOrganizationConnectedAccounts(row?.connected_accounts)
+    for (const account of accounts) {
+      if (normalizeOrganizationConnectionPlatform(account.platform) !== ORGANIZATION_CONNECTION_PLATFORM_INSTAGRAM) continue
+      const ownerUserIdRaw = normalizeTextInput(account.ownerUserId, { maxLength: 80 })
+      const ownerUserId =
+        isUuid(ownerUserIdRaw) ? ownerUserIdRaw : isUuid(fallbackOwnerUserId) ? fallbackOwnerUserId : ''
+      if (isUuid(ownerUserId)) {
+        ownerUserIds.add(ownerUserId)
+      }
+    }
+  }
+
+  for (const userId of ownerUserIds.values()) {
+    if (instagramRefreshRunningUsers.has(userId)) continue
+    const cachedResult = await getCachedInstagramSummaryByUserId(userId)
+    const generatedAt =
+      cachedResult.ok && typeof cachedResult.row?.generated_at === 'string'
+        ? cachedResult.row.generated_at
+        : ''
+    await maybeQueueAutoInstagramRefresh({
+      userId,
+      hasConnections: true,
+      generatedAt,
+    })
+  }
+}
+
 if (!isServerlessRuntime) {
   void runScheduledYouTubeAutoRefresh()
+  void runScheduledInstagramAutoRefresh()
   setInterval(() => {
     void runScheduledYouTubeAutoRefresh()
+    void runScheduledInstagramAutoRefresh()
   }, 60 * 60 * 1000)
   app.listen(port, () => {
     console.log(`Auth server listening on ${serverBaseUrl}`)

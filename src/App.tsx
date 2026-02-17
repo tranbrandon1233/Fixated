@@ -160,6 +160,7 @@ const App = () => {
               <AppLayout
                 role={role}
                 lastDataRefreshAt={lastDataRefreshAt}
+                onDataRefreshed={handleDataRefreshed}
                 themeMode={mode}
                 onToggleTheme={toggle}
                 onLogout={handleLogout}

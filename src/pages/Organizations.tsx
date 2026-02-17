@@ -360,16 +360,22 @@ export const Organizations = ({ role }: OrganizationsProps) => {
     navigate('/organizations', { replace: true })
   }, [navigate, searchParams])
 
-  const campaignLabelById = useMemo(
-    () =>
-      new Map(
-        campaigns.map((campaign) => [
-          campaign.id,
-          sanitizeTextInput(campaign.campaignName, { maxLength: 140 }) || campaign.id,
-        ]),
-      ),
-    [campaigns],
-  )
+  const campaignLabelById = useMemo(() => {
+    const labels = new Map<string, string>()
+    campaigns.forEach((campaign) => {
+      const label = sanitizeTextInput(campaign.campaignName, { maxLength: 140 }) || campaign.id
+      labels.set(campaign.id, label)
+    })
+    organizations.forEach((organization) => {
+      organization.campaignDirectory.forEach((campaign) => {
+        const label = sanitizeTextInput(campaign.name, { maxLength: 140 }) || campaign.id
+        if (!labels.has(campaign.id)) {
+          labels.set(campaign.id, label)
+        }
+      })
+    })
+    return labels
+  }, [campaigns, organizations])
 
   const sortedOrganizations = useMemo(
     () =>
@@ -1488,7 +1494,47 @@ export const Organizations = ({ role }: OrganizationsProps) => {
                   </div>
                 </div>
 
-               
+                {/* <div style={{ marginTop: '16px' }}>
+                  <div className="section-subtitle">Connect Instagram or X</div>
+                  <div className="grid" style={{ marginTop: '8px', gap: '8px' }}>
+                    <div className="split">
+                      <select
+                        className="select"
+                        value={connectionPlatform}
+                        onChange={(event) => setConnectionPlatform(event.target.value as OrganizationConnectionPlatform)}
+                        disabled={connectionsSubmitting || Boolean(removeConnectionIdSubmitting)}
+                        style={{ minWidth: '150px' }}
+                      >
+                        {connectionPlatformOptions.map((option) => (
+                          <option key={option} value={option}>
+                            {option}
+                          </option>
+                        ))}
+                      </select>
+                      <input
+                        className="input"
+                        type="text"
+                        value={connectionAccountName}
+                        onChange={(event) => setConnectionAccountName(sanitizeTextInput(event.target.value, { maxLength: 180, trim: false }))}
+                        placeholder={connectionPlatform === 'Instagram' ? '@handle or account name' : 'Account handle'}
+                        maxLength={180}
+                        autoComplete="off"
+                        disabled={connectionsSubmitting || Boolean(removeConnectionIdSubmitting)}
+                      />
+                    </div>
+                    <div className="filter-bar">
+                      <button
+                        type="button"
+                        className="ghost-button"
+                        onClick={() => void handleAddConnection()}
+                        disabled={connectionsSubmitting || Boolean(removeConnectionIdSubmitting)}
+                      >
+                        {connectionsSubmitting ? 'Connecting...' : `Connect ${connectionPlatform}`}
+                      </button>
+                    </div>
+                  </div>
+                </div> */}
+
               </>
             ) : null}
 

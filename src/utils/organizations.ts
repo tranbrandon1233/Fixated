@@ -48,11 +48,17 @@ export interface OrganizationConnectedAccount {
   connectedAt?: string
 }
 
+export interface OrganizationCampaignSummary {
+  id: string
+  name: string
+}
+
 export interface OrganizationApiItem {
   id: string
   createdAt: string
   name: string
   campaigns: string[]
+  campaignDirectory: OrganizationCampaignSummary[]
   members: Record<string, OrganizationMemberRole>
   memberDirectory: OrganizationMember[]
   connectedAccounts: OrganizationConnectedAccount[]
@@ -211,6 +217,23 @@ const normalizeConnectedAccount = (value: unknown): OrganizationConnectedAccount
   }
 }
 
+const normalizeCampaignDirectory = (value: unknown): OrganizationCampaignSummary[] => {
+  if (!Array.isArray(value)) return []
+  const seen = new Set<string>()
+  const rows: OrganizationCampaignSummary[] = []
+  value.forEach((entry) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return
+    const row = entry as Partial<OrganizationCampaignSummary>
+    const id = sanitizeTokenInput(row.id, 80)
+    if (!isUuid(id) || seen.has(id)) return
+    const name = sanitizeTextInput((row as { name?: unknown }).name, { maxLength: 140 })
+    if (!name) return
+    seen.add(id)
+    rows.push({ id, name })
+  })
+  return rows
+}
+
 const normalizeOrganization = (payload: unknown): OrganizationApiItem | null => {
   if (!payload || typeof payload !== 'object') return null
   const row = payload as Partial<OrganizationApiItem>
@@ -229,6 +252,7 @@ const normalizeOrganization = (payload: unknown): OrganizationApiItem | null => 
     createdAt: sanitizeTokenInput(row.createdAt, 64),
     name: sanitizeTextInput(row.name, { maxLength: 140 }),
     campaigns: toUniqueUuidArray(row.campaigns),
+    campaignDirectory: normalizeCampaignDirectory((row as { campaignDirectory?: unknown }).campaignDirectory),
     members: toMemberRoleMap(row.members),
     memberDirectory,
     connectedAccounts,
