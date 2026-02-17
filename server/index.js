@@ -3350,8 +3350,7 @@ const canUserManageOrganizationMembers = (row, userId) => {
 }
 
 const canUserManageOrganizationConnections = (row, userId) => {
-  const role = resolveOrganizationUserRole(row, userId)
-  return role === ORGANIZATION_MEMBER_ROLE_ADMIN || role === ORGANIZATION_MEMBER_ROLE_INTERNAL
+  return resolveOrganizationUserRole(row, userId) === ORGANIZATION_MEMBER_ROLE_ADMIN
 }
 
 const canUserChangeOrganizationMemberRoles = (row, userId) =>
@@ -5705,7 +5704,7 @@ app.post('/api/organizations/:organizationId/connections', async (req, res) => {
   if (!canUserManageOrganizationConnections(organizationRow, viewer.userId)) {
     res.status(403).json({
       error: 'forbidden',
-      message: 'Brand viewers can view organization connections but cannot edit them.',
+      message: 'Only organization admin members can manage organization connections.',
     })
     return
   }
@@ -5819,7 +5818,7 @@ app.delete('/api/organizations/:organizationId/connections/:connectionId', async
   if (!canUserManageOrganizationConnections(organizationRow, viewer.userId)) {
     res.status(403).json({
       error: 'forbidden',
-      message: 'Brand viewers can view organization connections but cannot edit them.',
+      message: 'Only organization admin members can manage organization connections.',
     })
     return
   }

@@ -184,7 +184,7 @@ const canChangeOrganizationMemberRolesByRole = (viewerRole: OrganizationViewerRo
 
 const canEditOrganizationNameByRole = (viewerRole: OrganizationViewerRole) => viewerRole === 'admin'
 const canManageOrganizationConnectionsByRole = (viewerRole: OrganizationViewerRole) =>
-  viewerRole === 'admin' || viewerRole === 'internal'
+  viewerRole === 'admin'
 
 // const connectionPlatformOptions: OrganizationConnectionPlatform[] = ['Instagram', 'X']
 
@@ -1013,7 +1013,6 @@ export const Organizations = ({ role }: OrganizationsProps) => {
             const canManageOrganizationMembers = canManageOrganizationMembersByRole(viewerOrganizationRole)
             const canEditOrganizationName = canEditOrganizationNameByRole(viewerOrganizationRole)
             const canManageOrganizationConnections = canManageOrganizationConnectionsByRole(viewerOrganizationRole)
-            const canViewOrganizationConnections = Boolean(viewerOrganizationRole)
             const connectedAccountLabels = organization.connectedAccounts.map((account) =>
               formatConnectedAccountLabel(account),
             )
@@ -1129,7 +1128,7 @@ export const Organizations = ({ role }: OrganizationsProps) => {
                   </div>
                 </div>
 
-                {canEditOrganization || canManageOrganizationMembers || canViewOrganizationConnections ? (
+                {canEditOrganization || canManageOrganizationMembers || canManageOrganizationConnections ? (
                   <div className="modal-actions" style={{ marginTop: '14px' }}>
                     {canEditOrganization ? (
                       <button
@@ -1149,10 +1148,10 @@ export const Organizations = ({ role }: OrganizationsProps) => {
                         Manage members
                       </button>
                     ) : null}
-                    {canViewOrganizationConnections ? (
+                    {canManageOrganizationConnections ? (
                       <button
                         type="button"
-                        className={canManageOrganizationConnections ? 'primary-button' : 'ghost-button'}
+                        className="primary-button"
                         onClick={() => openConnectionsModal(organization)}
                       >
                         Manage Connections
@@ -1420,7 +1419,7 @@ export const Organizations = ({ role }: OrganizationsProps) => {
             <div className="section-subtitle">{connectionsOrg.name}</div>
             {!canManageConnectionsForConnectionsOrg ? (
               <div className="section-subtitle" style={{ marginTop: '8px' }}>
-                Read-only access. Brand viewers may view connected accounts but may not edit them.
+                Read-only access. Only organization admins can edit connected accounts.
               </div>
             ) : null}
 
