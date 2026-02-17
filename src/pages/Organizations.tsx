@@ -25,7 +25,7 @@ import {
   type MemberResolutionItem,
   type MemberResolutionSummary,
   type OrganizationConnectedAccount,
-  type OrganizationConnectionPlatform,
+  // type OrganizationConnectionPlatform,
   type OrganizationApiItem,
   type OrganizationMember,
   type OrganizationMemberRole,
