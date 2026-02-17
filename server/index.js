@@ -131,6 +131,18 @@ const supabaseUrl = withFallbackUrl(getEnv('SUPABASE_URL'), '')
 const supabasePublishableKey = getEnv('SUPABASE_PUBLISHABLE_KEY', getEnv('SUPABASE_ANON_KEY'))
 const supabaseSecretKey = getEnv('SUPABASE_SECRET_KEY', getEnv('SUPABASE_SERVICE_ROLE_KEY'))
 const isSupabaseConfigured = Boolean(supabaseUrl && supabasePublishableKey && supabaseSecretKey)
+const INTERNAL_REFRESH_RUNNER_HEADER = 'x-fixated-refresh-runner-token'
+const INTERNAL_REFRESH_RUNNER_FUNCTION_PATH = '/.netlify/functions/refresh-job-runner-background'
+const buildInternalRefreshRunnerToken = () => {
+  const explicit = getEnv('INTERNAL_REFRESH_RUNNER_TOKEN')
+  if (explicit) return explicit
+  if (!supabaseSecretKey) return ''
+  return crypto
+    .createHash('sha256')
+    .update(`fixated:refresh-runner:${supabaseSecretKey}`)
+    .digest('hex')
+}
+const internalRefreshRunnerToken = buildInternalRefreshRunnerToken()
 
 const parsedServerUrl = new URL(serverBaseUrl)
 const port = Number(getEnv('PORT', parsedServerUrl.port || '5000'))
@@ -383,6 +395,77 @@ const resolveAppRedirectBase = (req) => {
 }
 
 const isServerlessRuntime = Boolean(process.env.NETLIFY || process.env.AWS_LAMBDA_FUNCTION_NAME)
+
+const readHeaderValue = (headers, headerName) => {
+  if (!headers || typeof headers !== 'object') return ''
+  const directValue = headers[headerName]
+  if (typeof directValue === 'string') return directValue
+  const normalizedHeaderName = headerName.toLowerCase()
+  for (const [key, value] of Object.entries(headers)) {
+    if (String(key).toLowerCase() !== normalizedHeaderName) continue
+    if (typeof value === 'string') return value
+    break
+  }
+  return ''
+}
+
+const isValidInternalRefreshRunnerToken = (headers = {}) => {
+  if (!internalRefreshRunnerToken) return false
+  const providedRaw = readHeaderValue(headers, INTERNAL_REFRESH_RUNNER_HEADER)
+  const provided = normalizeEnvValue(providedRaw)
+  if (!provided) return false
+  try {
+    return crypto.timingSafeEqual(
+      Buffer.from(provided),
+      Buffer.from(internalRefreshRunnerToken),
+    )
+  } catch {
+    return false
+  }
+}
+
+const resolveInternalRefreshRunnerUrl = () => {
+  const explicitBaseUrl = normalizeBaseUrl(getEnv('INTERNAL_REFRESH_RUNNER_BASE_URL'))
+  const defaultBaseUrl = normalizeBaseUrl(getEnv('URL', serverBaseUrl))
+  const baseUrl = explicitBaseUrl || defaultBaseUrl
+  if (!baseUrl) return ''
+  return `${baseUrl}${INTERNAL_REFRESH_RUNNER_FUNCTION_PATH}`
+}
+
+const dispatchInternalRefreshRunner = async ({ platform, userId, jobId }) => {
+  if (!isServerlessRuntime) return { ok: false, error: 'not_serverless_runtime' }
+  if (!isUuid(userId) || !isUuid(jobId)) return { ok: false, error: 'invalid_dispatch_payload' }
+  if (platform !== 'youtube' && platform !== 'instagram') return { ok: false, error: 'invalid_platform' }
+  if (!internalRefreshRunnerToken) return { ok: false, error: 'missing_internal_refresh_runner_token' }
+
+  const runnerUrl = resolveInternalRefreshRunnerUrl()
+  if (!runnerUrl) return { ok: false, error: 'missing_internal_refresh_runner_url' }
+
+  const abortController = new AbortController()
+  const timeoutId = setTimeout(() => abortController.abort(), 4_000)
+  try {
+    const response = await fetch(runnerUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        [INTERNAL_REFRESH_RUNNER_HEADER]: internalRefreshRunnerToken,
+      },
+      body: JSON.stringify({ platform, userId, jobId }),
+      signal: abortController.signal,
+    })
+    if (!response.ok) {
+      return { ok: false, error: `refresh_runner_http_${response.status}` }
+    }
+    return { ok: true }
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : 'refresh_runner_dispatch_failed',
+    }
+  } finally {
+    clearTimeout(timeoutId)
+  }
+}
 
 const resolveReportingStorePath = () => {
   if (isServerlessRuntime) return null
@@ -9758,7 +9841,32 @@ const createAndStartInstagramRefreshJob = async (
   }
 
   const jobId = insertResult.row.id
-  void runInstagramRefreshJob(jobId, userId)
+  if (isServerlessRuntime) {
+    const dispatchResult = await dispatchInternalRefreshRunner({
+      platform: 'instagram',
+      userId,
+      jobId,
+    })
+    if (!dispatchResult.ok) {
+      const dispatchError =
+        normalizeTextInput(dispatchResult.error, { maxLength: 240 })
+        || 'instagram_refresh_runner_dispatch_failed'
+      await updateInstagramRefreshJob(userId, jobId, {
+        status: 'failed',
+        finished_at: new Date().toISOString(),
+        error_message: 'Unable to dispatch Instagram refresh worker.',
+        meta: { trigger, dispatchError },
+      })
+      return {
+        ok: false,
+        status: 503,
+        error: 'instagram_refresh_job_dispatch_failed',
+        payload: { dispatchError },
+      }
+    }
+  } else {
+    void runInstagramRefreshJob(jobId, userId)
+  }
   return {
     ok: true,
     jobId,
@@ -10082,7 +10190,32 @@ const createAndStartYouTubeRefreshJob = async (
   }
 
   const jobId = insertResult.row.id
-  void runYouTubeRefreshJob(jobId, userId)
+  if (isServerlessRuntime) {
+    const dispatchResult = await dispatchInternalRefreshRunner({
+      platform: 'youtube',
+      userId,
+      jobId,
+    })
+    if (!dispatchResult.ok) {
+      const dispatchError =
+        normalizeTextInput(dispatchResult.error, { maxLength: 240 })
+        || 'youtube_refresh_runner_dispatch_failed'
+      await updateYouTubeRefreshJob(userId, jobId, {
+        status: 'failed',
+        finished_at: new Date().toISOString(),
+        error_message: 'Unable to dispatch YouTube refresh worker.',
+        meta: { trigger, dispatchError },
+      })
+      return {
+        ok: false,
+        status: 503,
+        error: 'youtube_refresh_job_dispatch_failed',
+        payload: { dispatchError },
+      }
+    }
+  } else {
+    void runYouTubeRefreshJob(jobId, userId)
+  }
   return {
     ok: true,
     jobId,
@@ -11302,4 +11435,9 @@ if (!isServerlessRuntime) {
   })
 }
 
-export { app }
+export {
+  app,
+  isValidInternalRefreshRunnerToken,
+  runInstagramRefreshJob,
+  runYouTubeRefreshJob,
+}

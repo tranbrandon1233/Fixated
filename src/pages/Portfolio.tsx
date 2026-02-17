@@ -99,6 +99,11 @@ const aggregateSeries = (records: PortfolioRecord[], range: PortfolioRange): Agg
   return ordered.map((point) => ({ ...point, date: formatDate(point.date) }))
 }
 
+const inferPlatformFromChannelId = (channelId: string): Platform => {
+  if (channelId.toLowerCase().startsWith('instagram:')) return 'Instagram'
+  return 'YouTube'
+}
+
 export const Portfolio = () => {
   const { summary, status, error } = useYouTubeSummary()
   const [range, setRange] = useState<PortfolioRange>('daily')
@@ -124,34 +129,42 @@ export const Portfolio = () => {
     [summary.firstVideoUploadDate, today],
   )
 
-  const channelWeights = useMemo(() => {
-    if (!summary.channels.length) {
-      return [{ name: 'YouTube', platform: 'YouTube' as Platform, weight: 1 }]
-    }
-    const totalViews = summary.channels.reduce((sum, channel) => sum + channel.views, 0)
-    return summary.channels.map((channel) => ({
-      name: channel.name,
-      platform: channel.platform,
-      weight: totalViews ? channel.views / totalViews : 1 / summary.channels.length,
-    }))
-  }, [summary.channels])
-
   const portfolioRecords = useMemo<PortfolioRecord[]>(() => {
+    const channelById = new Map(summary.channels.map((channel) => [channel.id, channel]))
+    if (summary.timeSeriesByChannel.length) {
+      return summary.timeSeriesByChannel
+        .map((point) => {
+          const isoDate = normalizeSummaryIsoDate(point.date, today)
+          if (!isoDate) return null
+          const channel = channelById.get(point.channelId)
+          const platform = channel?.platform || inferPlatformFromChannelId(point.channelId)
+          return {
+            date: isoDate,
+            platform,
+            channel: channel?.name || point.channelId || 'Unknown channel',
+            campaign: `${platform} Portfolio`,
+            views: Number(point.views || 0),
+            engagements: Number(point.engagements || 0),
+            posts: Number(point.posts || 0),
+            watchTimeHours: Number(point.watchTimeHours || 0),
+          }
+        })
+        .filter((point): point is PortfolioRecord => Boolean(point))
+    }
+
+    // Fallback for legacy payloads that omit per-channel series.
     if (!normalizedSeries.length) return []
-    const campaignLabel = 'YouTube Portfolio'
-    return normalizedSeries.flatMap((point) =>
-      channelWeights.map((channel) => ({
-        date: point.isoDate,
-        platform: channel.platform,
-        channel: channel.name,
-        campaign: campaignLabel,
-        views: Math.round(point.views * channel.weight),
-        engagements: Math.round(point.engagements * channel.weight),
-        posts: Math.round(point.posts * channel.weight),
-        watchTimeHours: 0,
-      })),
-    )
-  }, [channelWeights, normalizedSeries])
+    return normalizedSeries.map((point) => ({
+      date: point.isoDate,
+      platform: 'YouTube',
+      channel: 'All Channels',
+      campaign: 'Portfolio',
+      views: Number(point.views || 0),
+      engagements: Number(point.engagements || 0),
+      posts: Number(point.posts || 0),
+      watchTimeHours: Number(point.watchTimeHours || 0),
+    }))
+  }, [normalizedSeries, summary.channels, summary.timeSeriesByChannel, today])
 
   const platformOptions = useMemo(() => {
     const platforms = summary.channels.length
@@ -242,7 +255,7 @@ export const Portfolio = () => {
     ],
   )
 
-  const totals = useMemo(
+  const filteredRecordTotals = useMemo(
     () =>
       filteredRecords.reduce(
         (accumulator, record) => {
@@ -257,21 +270,61 @@ export const Portfolio = () => {
     [filteredRecords],
   )
 
-  const baselineTotals = useMemo(
+  const summaryDateTotals = useMemo(
     () =>
-      portfolioRecords.reduce(
+      normalizedSeries
+        .filter((point) => !hasDateBounds || (point.isoDate >= effectiveStartDate && point.isoDate <= effectiveEndDate))
+        .reduce(
+          (accumulator, point) => {
+            accumulator.views += Number(point.views || 0)
+            accumulator.engagements += Number(point.engagements || 0)
+            accumulator.posts += Number(point.posts || 0)
+            accumulator.watchTimeHours += Number(point.watchTimeHours || 0)
+            return accumulator
+          },
+          { views: 0, engagements: 0, posts: 0, watchTimeHours: 0 },
+        ),
+    [effectiveEndDate, effectiveStartDate, hasDateBounds, normalizedSeries],
+  )
+
+  const isAllChannelScope =
+    selectedPlatform === 'All' && selectedChannel === 'All' && selectedCampaign === 'All'
+
+  const totals = useMemo(() => {
+    if (!isAllChannelScope) return filteredRecordTotals
+    const channelViewsTotal = summary.channels.reduce(
+      (sum, channel) => sum + Number(channel.views || 0),
+      0,
+    )
+    return {
+      views: channelViewsTotal > 0 ? channelViewsTotal : summaryDateTotals.views,
+      engagements: summaryDateTotals.engagements,
+      posts: summaryDateTotals.posts,
+      watchTimeHours: summaryDateTotals.watchTimeHours,
+    }
+  }, [filteredRecordTotals, isAllChannelScope, summary.channels, summaryDateTotals])
+
+  const baselineTotals = useMemo(
+    () => {
+      if (isAllChannelScope) {
+        return { views: totals.views }
+      }
+      return portfolioRecords.reduce(
         (accumulator, record) => {
           accumulator.views += record.views
           return accumulator
         },
         { views: 0 },
-      ),
-    [portfolioRecords],
+      )
+    },
+    [isAllChannelScope, portfolioRecords, totals.views],
   )
 
-  const hasRecords = filteredRecords.length > 0
+  const hasRecords = isAllChannelScope
+    ? summary.channels.length > 0 || summaryDateTotals.posts > 0 || summaryDateTotals.watchTimeHours > 0
+    : filteredRecords.length > 0
   const hasViewsOverTimeData = series.some((point) => point.views > 0)
-  const hasDeliveryLift = hasRecords && baselineTotals.views > 0
+  const hasDeliveryLift = !isAllChannelScope && hasRecords && baselineTotals.views > 0
   const deliveryLift = baselineTotals.views
     ? ((totals.views - baselineTotals.views) / baselineTotals.views) * 100
     : 0
