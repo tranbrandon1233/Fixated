@@ -5141,6 +5141,26 @@ const includeConnectedYouTubeChannelsInSummary = (summaryPayload, connections) =
   }
 }
 
+const upsertCachedYouTubeSummaryWithConnections = async ({
+  userId,
+  connections,
+  generatedAt,
+  refreshJobId,
+}) => {
+  const cachedResult = await getCachedYouTubeSummaryByUserId(userId)
+  const baseSummary =
+    cachedResult.ok && cachedResult.row?.summary_json
+      ? normalizeCachedSummaryPayload(cachedResult.row.summary_json)
+      : buildEmptyYouTubeSummary()
+  const summaryWithConnections = includeConnectedYouTubeChannelsInSummary(baseSummary, connections)
+  return upsertCachedYouTubeSummary({
+    userId,
+    summary: summaryWithConnections,
+    generatedAt,
+    refreshJobId,
+  })
+}
+
 const listAccessibleYouTubeConnectionsByUserId = async (userId, options = {}) => {
   const accessScope = options?.accessScope === 'view' ? 'view' : 'manage'
   const normalizedUserId = normalizeTextInput(userId, { maxLength: 80 })
@@ -5183,7 +5203,55 @@ const listAccessibleYouTubeConnectionsByUserId = async (userId, options = {}) =>
     }
   }
 
-  return { ok: true, status: 200, connections: [...connectionByKey.values()] }
+  const directConnectionsResult = await listYouTubeConnectionRowsByUserId(normalizedUserId)
+  if (directConnectionsResult.ok) {
+    for (const row of directConnectionsResult.rows) {
+      const connection = mapYouTubeConnectionRow(row)
+      const channelId = normalizeTextInput(connection.channelId, { maxLength: 300 })
+      if (!channelId) continue
+      const key = `${normalizedUserId}:${channelId}`
+      if (connectionByKey.has(key)) continue
+      connectionByKey.set(key, {
+        channelId,
+        channelName: normalizeTextInput(connection.channelName, { maxLength: 180 }) || 'YouTube Channel',
+        ownerUserId: normalizedUserId,
+      })
+    }
+  }
+
+  const connections = [...connectionByKey.values()]
+  const channelIds = uniqueValues(
+    connections
+      .map((entry) => normalizeTextInput(entry.channelId, { maxLength: 300 }))
+      .filter((value) => value),
+  )
+  if (channelIds.length) {
+    const tokenRowsResult = await listYouTubeConnectionRowsByChannelIds(channelIds)
+    if (tokenRowsResult.ok) {
+      const tokenByOwnerChannel = new Map()
+      for (const row of tokenRowsResult.rows) {
+        const ownerUserId = normalizeTextInput(row?.user_id, { maxLength: 80 })
+        const channelId = normalizeTextInput(row?.channel_id, { maxLength: 300 })
+        if (!isUuid(ownerUserId) || !channelId) continue
+        const key = `${ownerUserId}:${channelId}`
+        tokenByOwnerChannel.set(key, mapYouTubeConnectionRow(row))
+      }
+      for (const connection of connections) {
+        const ownerUserId = normalizeTextInput(connection.ownerUserId, { maxLength: 80 })
+        const channelId = normalizeTextInput(connection.channelId, { maxLength: 300 })
+        if (!isUuid(ownerUserId) || !channelId) continue
+        const key = `${ownerUserId}:${channelId}`
+        const tokenRow = tokenByOwnerChannel.get(key)
+        if (!tokenRow) continue
+        connection.accessToken = tokenRow.accessToken
+        connection.refreshToken = tokenRow.refreshToken
+        connection.expiresAt = tokenRow.expiresAt
+        connection.connectedAt = tokenRow.connectedAt
+      }
+    }
+  }
+
+  return { ok: true, status: 200, connections }
 }
 
 const collectYouTubeAccountsByChannelId = (organizationRows) => {
@@ -9412,6 +9480,7 @@ app.get('/oauth/x/callback', async (req, res) => {
     const resolvedXUserId = xProfileResult.user.userId
     const resolvedXUsername = xProfileResult.user.username
     const resolvedAccountName = formatXAccountName(resolvedXUsername) || `X Account ${resolvedXUserId}`
+    const connectedAt = new Date().toISOString()
 
     const xOauthUpsertResult = await upsertXOauthTokenVaultEntry({
       ownerUserId: viewer.userId,
@@ -9422,6 +9491,8 @@ app.get('/oauth/x/callback', async (req, res) => {
       expiresAt: tokenExpiresAt,
       scope: tokenScope || xOauthScope,
       tokenType: tokenType || 'bearer',
+      connectedAt,
+      followerCount: xProfileResult.user.followerCount,
     })
     if (!xOauthUpsertResult.ok) {
       throw new Error('Unable to securely store X OAuth token for this connected account.')
@@ -9438,7 +9509,6 @@ app.get('/oauth/x/callback', async (req, res) => {
       }
       return normalizeXUsername(account.accountName) === resolvedXUsername
     })
-    const connectedAt = new Date().toISOString()
     const nextConnection = existing
       ? {
           ...existing,
@@ -9876,6 +9946,23 @@ app.get('/oauth/youtube/callback', async (req, res) => {
         throw new Error('Unable to save organization connected accounts.')
       }
     }
+
+    const cachedConnectionsResult = await listYouTubeConnectionRowsByUserId(connectionOwnerUserId)
+    const cachedConnections = cachedConnectionsResult.ok
+      ? cachedConnectionsResult.rows.map(mapYouTubeConnectionRow)
+      : [nextConnection]
+    await upsertCachedYouTubeSummaryWithConnections({
+      userId: connectionOwnerUserId,
+      connections: cachedConnections,
+      generatedAt: new Date().toISOString(),
+    })
+    createAndStartYouTubeRefreshJob(connectionOwnerUserId, {
+      trigger: 'connect',
+      reuseRunning: true,
+      minIntervalMs: 0,
+    }).catch((err) => {
+      console.error('Unable to queue YouTube refresh after connect:', err)
+    })
 
     clearYouTubeOauthCookies()
     res.redirect(
@@ -12252,20 +12339,23 @@ const xOauthEncryptionKeyBuffer = xOauthEncryptionKey
   : null
 const X_OAUTH_ACCESS_TOKEN_EXPIRY_SKEW_MS = 60_000
 
-const encryptXOauthTokenPayload = (payload) => {
+const encryptXOauthTokenValue = (value) => {
   if (!xOauthEncryptionKeyBuffer) return ''
+  const normalizedValue = normalizeTextInput(value, { maxLength: 6000, trim: false })
+  if (!normalizedValue) return ''
   const iv = crypto.randomBytes(12)
   const cipher = crypto.createCipheriv('aes-256-gcm', xOauthEncryptionKeyBuffer, iv)
-  const serialized = JSON.stringify(payload ?? {})
-  const ciphertext = Buffer.concat([cipher.update(serialized, 'utf8'), cipher.final()])
+  const ciphertext = Buffer.concat([cipher.update(normalizedValue, 'utf8'), cipher.final()])
   const tag = cipher.getAuthTag()
   return `v1:${iv.toString('base64')}:${tag.toString('base64')}:${ciphertext.toString('base64')}`
 }
 
-const decryptXOauthTokenPayload = (value) => {
-  if (!xOauthEncryptionKeyBuffer || typeof value !== 'string') return null
+const decryptXOauthTokenValue = (value) => {
+  if (!xOauthEncryptionKeyBuffer || typeof value !== 'string') return ''
   const parts = value.split(':')
-  if (parts.length !== 4 || parts[0] !== 'v1') return null
+  if (parts.length !== 4 || parts[0] !== 'v1') {
+    return normalizeTextInput(value, { maxLength: 6000, trim: false })
+  }
   try {
     const iv = Buffer.from(parts[1], 'base64')
     const tag = Buffer.from(parts[2], 'base64')
@@ -12273,18 +12363,10 @@ const decryptXOauthTokenPayload = (value) => {
     const decipher = crypto.createDecipheriv('aes-256-gcm', xOauthEncryptionKeyBuffer, iv)
     decipher.setAuthTag(tag)
     const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8')
-    const parsed = JSON.parse(plaintext)
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null
+    return plaintext
   } catch {
-    return null
+    return ''
   }
-}
-
-const buildXOauthVaultKey = ({ ownerUserId = '', userId = '' }) => {
-  const normalizedOwnerUserId = normalizeTextInput(ownerUserId, { maxLength: 80 })
-  const normalizedUserId = normalizeXUserId(userId)
-  if (!isUuid(normalizedOwnerUserId) || !normalizedUserId) return ''
-  return `${normalizedOwnerUserId}:${normalizedUserId}`
 }
 
 const normalizeXOauthTokenRecord = (value = {}) => {
@@ -12308,10 +12390,33 @@ const normalizeXOauthTokenRecord = (value = {}) => {
   }
 }
 
-const getXOauthStore = async () => {
-  const store = await loadReportingStore()
-  ensureXOauthReportingStore(store)
-  return store.x
+const getXOauthStorageRowByUserId = async (userId) => {
+  const normalizedUserId = normalizeXUserId(userId)
+  if (!normalizedUserId) return { ok: false, status: 400, row: null }
+  const selectFields = encodeURIComponent(
+    'user_id,username,follower_count,access_token,refresh_token,token_expires_at,connected_at',
+  )
+  const userFilter = encodeURIComponent(normalizedUserId)
+  const query = `select=${selectFields}&user_id=eq.${userFilter}&limit=1`
+  const result = await requestSupabaseTable('x', { query })
+  return {
+    ...result,
+    row: Array.isArray(result.payload) ? result.payload[0] ?? null : null,
+  }
+}
+
+const mapXOauthTokenRow = (row) => {
+  if (!row || typeof row !== 'object') return null
+  const accessToken = decryptXOauthTokenValue(row.access_token)
+  const refreshToken = decryptXOauthTokenValue(row.refresh_token)
+  const expiresAt = row?.token_expires_at ? Date.parse(row.token_expires_at) : 0
+  return normalizeXOauthTokenRecord({
+    accessToken,
+    refreshToken,
+    expiresAt,
+    username: normalizeXUsername(row.username),
+    userId: normalizeXUserId(row.user_id),
+  })
 }
 
 const upsertXOauthTokenVaultEntry = async ({
@@ -12323,9 +12428,11 @@ const upsertXOauthTokenVaultEntry = async ({
   expiresAt = 0,
   scope = '',
   tokenType = '',
+  connectedAt = '',
+  followerCount,
 }) => {
-  const vaultKey = buildXOauthVaultKey({ ownerUserId, userId })
-  if (!vaultKey) return { ok: false, status: 400, error: 'invalid_x_oauth_vault_key' }
+  const normalizedOwnerUserId = normalizeTextInput(ownerUserId, { maxLength: 80 })
+  if (!isUuid(normalizedOwnerUserId)) return { ok: false, status: 400, error: 'invalid_x_oauth_vault_key' }
   const normalizedPayload = normalizeXOauthTokenRecord({
     userId,
     username,
@@ -12336,48 +12443,101 @@ const upsertXOauthTokenVaultEntry = async ({
     tokenType,
   })
   if (!normalizedPayload) return { ok: false, status: 400, error: 'invalid_x_oauth_token_payload' }
-  const encryptedToken = encryptXOauthTokenPayload(normalizedPayload)
-  if (!encryptedToken) return { ok: false, status: 500, error: 'x_oauth_token_encryption_not_configured' }
-
-  const xStore = await getXOauthStore()
-  xStore.oauthVault[vaultKey] = {
-    ownerUserId: normalizeTextInput(ownerUserId, { maxLength: 80 }),
-    userId: normalizeXUserId(userId),
-    username: normalizeXUsername(username),
-    encryptedToken,
-    updatedAt: new Date().toISOString(),
+  if (!isSupabaseConfigured) return { ok: false, status: 503, error: 'x_storage_not_configured' }
+  const encryptedAccessToken = encryptXOauthTokenValue(normalizedPayload.accessToken)
+  const encryptedRefreshToken = encryptXOauthTokenValue(normalizedPayload.refreshToken)
+  if (!encryptedAccessToken && !encryptedRefreshToken) {
+    return { ok: false, status: 500, error: 'x_oauth_token_encryption_not_configured' }
   }
-  await persistReportingStore()
+  const tokenExpiresAt = normalizedPayload.expiresAt
+    ? new Date(normalizedPayload.expiresAt).toISOString()
+    : null
+  const normalizedConnectedAt = normalizeTextInput(connectedAt, { maxLength: 64 })
+  const existingRowResult = await getXOauthStorageRowByUserId(normalizedPayload.userId)
+  const basePayload = {
+    user_id: normalizedPayload.userId,
+    username: normalizedPayload.username || normalizeXUsername(username),
+    access_token: encryptedAccessToken || null,
+    refresh_token: encryptedRefreshToken || null,
+    token_expires_at: tokenExpiresAt,
+  }
+  if (normalizedConnectedAt) {
+    basePayload.connected_at = normalizedConnectedAt
+  }
+
+  if (existingRowResult.row) {
+    const userFilter = encodeURIComponent(normalizedPayload.userId)
+    const query = `user_id=eq.${userFilter}`
+    const updateResult = await requestSupabaseTable('x', {
+      method: 'PATCH',
+      query,
+      body: basePayload,
+      prefer: 'return=representation',
+    })
+    if (!updateResult.ok) {
+      return { ok: false, status: updateResult.status || 500, error: 'x_oauth_token_store_failed' }
+    }
+  } else {
+    if (followerCount === undefined || followerCount === null) {
+      return { ok: false, status: 400, error: 'x_oauth_token_store_missing_profile' }
+    }
+    const insertPayload = {
+      ...basePayload,
+      follower_count: Math.max(0, toNumber(followerCount)),
+      connected_at: normalizedConnectedAt || new Date().toISOString(),
+    }
+    const insertResult = await requestSupabaseTable('x', {
+      method: 'POST',
+      query: 'on_conflict=user_id',
+      body: [insertPayload],
+      prefer: 'resolution=merge-duplicates,return=representation',
+    })
+    if (!insertResult.ok) {
+      return { ok: false, status: insertResult.status || 500, error: 'x_oauth_token_store_failed' }
+    }
+  }
   return { ok: true, status: 200, token: normalizedPayload }
 }
 
 const getXOauthTokenVaultEntry = async ({ ownerUserId, userId }) => {
-  const vaultKey = buildXOauthVaultKey({ ownerUserId, userId })
-  if (!vaultKey) return null
-  const xStore = await getXOauthStore()
-  const row = xStore.oauthVault[vaultKey]
-  if (!row || typeof row !== 'object') return null
-  const decrypted = decryptXOauthTokenPayload(row.encryptedToken)
-  return normalizeXOauthTokenRecord({
-    ...(decrypted || {}),
-    userId: normalizeXUserId(decrypted?.userId || row.userId || userId),
-    username: normalizeXUsername(decrypted?.username || row.username),
-  })
+  const normalizedOwnerUserId = normalizeTextInput(ownerUserId, { maxLength: 80 })
+  const normalizedUserId = normalizeXUserId(userId)
+  if (!isUuid(normalizedOwnerUserId) || !normalizedUserId) return null
+  const rowResult = await getXOauthStorageRowByUserId(normalizedUserId)
+  if (!rowResult.ok || !rowResult.row) return null
+  return mapXOauthTokenRow(rowResult.row)
 }
 
 const deleteXOauthTokenVaultEntries = async (predicate) => {
-  const xStore = await getXOauthStore()
-  const keys = Object.keys(xStore.oauthVault || {})
+  if (typeof predicate !== 'function' || !isSupabaseConfigured) return 0
+  const selectFields = encodeURIComponent(
+    'user_id,username,access_token,refresh_token,token_expires_at,connected_at',
+  )
+  const query = `select=${selectFields}`
+  const result = await requestSupabaseTable('x', { query })
+  if (!result.ok || !Array.isArray(result.payload)) return 0
   let removed = 0
-  for (const key of keys) {
-    const entry = xStore.oauthVault[key]
-    if (!entry || typeof entry !== 'object') continue
-    if (typeof predicate === 'function' && !predicate(entry, key)) continue
-    delete xStore.oauthVault[key]
-    removed += 1
-  }
-  if (removed > 0) {
-    await persistReportingStore()
+  for (const row of result.payload) {
+    const tokenRecord = mapXOauthTokenRow(row)
+    const entry = {
+      ownerUserId: '',
+      userId: normalizeXUserId(row?.user_id),
+      username: normalizeXUsername(row?.username),
+      accessToken: tokenRecord?.accessToken || '',
+      refreshToken: tokenRecord?.refreshToken || '',
+      tokenExpiresAt: row?.token_expires_at,
+      connectedAt: row?.connected_at,
+    }
+    if (!predicate(entry, entry.userId)) continue
+    const userFilter = encodeURIComponent(normalizeXUserId(row?.user_id))
+    const updateResult = await requestSupabaseTable('x', {
+      method: 'PATCH',
+      query: `user_id=eq.${userFilter}`,
+      body: { access_token: null, refresh_token: null, token_expires_at: null },
+    })
+    if (updateResult.ok) {
+      removed += 1
+    }
   }
   return removed
 }
@@ -15249,6 +15409,7 @@ const runYouTubeRefreshJob = async (jobId, userId) => {
 
     const sessionId = `sb-${userId}`
     const summaryParts = []
+    const connectionsByOwnerUserId = new Map()
     const failures = []
     let channelsProcessed = 0
 
@@ -15256,6 +15417,11 @@ const runYouTubeRefreshJob = async (jobId, userId) => {
       try {
         const ownerUserId = normalizeTextInput(connection.ownerUserId, { maxLength: 80 })
         const tokenOwnerUserId = isUuid(ownerUserId) ? ownerUserId : userId
+        if (isUuid(tokenOwnerUserId)) {
+          const existing = connectionsByOwnerUserId.get(tokenOwnerUserId) ?? []
+          existing.push(connection)
+          connectionsByOwnerUserId.set(tokenOwnerUserId, existing)
+        }
         const summaryPart = await withTimeout(
           buildLiveYouTubeSummary({
             sessionId,
@@ -15274,7 +15440,7 @@ const runYouTubeRefreshJob = async (jobId, userId) => {
             || Array.isArray(summaryPart.timeSeries)
           )
         ) {
-          summaryParts.push(summaryPart)
+          summaryParts.push({ ownerUserId: tokenOwnerUserId, summaryPart })
         }
       } catch (error) {
         failures.push({
@@ -15290,6 +15456,18 @@ const runYouTubeRefreshJob = async (jobId, userId) => {
       }
     }
 
+    if (!summaryParts.length && !failures.length) {
+      for (const [ownerUserId, ownerConnections] of connectionsByOwnerUserId.entries()) {
+        summaryParts.push({
+          ownerUserId,
+          summaryPart: includeConnectedYouTubeChannelsInSummary(
+            buildEmptyYouTubeSummary(),
+            ownerConnections,
+          ),
+        })
+      }
+    }
+
     if (!summaryParts.length && failures.length) {
       throw new Error(
         failures[0]?.message
@@ -15297,14 +15475,27 @@ const runYouTubeRefreshJob = async (jobId, userId) => {
       )
     }
 
-    const summary = mergeYouTubeSummaryParts(summaryParts)
-
-    await upsertCachedYouTubeSummary({
-      userId,
-      summary,
-      generatedAt: new Date().toISOString(),
-      refreshJobId: jobId,
-    })
+    const summaryPartsByOwner = new Map()
+    for (const entry of summaryParts) {
+      const ownerUserId = normalizeTextInput(entry?.ownerUserId, { maxLength: 80 })
+      if (!isUuid(ownerUserId)) continue
+      const existing = summaryPartsByOwner.get(ownerUserId) ?? []
+      existing.push(entry.summaryPart)
+      summaryPartsByOwner.set(ownerUserId, existing)
+    }
+    const generatedAt = new Date().toISOString()
+    for (const [ownerUserId, ownerParts] of summaryPartsByOwner.entries()) {
+      const summary = mergeYouTubeSummaryParts(ownerParts)
+      await upsertCachedYouTubeSummary({
+        userId: ownerUserId,
+        summary,
+        generatedAt,
+        refreshJobId: jobId,
+      })
+    }
+    const mergedSummaryForMeta = mergeYouTubeSummaryParts(
+      summaryParts.map((entry) => entry.summaryPart),
+    )
 
     await updateYouTubeRefreshJob(userId, jobId, {
       status: 'succeeded',
@@ -15316,8 +15507,8 @@ const runYouTubeRefreshJob = async (jobId, userId) => {
         failedChannelCount: failures.length,
         failedChannels: failures.slice(0, 25),
         partialSuccess: failures.length > 0,
-        timeSeriesPoints: summary.timeSeries.length,
-        topPosts: summary.topPosts.length,
+        timeSeriesPoints: mergedSummaryForMeta.timeSeries.length,
+        topPosts: mergedSummaryForMeta.topPosts.length,
       },
     })
   } catch (err) {
