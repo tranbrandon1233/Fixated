@@ -36,7 +36,7 @@ export const ReportBuilder = ({ role }: ReportBuilderProps) => {
   const [viewerUserId, setViewerUserId] = useState('')
   const [campaignsLoading, setCampaignsLoading] = useState(true)
   const [campaignsError, setCampaignsError] = useState<string | null>(null)
-  const platformOptions = ['TikTok', 'Instagram', 'YouTube', 'X']
+  const platformOptions = ['YouTube', 'X']
   const metricOptions = ['Views', 'Engagements', 'Posts', 'Watch Time', 'Followers']
   const rangeOptions = ['Campaign flight', 'Last 7 days', 'Last 30 days', 'Q1 to date', 'Custom']
   const fallbackMinDate = '2000-01-01'
