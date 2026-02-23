@@ -1220,10 +1220,6 @@ export const ReportBuilder = ({ role }: ReportBuilderProps) => {
     doc.text(`Platforms: ${platforms.join(', ')}`, margin + 20, 320)
     if (logoDataUrl) {
       doc.addImage(logoDataUrl, 'PNG', margin + 20, 334, 120, 42)
-    } else {
-      doc.setFont('helvetica', 'italic')
-      doc.setTextColor(...brandPalette.muted)
-      doc.text('Logo image not available.', margin + 20, 350)
     }
     addFooter(1)
 
@@ -1642,10 +1638,6 @@ export const ReportBuilder = ({ role }: ReportBuilderProps) => {
     doc.text('Layout: Deck-style PDF', margin + 28, 292)
     if (logoDataUrl) {
       doc.addImage(logoDataUrl, 'PNG', pageWidth - margin - 180, 120, 150, 54)
-    } else {
-      doc.setFont('helvetica', 'bold')
-      doc.setFontSize(20)
-      doc.text('Fixated', pageWidth - margin - 128, 158)
     }
 
     // Slide 2 - Executive summary
