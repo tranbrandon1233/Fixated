@@ -8,8 +8,8 @@ import {
 import {
   clearInstagramSummaryCache,
   fetchAndCacheInstagramSummary,
-  startInstagramRefresh,
-  waitForInstagramRefresh,
+  // startInstagramRefresh,
+  // waitForInstagramRefresh,
 } from './instagram'
 import {
   clearXSummaryCache,
@@ -63,39 +63,39 @@ export const refreshAllConnectedAccountData = async (
     throw new Error(youtubeStatus.errorMessage || 'YouTube refresh failed.')
   }
 
-  options?.onProgress?.('Refreshing Instagram data...')
-  try {
-    const instagramStatus = await startInstagramRefresh()
-      .then((job) =>
-        waitForInstagramRefresh(job.jobId, {
-          onProgress: (status) => {
-            if (status.status === 'running' && status.channelsTotal > 0) {
-              options?.onProgress?.(
-                `Refreshing Instagram... ${Math.min(status.channelsProcessed, status.channelsTotal)}/${status.channelsTotal} accounts`,
-              )
-            }
-          },
-        }),
-      )
-    if (instagramStatus.status === 'failed') {
-      throw new Error(instagramStatus.errorMessage || 'Instagram refresh failed.')
-    }
-  } catch (error) {
-    const rawMessage = error instanceof Error ? error.message : 'Instagram refresh failed.'
-    const message = rawMessage.toLowerCase()
-    const canSkipInstagram =
-      message.includes('instagram collection is disabled')
-      || message.includes('unable to start instagram refresh')
-    if (canSkipInstagram) {
-      const warning = 'Instagram refresh skipped (not configured yet).'
-      warnings.push(warning)
-      options?.onProgress?.(warning)
-    } else {
-      const warning = `Instagram refresh failed (${rawMessage}). Continuing with available data.`
-      warnings.push(warning)
-      options?.onProgress?.(warning)
-    }
-  }
+  // options?.onProgress?.('Refreshing Instagram data...')
+  // try {
+  //   const instagramStatus = await startInstagramRefresh()
+  //     .then((job) =>
+  //       waitForInstagramRefresh(job.jobId, {
+  //         onProgress: (status) => {
+  //           if (status.status === 'running' && status.channelsTotal > 0) {
+  //             options?.onProgress?.(
+  //               `Refreshing Instagram... ${Math.min(status.channelsProcessed, status.channelsTotal)}/${status.channelsTotal} accounts`,
+  //             )
+  //           }
+  //         },
+  //       }),
+  //     )
+  //   if (instagramStatus.status === 'failed') {
+  //     throw new Error(instagramStatus.errorMessage || 'Instagram refresh failed.')
+  //   }
+  // } catch (error) {
+  //   const rawMessage = error instanceof Error ? error.message : 'Instagram refresh failed.'
+  //   const message = rawMessage.toLowerCase()
+  //   const canSkipInstagram =
+  //     message.includes('instagram collection is disabled')
+  //     || message.includes('unable to start instagram refresh')
+  //   if (canSkipInstagram) {
+  //     const warning = 'Instagram refresh skipped (not configured yet).'
+  //     warnings.push(warning)
+  //     options?.onProgress?.(warning)
+  //   } else {
+  //     const warning = `Instagram refresh failed (${rawMessage}). Continuing with available data.`
+  //     warnings.push(warning)
+  //     options?.onProgress?.(warning)
+  //   }
+  // }
 
   options?.onProgress?.('Refreshing X data...')
   try {

@@ -55,8 +55,6 @@ export interface InstagramRefreshStatusResponse {
 let cachedSummary: InstagramSummary | null = null
 let cachedSummaryUpdatedAt = 0
 let inFlightSummaryRequest: Promise<InstagramSummary> | null = null
-let lastKnownConnectionCount = 0
-let lastKnownConnections: InstagramConnection[] = []
 const INSTAGRAM_SUMMARY_CACHE_KEY = 'fixated.instagram.summary'
 const INSTAGRAM_SUMMARY_CACHE_UPDATED_AT_KEY = 'fixated.instagram.summary.updatedAt'
 const INSTAGRAM_SUMMARY_CACHE_TTL_MS = 5 * 60 * 1000
@@ -318,26 +316,11 @@ export const fetchAndCacheInstagramSummary = async (options?: { force?: boolean 
 }
 
 export const fetchInstagramConnections = async (): Promise<InstagramConnectionsResponse> => {
-  let resolved = await readInstagramConnections()
-  if (resolved.count === 0 && lastKnownConnectionCount > 0) {
-    await new Promise((resolve) => window.setTimeout(resolve, 150))
-    resolved = await readInstagramConnections().catch(() => resolved)
-  }
-  if (resolved.count === 0 && lastKnownConnectionCount > 0) {
-    return {
-      count: lastKnownConnectionCount,
-      connections: lastKnownConnections,
-    }
-  }
-  lastKnownConnectionCount = resolved.count
-  lastKnownConnections = resolved.connections
+  const resolved = await readInstagramConnections()
   return resolved
 }
 
-export const clearInstagramConnectionsCache = () => {
-  lastKnownConnectionCount = 0
-  lastKnownConnections = []
-}
+export const clearInstagramConnectionsCache = () => {}
 
 export const startInstagramRefresh = async (): Promise<InstagramRefreshStartResponse> => {
   const response = await fetch(`${apiBaseUrl}/api/instagram/refresh`, {

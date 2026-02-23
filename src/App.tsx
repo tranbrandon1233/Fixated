@@ -13,7 +13,36 @@ import { Settings } from './pages/Settings'
 import type { Role } from './types/dashboard'
 import { useTheme } from './theme/useTheme'
 import { fetchSessionStatus, logout } from './utils/auth'
+import { clearInstagramConnectionsCache, clearInstagramSummaryCache } from './utils/instagram'
 import { persistLastDataRefreshAt, readLastDataRefreshAt } from './utils/refresh'
+import { clearXSummaryCache } from './utils/x'
+import { clearYouTubeConnectionsCache, clearYouTubeSummaryCache } from './utils/youtube'
+
+const AUTH_USER_ID_STORAGE_KEY = 'fixated.auth.userId'
+
+const clearDashboardAccountCaches = () => {
+  clearYouTubeSummaryCache()
+  clearYouTubeConnectionsCache()
+  clearInstagramSummaryCache()
+  clearInstagramConnectionsCache()
+  clearXSummaryCache()
+}
+
+const syncAuthedUserId = (nextUserId: string) => {
+  const normalizedNextUserId = nextUserId.trim()
+  const previousUserId = localStorage.getItem(AUTH_USER_ID_STORAGE_KEY) ?? ''
+  if (!normalizedNextUserId) {
+    if (previousUserId) {
+      clearDashboardAccountCaches()
+    }
+    localStorage.removeItem(AUTH_USER_ID_STORAGE_KEY)
+    return
+  }
+  if (previousUserId && previousUserId !== normalizedNextUserId) {
+    clearDashboardAccountCaches()
+  }
+  localStorage.setItem(AUTH_USER_ID_STORAGE_KEY, normalizedNextUserId)
+}
 
 const App = () => {
   const [isAuthed, setIsAuthed] = useState(() => {
@@ -44,6 +73,8 @@ const App = () => {
   const defaultAuthedPath = isBrandViewer ? '/report-view' : '/portfolio'
 
   const handleLogin = (provider: 'google') => {
+    clearDashboardAccountCaches()
+    localStorage.removeItem(AUTH_USER_ID_STORAGE_KEY)
     localStorage.setItem('auth_provider', provider)
     setIsAuthed(true)
     setIsSessionChecking(false)
@@ -51,6 +82,8 @@ const App = () => {
 
   const handleLogout = () => {
     void logout()
+    clearDashboardAccountCaches()
+    localStorage.removeItem(AUTH_USER_ID_STORAGE_KEY)
     localStorage.removeItem('auth_provider')
     setIsAuthed(false)
     setIsSessionChecking(false)
@@ -68,6 +101,7 @@ const App = () => {
 
     const verifySession = async () => {
       if (localStorage.getItem('auth_provider') !== 'google') {
+        syncAuthedUserId('')
         if (!cancelled) setIsSessionChecking(false)
         return
       }
@@ -75,10 +109,12 @@ const App = () => {
       const status = await fetchSessionStatus()
       if (cancelled) return
       if (!status.authenticated && !status.transientError) {
+        syncAuthedUserId('')
         localStorage.removeItem('auth_provider')
         setIsAuthed(false)
         setRole('admin')
       } else if (status.authenticated) {
+        syncAuthedUserId(status.userId ?? '')
         setRole(status.role ?? 'admin')
       }
       setIsSessionChecking(false)
@@ -99,6 +135,7 @@ const App = () => {
       const status = await fetchSessionStatus()
       if (cancelled) return
       if (!status.authenticated && !status.transientError) {
+        syncAuthedUserId('')
         localStorage.removeItem('auth_provider')
         setIsAuthed(false)
         setRole('admin')
@@ -106,6 +143,7 @@ const App = () => {
         return
       }
       if (status.authenticated) {
+        syncAuthedUserId(status.userId ?? '')
         setRole(status.role ?? 'admin')
       }
     }
@@ -126,6 +164,7 @@ const App = () => {
 
     window.addEventListener('focus', handleWindowFocus)
     document.addEventListener('visibilitychange', handleVisibilityChange)
+    void checkForSessionTimeout()
 
     return () => {
       cancelled = true

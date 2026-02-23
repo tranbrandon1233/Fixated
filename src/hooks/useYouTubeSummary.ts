@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useState } from 'react'
-import { fetchAndCacheYouTubeSummary, getCachedYouTubeSummary } from '../utils/youtube'
+import { fetchAndCacheYouTubeSummary } from '../utils/youtube'
 import type { YouTubeSummary } from '../utils/youtube'
-import { fetchAndCacheInstagramSummary, getCachedInstagramSummary } from '../utils/instagram'
-import { fetchAndCacheXSummary, getCachedXSummary } from '../utils/x'
+import { fetchAndCacheInstagramSummary } from '../utils/instagram'
+import { fetchAndCacheXSummary } from '../utils/x'
 import { DASHBOARD_DATA_REFRESHED_EVENT } from '../utils/dataRefresh'
 
 type LoadStatus = 'idle' | 'loading' | 'ready' | 'error'
@@ -167,24 +167,16 @@ const formatProviderErrorLabel = (failedProviders: string[]) => {
 }
 
 export const useYouTubeSummary = () => {
-  const initialYouTubeSummary = getCachedYouTubeSummary()
-  const initialInstagramSummary = getCachedInstagramSummary()
-  const initialXSummary = getCachedXSummary()
-  const initialSummaryParts = [initialYouTubeSummary, initialInstagramSummary, initialXSummary].filter(
-    (entry): entry is YouTubeSummary => Boolean(entry),
-  )
-  const initialSummary = initialSummaryParts.length
-    ? mergeSummaryPayloads(initialSummaryParts)
-    : null
-  const [summary, setSummary] = useState<YouTubeSummary>(initialSummary ?? emptySummary)
-  const [status, setStatus] = useState<LoadStatus>(initialSummary ? 'ready' : 'loading')
+  const [summary, setSummary] = useState<YouTubeSummary>(emptySummary)
+  const [status, setStatus] = useState<LoadStatus>('loading')
   const [error, setError] = useState<string | null>(null)
 
   const loadSummary = useCallback(async (options?: { force?: boolean }) => {
+    const forceRefresh = options?.force ?? true
     const [youtubeResult, instagramResult, xResult] = await Promise.allSettled([
-      fetchAndCacheYouTubeSummary(options),
-      fetchAndCacheInstagramSummary(options),
-      fetchAndCacheXSummary(options),
+      fetchAndCacheYouTubeSummary({ force: forceRefresh }),
+      fetchAndCacheInstagramSummary({ force: forceRefresh }),
+      fetchAndCacheXSummary({ force: forceRefresh }),
     ])
     const successfulSummaries: YouTubeSummary[] = []
     const failedProviders: string[] = []
@@ -203,15 +195,7 @@ export const useYouTubeSummary = () => {
     })
 
     if (!successfulSummaries.length) {
-      const cachedSummaries = [getCachedYouTubeSummary(), getCachedInstagramSummary(), getCachedXSummary()].filter(
-        (entry): entry is YouTubeSummary => Boolean(entry),
-      )
-      if (cachedSummaries.length) {
-        setSummary(mergeSummaryPayloads(cachedSummaries))
-        setStatus('ready')
-        setError('Live platform sync is temporarily unavailable.')
-        return
-      }
+      setSummary(emptySummary)
       setStatus('error')
       setError('Unable to load dashboard platform data.')
       return

@@ -10,7 +10,7 @@ import {
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { SectionHeader } from '../components/ui/SectionHeader'
 import type { CampaignApiItem } from '../utils/campaigns'
-import { getInstagramConnectUrl, getXConnectUrl, getYouTubeConnectUrl } from '../utils/auth'
+import { getXConnectUrl, getYouTubeConnectUrl } from '../utils/auth'
 import { fetchCampaigns } from '../utils/campaigns'
 import { sanitizeEmailInput, sanitizeTextInput, sanitizeTokenInput } from '../utils/sanitize'
 import type { Role } from '../types/dashboard'
@@ -596,11 +596,6 @@ export const Organizations = ({ role }: OrganizationsProps) => {
   const handleConnectYouTube = () => {
     if (!connectionsOrg || !canManageConnectionsForConnectionsOrg) return
     window.location.assign(getYouTubeConnectUrl({ organizationId: connectionsOrg.id, path: '/organizations' }))
-  }
-
-  const handleConnectInstagram = () => {
-    if (!connectionsOrg || !canManageConnectionsForConnectionsOrg) return
-    window.location.assign(getInstagramConnectUrl({ organizationId: connectionsOrg.id, path: '/organizations' }))
   }
 
   const handleConnectX = () => {
@@ -1468,7 +1463,7 @@ export const Organizations = ({ role }: OrganizationsProps) => {
                     </button>
                   </div>
                 </div>
-                <div style={{ marginTop: '16px' }}>
+                {/* <div style={{ marginTop: '16px' }}>
                   <div className="section-subtitle">Connect Instagram</div>
                   <div className="section-subtitle" style={{ marginTop: '4px' }}>
                     Connect through Instagram OAuth to link an account to this organization.
@@ -1483,12 +1478,10 @@ export const Organizations = ({ role }: OrganizationsProps) => {
                       Connect Instagram Account
                     </button>
                   </div>
-                </div>
+                </div> */}
                 <div style={{ marginTop: '16px' }}>
                   <div className="section-subtitle">Connect X/Twitter</div>
-                  <div className="section-subtitle" style={{ marginTop: '4px' }}>
-                    Connect through X OAuth to link the signed-in X account to this organization.
-                  </div>
+             
                   <div className="filter-bar" style={{ marginTop: '8px' }}>
                     <button
                       type="button"

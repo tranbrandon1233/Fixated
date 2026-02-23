@@ -14281,7 +14281,7 @@ const runYouTubeRefreshJob = async (jobId, userId) => {
   })
 
   try {
-    const connectionResult = await loadSupabaseYouTubeConnections(userId)
+    const connectionResult = await listAccessibleYouTubeConnectionsByUserId(userId)
     if (!connectionResult.ok) {
       throw new Error('Unable to load connected YouTube channels.')
     }
@@ -14316,11 +14316,13 @@ const runYouTubeRefreshJob = async (jobId, userId) => {
 
     for (const connection of connections) {
       try {
+        const ownerUserId = normalizeTextInput(connection.ownerUserId, { maxLength: 80 })
+        const tokenOwnerUserId = isUuid(ownerUserId) ? ownerUserId : userId
         const summaryPart = await withTimeout(
           buildLiveYouTubeSummary({
             sessionId,
             connections: [connection],
-            resolveAccessToken: (item) => ensureValidAccessTokenForUser(userId, item),
+            resolveAccessToken: (item) => ensureValidAccessTokenForUser(tokenOwnerUserId, item),
           }),
           YOUTUBE_CHANNEL_REFRESH_TIMEOUT_MS,
           `YouTube refresh timed out for channel ${connection.channelName || connection.channelId}.`,
@@ -15437,7 +15439,7 @@ app.get('/api/youtube/connections', async (req, res) => {
   }
 
   const userId = viewerResult.viewer.userId
-  const connectionsResult = await loadSupabaseYouTubeConnections(userId)
+  const connectionsResult = await listAccessibleYouTubeConnectionsByUserId(userId)
   if (!connectionsResult.ok) {
     res.status(500).json({ count: 0, connections: [], error: 'youtube_connections_read_failed' })
     return

@@ -52,8 +52,6 @@ export interface YouTubeRefreshStatusResponse {
   meta: Record<string, unknown>
 }
 
-let lastKnownConnectionCount = 0
-let lastKnownConnections: YouTubeConnection[] = []
 let cachedSummary: YouTubeSummary | null = null
 let cachedSummaryUpdatedAt = 0
 let inFlightSummaryRequest: Promise<YouTubeSummary> | null = null
@@ -146,10 +144,7 @@ const readYouTubeConnections = async (): Promise<YouTubeConnectionsResponse> => 
   return normalizeConnections(payload)
 }
 
-export const clearYouTubeConnectionsCache = () => {
-  lastKnownConnectionCount = 0
-  lastKnownConnections = []
-}
+export const clearYouTubeConnectionsCache = () => {}
 
 const normalizeSummary = (payload: unknown): YouTubeSummary => {
   if (!payload || typeof payload !== 'object') {
@@ -340,19 +335,7 @@ export const fetchAndCacheYouTubeSummary = async (options?: { force?: boolean })
 }
 
 export const fetchYouTubeConnections = async (): Promise<YouTubeConnectionsResponse> => {
-  let resolved = await readYouTubeConnections()
-  if (resolved.count === 0 && lastKnownConnectionCount > 0) {
-    await new Promise((resolve) => window.setTimeout(resolve, 150))
-    resolved = await readYouTubeConnections().catch(() => resolved)
-  }
-  if (resolved.count === 0 && lastKnownConnectionCount > 0) {
-    return {
-      count: lastKnownConnectionCount,
-      connections: lastKnownConnections,
-    }
-  }
-  lastKnownConnectionCount = resolved.count
-  lastKnownConnections = resolved.connections
+  const resolved = await readYouTubeConnections()
   return resolved
 }
 
