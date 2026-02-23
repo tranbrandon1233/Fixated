@@ -2246,11 +2246,15 @@ app.post('/api/exports/preview', async (req, res) => {
     return
   }
 
-  const campaignRole = resolveCampaignUserRole(campaignResult.row, viewer.userId)
+  const campaignRole = resolveCampaignEffectiveRole(campaignResult.row, viewer.userId, {
+    organizationIds: normalizeUuidArray(viewer.organizationIds),
+    organizationAdminIds: normalizeUuidArray(viewer.organizationAdminIds),
+    organizationBrandViewerIds: normalizeUuidArray(viewer.organizationBrandViewerIds),
+  })
   if (!campaignRole) {
     res.status(403).json({
       error: 'forbidden',
-      message: 'You must be a campaign member to generate export previews.',
+      message: 'You must have campaign access to generate export previews.',
     })
     return
   }
@@ -2887,7 +2891,7 @@ const resolveCampaignUserRole = (row, userId) => {
 
 const resolveCampaignOrgScopedRole = (
   row,
-  { organizationIds = [], organizationAdminIds = [] } = {},
+  { organizationIds = [], organizationAdminIds = [], organizationBrandViewerIds = [] } = {},
 ) => {
   const allowedOrgs = normalizeUuidArray(row?.allowed_orgs)
   if (!allowedOrgs.length) return ''
@@ -2899,18 +2903,23 @@ const resolveCampaignOrgScopedRole = (
   if (allowedOrgs.some((organizationId) => internalOrgIdSet.has(organizationId))) {
     return CAMPAIGN_MEMBER_ROLE_INTERNAL
   }
+  const brandViewerOrgIdSet = new Set(normalizeUuidArray(organizationBrandViewerIds))
+  if (allowedOrgs.some((organizationId) => brandViewerOrgIdSet.has(organizationId))) {
+    return CAMPAIGN_MEMBER_ROLE_BRAND_VIEWER
+  }
   return ''
 }
 
 const resolveCampaignEffectiveRole = (
   row,
   userId,
-  { organizationIds = [], organizationAdminIds = [] } = {},
+  { organizationIds = [], organizationAdminIds = [], organizationBrandViewerIds = [] } = {},
 ) => {
   const explicitRole = resolveCampaignUserRole(row, userId)
   const orgScopedRole = resolveCampaignOrgScopedRole(row, {
     organizationIds,
     organizationAdminIds,
+    organizationBrandViewerIds,
   })
   if (!explicitRole) return orgScopedRole
   if (!orgScopedRole) return explicitRole
@@ -3505,11 +3514,13 @@ const resolveAuthedUserContext = async (req, res) => {
   const organizationIdsFromUserRow = normalizeUuidArray(appUserResult.row?.organization_ids)
   let organizationIds = [...organizationIdsFromUserRow]
   let organizationAdminIds = []
+  let organizationBrandViewerIds = []
   let appRole = normalizeAppRole(appUserResult.row?.role)
   const organizationsResult = await listOrganizationRows()
   if (organizationsResult.ok) {
     const internalOrAdminOrganizationIds = []
     const adminOrganizationIds = []
+    const brandViewerOrganizationIds = []
     let hasBrandOrganizationMembership = false
     for (const row of organizationsResult.rows) {
       const organizationId = normalizeTextInput(row?.id, { maxLength: 80 })
@@ -3522,10 +3533,12 @@ const resolveAuthedUserContext = async (req, res) => {
         internalOrAdminOrganizationIds.push(organizationId)
       } else if (organizationRole === ORGANIZATION_MEMBER_ROLE_BRAND_VIEWER) {
         hasBrandOrganizationMembership = true
+        brandViewerOrganizationIds.push(organizationId)
       }
     }
     organizationIds = uniqueValues(internalOrAdminOrganizationIds)
     organizationAdminIds = uniqueValues(adminOrganizationIds)
+    organizationBrandViewerIds = uniqueValues(brandViewerOrganizationIds)
     if (organizationAdminIds.length) {
       appRole = APP_ROLE_ADMIN
     } else if (organizationIds.length) {
@@ -3537,6 +3550,7 @@ const resolveAuthedUserContext = async (req, res) => {
     // Fall back to Users.organization_ids when Organizations read fails.
     organizationIds = organizationIdsFromUserRow
     organizationAdminIds = []
+    organizationBrandViewerIds = []
   }
   return {
     ok: true,
@@ -3545,6 +3559,7 @@ const resolveAuthedUserContext = async (req, res) => {
     accessToken: resolvedAccessToken,
     organizationIds,
     organizationAdminIds,
+    organizationBrandViewerIds,
     appRole,
   }
 }
@@ -3914,10 +3929,17 @@ const deleteCampaignRowById = async (campaignId) => {
   return lastResult
 }
 
-const canUserSeeCampaign = (row, userId, organizationIds = [], organizationAdminIds = []) => {
+const canUserSeeCampaign = (
+  row,
+  userId,
+  organizationIds = [],
+  organizationAdminIds = [],
+  organizationBrandViewerIds = [],
+) => {
   const viewerRole = resolveCampaignEffectiveRole(row, userId, {
     organizationIds,
     organizationAdminIds,
+    organizationBrandViewerIds,
   })
   return Boolean(viewerRole)
 }
@@ -3999,6 +4021,7 @@ const mapCampaignForClient = (row, options = {}) => {
     const effectiveViewerRole = resolveCampaignEffectiveRole(row, viewerUserId, {
       organizationIds: normalizeUuidArray(options?.viewerOrganizationIds),
       organizationAdminIds: normalizeUuidArray(options?.viewerOrganizationAdminIds),
+      organizationBrandViewerIds: normalizeUuidArray(options?.viewerOrganizationBrandViewerIds),
     })
     if (effectiveViewerRole) {
       const existingViewerRole = allowedMemberRoles[viewerUserId]
@@ -4702,7 +4725,59 @@ const scopeCachedSummaryToConnectedChannelIds = (summaryPayload, connectedChanne
   }
 }
 
-const listAccessibleYouTubeConnectionsByUserId = async (userId) => {
+const includeConnectedYouTubeChannelsInSummary = (summaryPayload, connections) => {
+  const baseSummary =
+    summaryPayload && typeof summaryPayload === 'object'
+      ? summaryPayload
+      : buildEmptyYouTubeSummary()
+  const channelById = new Map()
+  const existingChannels = Array.isArray(baseSummary.channels) ? baseSummary.channels : []
+
+  for (const channel of existingChannels) {
+    const channelId = normalizeTextInput(channel?.id, { maxLength: 300 })
+    if (!channelId) continue
+    channelById.set(channelId, {
+      ...channel,
+      id: channelId,
+      name: normalizeTextInput(channel?.name, { maxLength: 180 }) || 'YouTube Channel',
+      platform: ORGANIZATION_CONNECTION_PLATFORM_YOUTUBE,
+      views: Math.max(0, toNumber(channel?.views)),
+      engagementRate: Math.max(0, toNumber(channel?.engagementRate)),
+      followers: Math.max(0, toNumber(channel?.followers)),
+      status: normalizeTextInput(channel?.status, { maxLength: 120 }) || 'Connected',
+    })
+  }
+
+  for (const connection of Array.isArray(connections) ? connections : []) {
+    const channelId = normalizeTextInput(connection?.channelId, { maxLength: 300 })
+    if (!channelId) continue
+    const existing = channelById.get(channelId)
+    const channelName = normalizeTextInput(connection?.channelName, { maxLength: 180 })
+    if (existing) {
+      if (channelName && existing.name !== channelName) {
+        channelById.set(channelId, { ...existing, name: channelName })
+      }
+      continue
+    }
+    channelById.set(channelId, {
+      id: channelId,
+      name: channelName || 'YouTube Channel',
+      platform: ORGANIZATION_CONNECTION_PLATFORM_YOUTUBE,
+      views: 0,
+      engagementRate: 0,
+      followers: 0,
+      status: 'Connected',
+    })
+  }
+
+  return {
+    ...baseSummary,
+    channels: [...channelById.values()],
+  }
+}
+
+const listAccessibleYouTubeConnectionsByUserId = async (userId, options = {}) => {
+  const accessScope = options?.accessScope === 'view' ? 'view' : 'manage'
   const normalizedUserId = normalizeTextInput(userId, { maxLength: 80 })
   if (!isUuid(normalizedUserId)) return { ok: false, status: 400, connections: [] }
   const organizationsResult = await listOrganizationRows()
@@ -4717,7 +4792,10 @@ const listAccessibleYouTubeConnectionsByUserId = async (userId) => {
 
   const connectionByKey = new Map()
   for (const row of organizationsResult.rows) {
-    if (!canUserAccessOrganizationChannels(row, normalizedUserId)) continue
+    const canAccessChannels = accessScope === 'view'
+      ? canUserSeeOrganization(row, normalizedUserId)
+      : canUserAccessOrganizationChannels(row, normalizedUserId)
+    if (!canAccessChannels) continue
     const organizationId = normalizeTextInput(row?.id, { maxLength: 80 })
     const fallbackOwnerUserId = normalizeTextInput(row?.creator, { maxLength: 80 })
     const accounts = normalizeOrganizationConnectedAccounts(row?.connected_accounts)
@@ -5120,7 +5198,26 @@ app.get('/api/campaigns', async (req, res) => {
     : new Map()
 
   const visibleCampaigns = campaignsResult.rows
-    .filter((row) => canUserSeeCampaign(row, viewer.userId, viewer.organizationIds, viewer.organizationAdminIds))
+    .map((row) => {
+      const resolvedAllowedOrgs = resolveCampaignAllowedOrganizationIdsFromRows(
+        row,
+        organizationRows,
+        allowedOrgsByCampaignId,
+      )
+      if (!resolvedAllowedOrgs.length) return row
+      return {
+        ...row,
+        allowed_orgs: resolvedAllowedOrgs,
+      }
+    })
+    .filter((row) =>
+      canUserSeeCampaign(
+        row,
+        viewer.userId,
+        viewer.organizationIds,
+        viewer.organizationAdminIds,
+        viewer.organizationBrandViewerIds,
+      ))
     .map((row) => {
       const visibleChannelIds = resolveVisibleCampaignChannelIdsForViewerFromRows({
         campaignRow: row,
@@ -5133,6 +5230,7 @@ app.get('/api/campaigns', async (req, res) => {
         viewerUserId: viewer.userId,
         viewerOrganizationIds: viewer.organizationIds,
         viewerOrganizationAdminIds: viewer.organizationAdminIds,
+        viewerOrganizationBrandViewerIds: viewer.organizationBrandViewerIds,
       })
     })
   res.json({ campaigns: visibleCampaigns, viewerUserId: viewer.userId })
@@ -12197,7 +12295,8 @@ const listAccessibleInstagramConnectionsByUserId = async (userId) => {
   return { ok: true, status: 200, connections: [...connectionByKey.values()] }
 }
 
-const listAccessibleXConnectionsByUserId = async (userId) => {
+const listAccessibleXConnectionsByUserId = async (userId, options = {}) => {
+  const accessScope = options?.accessScope === 'view' ? 'view' : 'manage'
   const normalizedUserId = normalizeTextInput(userId, { maxLength: 80 })
   if (!isUuid(normalizedUserId)) return { ok: false, status: 400, connections: [] }
   const organizationsResult = await listOrganizationRows()
@@ -12212,7 +12311,10 @@ const listAccessibleXConnectionsByUserId = async (userId) => {
   const connectionByUserId = new Map()
   const unresolvedConnectionsByUsername = new Map()
   for (const row of organizationsResult.rows) {
-    if (!canUserAccessOrganizationChannels(row, normalizedUserId)) continue
+    const canAccessChannels = accessScope === 'view'
+      ? canUserSeeOrganization(row, normalizedUserId)
+      : canUserAccessOrganizationChannels(row, normalizedUserId)
+    if (!canAccessChannels) continue
     const organizationId = normalizeTextInput(row?.id, { maxLength: 80 })
     const fallbackOwnerUserId = normalizeTextInput(row?.creator, { maxLength: 80 })
     const accounts = normalizeOrganizationConnectedAccounts(row?.connected_accounts)
@@ -15278,7 +15380,7 @@ app.post('/api/x/refresh', async (req, res) => {
   }
 
   const userId = viewerResult.viewer.userId
-  const connectionsResult = await listAccessibleXConnectionsByUserId(userId)
+  const connectionsResult = await listAccessibleXConnectionsByUserId(userId, { accessScope: 'view' })
   if (!connectionsResult.ok) {
     res.status(connectionsResult.status || 500).json({
       error: 'x_connections_read_failed',
@@ -15892,7 +15994,7 @@ app.get('/api/youtube/connections', async (req, res) => {
   }
 
   const userId = viewerResult.viewer.userId
-  const connectionsResult = await listAccessibleYouTubeConnectionsByUserId(userId)
+  const connectionsResult = await listAccessibleYouTubeConnectionsByUserId(userId, { accessScope: 'view' })
   if (!connectionsResult.ok) {
     res.status(500).json({ count: 0, connections: [], error: 'youtube_connections_read_failed' })
     return
@@ -15981,8 +16083,12 @@ app.get('/api/youtube/summary', async (req, res) => {
   }
 
   if (!summaryParts.length) {
+    const summaryWithConnectedChannels = includeConnectedYouTubeChannelsInSummary(
+      buildEmptyYouTubeSummary(),
+      connectionsResult.connections,
+    )
     res.json({
-      ...buildEmptyYouTubeSummary(),
+      ...summaryWithConnectedChannels,
       cacheStatus: 'empty',
       generatedAt: latestGeneratedAt,
       autoRefresh: autoRefresh.queued
@@ -15996,7 +16102,10 @@ app.get('/api/youtube/summary', async (req, res) => {
     return
   }
 
-  const summary = mergeYouTubeSummaryParts(summaryParts)
+  const summary = includeConnectedYouTubeChannelsInSummary(
+    mergeYouTubeSummaryParts(summaryParts),
+    connectionsResult.connections,
+  )
   res.json({
     ...summary,
     cacheStatus: 'ready',
