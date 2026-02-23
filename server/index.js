@@ -626,6 +626,15 @@ const resolveXUsernameFromConnection = (account) => {
   }
   return ''
 }
+const resolveXChannelIdFromConnectedAccount = (account, fallbackUserId = '') => {
+  const xUserIdFromConnection = resolveXUserIdFromConnection(account)
+  if (xUserIdFromConnection) return `x:${xUserIdFromConnection}`
+  const xUsernameFromConnection = resolveXUsernameFromConnection(account)
+  if (isValidXUsername(xUsernameFromConnection)) return `x:${xUsernameFromConnection}`
+  const normalizedFallbackUserId = normalizeXUserId(fallbackUserId)
+  if (normalizedFallbackUserId) return `x:${normalizedFallbackUserId}`
+  return ''
+}
 const resolveXUserIdFromStoredPostsPayload = (value) => {
   const sourceEntries = Array.isArray(value)
     ? value
@@ -2214,6 +2223,7 @@ app.post('/api/exports/preview', async (req, res) => {
 
   const payload = req.body ?? {}
   const campaignId = normalizeTextInput(payload.campaignId, { maxLength: 80 })
+  const requestedCampaignIds = uniqueValues([campaignId, ...normalizeUuidArray(payload.campaignIds)])
   const type = normalizeExportPreviewType(payload.type)
   const dataBase64 = typeof payload.dataBase64 === 'string' ? payload.dataBase64.trim() : ''
   const fileName = sanitizeFileName(
@@ -2246,10 +2256,40 @@ app.post('/api/exports/preview', async (req, res) => {
     return
   }
 
+  const viewerOrganizationIds = normalizeUuidArray(viewer.organizationIds)
+  const viewerOrganizationAdminIds = normalizeUuidArray(viewer.organizationAdminIds)
+  const viewerOrganizationBrandViewerIds = normalizeUuidArray(viewer.organizationBrandViewerIds)
+  for (const scopedCampaignId of requestedCampaignIds) {
+    if (!isUuid(scopedCampaignId)) continue
+    const scopedCampaignResult = scopedCampaignId === campaignId
+      ? campaignResult
+      : await fetchCampaignRowById(scopedCampaignId)
+    if (!scopedCampaignResult.ok || !scopedCampaignResult.row) {
+      res.status(scopedCampaignResult.status || 404).json({
+        error: 'campaign_not_found',
+        message: 'One or more campaigns in this report scope could not be loaded.',
+      })
+      return
+    }
+    if (!canUserSeeCampaign(
+      scopedCampaignResult.row,
+      viewer.userId,
+      viewerOrganizationIds,
+      viewerOrganizationAdminIds,
+      viewerOrganizationBrandViewerIds,
+    )) {
+      res.status(403).json({
+        error: 'forbidden',
+        message: 'You do not have access to all campaigns in this report scope.',
+      })
+      return
+    }
+  }
+
   const campaignRole = resolveCampaignEffectiveRole(campaignResult.row, viewer.userId, {
-    organizationIds: normalizeUuidArray(viewer.organizationIds),
-    organizationAdminIds: normalizeUuidArray(viewer.organizationAdminIds),
-    organizationBrandViewerIds: normalizeUuidArray(viewer.organizationBrandViewerIds),
+    organizationIds: viewerOrganizationIds,
+    organizationAdminIds: viewerOrganizationAdminIds,
+    organizationBrandViewerIds: viewerOrganizationBrandViewerIds,
   })
   if (!campaignRole) {
     res.status(403).json({
@@ -2300,6 +2340,7 @@ app.post('/api/exports/preview', async (req, res) => {
     id,
     userId: viewer.userId,
     campaignId,
+    campaignIds: requestedCampaignIds,
     type,
     fileName,
     contentType: type === 'pdf' ? 'application/pdf' : 'text/csv; charset=utf-8',
@@ -2336,12 +2377,42 @@ app.get('/api/exports/preview/:previewId', async (req, res) => {
     })
     return
   }
-  if (!entry.userId || entry.userId !== viewer.userId) {
+  const entryCampaignIds = uniqueValues([
+    ...normalizeUuidArray(entry.campaignIds),
+    normalizeTextInput(entry.campaignId, { maxLength: 80 }),
+  ].filter((value) => isUuid(value)))
+  if (!entryCampaignIds.length) {
     res.status(404).json({
       error: 'export_preview_not_found',
       message: 'Export preview not found or expired.',
     })
     return
+  }
+  const viewerOrganizationIds = normalizeUuidArray(viewer.organizationIds)
+  const viewerOrganizationAdminIds = normalizeUuidArray(viewer.organizationAdminIds)
+  const viewerOrganizationBrandViewerIds = normalizeUuidArray(viewer.organizationBrandViewerIds)
+  for (const scopedCampaignId of entryCampaignIds) {
+    const scopedCampaignResult = await fetchCampaignRowById(scopedCampaignId)
+    if (!scopedCampaignResult.ok || !scopedCampaignResult.row) {
+      res.status(404).json({
+        error: 'export_preview_not_found',
+        message: 'Export preview not found or expired.',
+      })
+      return
+    }
+    if (!canUserSeeCampaign(
+      scopedCampaignResult.row,
+      viewer.userId,
+      viewerOrganizationIds,
+      viewerOrganizationAdminIds,
+      viewerOrganizationBrandViewerIds,
+    )) {
+      res.status(404).json({
+        error: 'export_preview_not_found',
+        message: 'Export preview not found or expired.',
+      })
+      return
+    }
   }
 
   const payloadBuffer = Buffer.from(entry.dataBase64, 'base64')
@@ -5011,24 +5082,41 @@ const buildCampaignAvailableContent = async (campaignRow, options = {}) => {
     }
   }
 
-  const channelOptions = [
-    ...[...youtubeAccountByChannelId.entries()].map(([channelId, account]) => ({
+  const channelOptionById = new Map()
+  for (const [channelId, account] of youtubeAccountByChannelId.entries()) {
+    if (!channelOptionById.has(channelId)) {
+      channelOptionById.set(channelId, {
+        id: channelId,
+        label: formatOrganizationConnectedAccountLabel(account),
+      })
+    }
+  }
+  for (const [accountId, account] of instagramAccountById.entries()) {
+    const channelId = `instagram:${accountId}`
+    if (!channelOptionById.has(channelId)) {
+      channelOptionById.set(channelId, {
+        id: channelId,
+        label: formatOrganizationConnectedAccountLabel(account),
+      })
+    }
+  }
+  for (const [xUserId, account] of xAccountByUserId.entries()) {
+    const channelId = resolveXChannelIdFromConnectedAccount(account, xUserId)
+    if (!channelId || channelOptionById.has(channelId)) continue
+    channelOptionById.set(channelId, {
       id: channelId,
       label: formatOrganizationConnectedAccountLabel(account),
-    })),
-    ...[...instagramAccountById.entries()].map(([accountId, account]) => ({
-      id: `instagram:${accountId}`,
+    })
+  }
+  for (const [username, account] of unresolvedXAccountsByUsername.entries()) {
+    const channelId = resolveXChannelIdFromConnectedAccount(account, username)
+    if (!channelId || channelOptionById.has(channelId)) continue
+    channelOptionById.set(channelId, {
+      id: channelId,
       label: formatOrganizationConnectedAccountLabel(account),
-    })),
-    ...[...xAccountByUserId.entries()].map(([xUserId, account]) => ({
-      id: `x:${xUserId}`,
-      label: formatOrganizationConnectedAccountLabel(account),
-    })),
-    ...[...unresolvedXAccountsByUsername.entries()].map(([username, account]) => ({
-      id: `x:${username}`,
-      label: formatOrganizationConnectedAccountLabel(account),
-    })),
-  ]
+    })
+  }
+  const channelOptions = [...channelOptionById.values()]
     .sort((left, right) => left.label.localeCompare(right.label))
 
   const postsById = new Map()
@@ -5134,9 +5222,10 @@ const buildCampaignAvailableContent = async (campaignRow, options = {}) => {
       const account = (xUserId ? xAccountByUserId.get(xUserId) : null) || (xUsername ? xAccountByUsername.get(xUsername) : null)
       if (!account) continue
       const resolvedChannelUserId = resolveXUserIdFromConnection(account) || xUserId
-      if (!resolvedChannelUserId) continue
+      const resolvedChannelId = resolveXChannelIdFromConnectedAccount(account, resolvedChannelUserId)
+      if (!resolvedChannelId) continue
       const posts = normalizeXStoredPosts(row?.posts, {
-        userId: resolvedChannelUserId,
+        userId: resolvedChannelUserId || xUserId,
         username: xUsername || resolveXUsernameFromConnection(account),
       })
       for (const post of posts) {
@@ -5146,7 +5235,7 @@ const buildCampaignAvailableContent = async (campaignRow, options = {}) => {
           id: postKey,
           title: post.title,
           platform: ORGANIZATION_CONNECTION_PLATFORM_X,
-          channelId: `x:${resolvedChannelUserId}`,
+          channelId: resolvedChannelId,
           channelName: formatOrganizationConnectedAccountLabel(account),
           views: Math.max(0, toNumber(post.views)),
           engagementRate: Math.max(0, toNumber(post.engagementRate)),

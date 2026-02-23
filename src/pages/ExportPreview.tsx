@@ -17,6 +17,7 @@ export const ExportPreview = () => {
   const [pdfObjectUrl, setPdfObjectUrl] = useState('')
   const [downloadUrl, setDownloadUrl] = useState('')
   const [errorMessage, setErrorMessage] = useState('')
+  const [shareStatus, setShareStatus] = useState('')
   const [loadedId, setLoadedId] = useState('')
   const authBaseUrl = resolveAuthBaseUrl()
 
@@ -137,6 +138,43 @@ export const ExportPreview = () => {
   const isReady = loadedId === previewId && !errorMessage
   const resolvedFileName = fileName || (previewType === 'pdf' ? 'report.pdf' : 'report.csv')
 
+  const fallbackCopy = (value: string) => {
+    const textArea = document.createElement('textarea')
+    textArea.value = value
+    textArea.style.position = 'fixed'
+    textArea.style.opacity = '0'
+    document.body.appendChild(textArea)
+    textArea.select()
+    const copied = document.execCommand('copy')
+    document.body.removeChild(textArea)
+    return copied
+  }
+
+  const handleShareLink = async () => {
+    const shareUrl = window.location.href
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(shareUrl)
+      } else if (!fallbackCopy(shareUrl)) {
+        window.prompt('Copy this report link', shareUrl)
+      }
+      setShareStatus('Shareable link copied.')
+    } catch {
+      if (!fallbackCopy(shareUrl)) {
+        window.prompt('Copy this report link', shareUrl)
+        setShareStatus('Clipboard blocked. Link opened for manual copy.')
+        return
+      }
+      setShareStatus('Shareable link copied.')
+    }
+  }
+
+  useEffect(() => {
+    if (!shareStatus) return
+    const timeoutId = window.setTimeout(() => setShareStatus(''), 2500)
+    return () => window.clearTimeout(timeoutId)
+  }, [shareStatus])
+
   if (!previewId) {
     return (
       <div className="card">
@@ -166,10 +204,20 @@ export const ExportPreview = () => {
           <div className="section-title">Export preview</div>
           <div className="section-subtitle">{resolvedFileName}</div>
         </div>
-        <a className="primary-button" href={downloadUrl || fileUrl} download={resolvedFileName}>
-          Download file
-        </a>
+        <div className="filter-bar">
+          <button className="ghost-button" type="button" onClick={() => void handleShareLink()}>
+            Share
+          </button>
+          <a className="primary-button" href={downloadUrl || fileUrl} download={resolvedFileName}>
+            Download file
+          </a>
+        </div>
       </div>
+      {shareStatus ? (
+        <div className="section-subtitle" style={{ marginTop: '8px' }}>
+          {shareStatus}
+        </div>
+      ) : null}
 
       {!isReady ? (
         <div className="section-subtitle" style={{ marginTop: '16px' }}>

@@ -168,7 +168,7 @@ export const ReportBuilder = ({ role }: ReportBuilderProps) => {
         'Performance summary generated from campaign delivery data.',
       channels: hasAllChannel ? ['All ONO/LNO'] : initialChannels,
       platforms: parseListParam(params.get('platforms'), platformOptions, platformOptions),
-      metrics: parseListParam(params.get('metrics'), metricOptions, ['Views', 'Engagements', 'Posts']),
+      metrics: parseListParam(params.get('metrics'), metricOptions, ['Views', 'Engagements', 'Posts', 'Watch Time', 'Followers']),
     }
   })
 
@@ -233,12 +233,21 @@ export const ReportBuilder = ({ role }: ReportBuilderProps) => {
         return
       }
       const dataBase64 = await blobToBase64(blob)
+      const scopedCampaignIdsForPreview = scopedCampaigns.length
+        ? scopedCampaigns.map((campaign) => campaign.id)
+        : [exportAuthorizationCampaign.id]
+      const sanitizedCampaignIds = [...new Set(
+        scopedCampaignIdsForPreview
+          .map((campaignId) => sanitizeTokenInput(campaignId, 80))
+          .filter((campaignId) => Boolean(campaignId)),
+      )]
       const response = await fetch(`${authBaseUrl}/api/exports/preview`, {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           campaignId: exportAuthorizationCampaign.id,
+          campaignIds: sanitizedCampaignIds,
           type,
           fileName,
           dataBase64,
@@ -464,7 +473,6 @@ export const ReportBuilder = ({ role }: ReportBuilderProps) => {
       : 'N/A'
 
   const canExportReports = Boolean(exportAuthorizationCampaign)
-  const canShareReports = canExportReports
 
   useEffect(() => {
     if (!activeCampaign) return
@@ -1259,13 +1267,13 @@ export const ReportBuilder = ({ role }: ReportBuilderProps) => {
     }
     doc.setFont('helvetica', 'bold')
     doc.setTextColor(...brandPalette.text)
-    doc.text('Insight bullets', margin, 342)
+    doc.text('Insight bullets', margin, 370)
     doc.setFont('helvetica', 'normal')
     doc.setTextColor(...brandPalette.muted)
     ;(insightBullets.length ? insightBullets : ['No additional notes provided.']).forEach(
       (bullet, index) => {
         const wrapped = doc.splitTextToSize(`- ${bullet}`, availableWidth - 10)
-        doc.text(wrapped, margin, 365 + index * 24)
+        doc.text(wrapped, margin, 393 + index * 24)
       },
     )
     if (showGuarantee && scopedCampaigns.length) {
@@ -2149,83 +2157,6 @@ export const ReportBuilder = ({ role }: ReportBuilderProps) => {
     setSelectedCampaignIds([])
   }
 
-  const buildShareUrl = () => {
-    const sanitizedBrand = sanitizeTextInput(brandName, { maxLength: 140 })
-    const sanitizedCampaign = sanitizeTextInput(campaignName, { maxLength: 140 })
-    const sanitizedCampaignIds = selectedCampaignIds
-      .map((campaignId) => sanitizeTokenInput(campaignId, 80))
-      .filter((campaignId) => Boolean(campaignId))
-    const sanitizedNotes = sanitizeMultilineInput(notes, 4000)
-    const sanitizedRangeSelection = sanitizeAllowlistedValue(
-      rangeSelection,
-      rangeOptions,
-      'Campaign flight',
-    )
-    const sanitizedStart = sanitizeDateInput(customStart, {
-      fallback: todayDate,
-      min: fallbackMinDate,
-      max: fallbackMaxDate,
-    })
-    const sanitizedEnd = sanitizeDateInput(customEnd, {
-      fallback: sanitizedStart,
-      min: fallbackMinDate,
-      max: fallbackMaxDate,
-    })
-    const params = new URLSearchParams()
-    params.set('brand', sanitizedBrand)
-    params.set('campaign', sanitizedCampaign)
-    params.set('filter', sanitizeTextInput(campaignFilterLabel, { maxLength: 140 }))
-    params.set('campaignIds', sanitizedCampaignIds.join(','))
-    params.set('range', sanitizedRangeSelection)
-    params.set('start', sanitizedStart)
-    params.set('end', sanitizedEnd)
-    params.set('showCpm', String(showCPM))
-    params.set('showGuarantee', String(showGuarantee))
-    params.set('notes', sanitizedNotes)
-    params.set('channels', allChannelsSelected ? 'All ONO/LNO' : selectedChannelOptions.join(','))
-    params.set('platforms', platforms.join(','))
-    params.set('metrics', metrics.join(','))
-    if (sanitizedCampaignIds.length === 1 && activeCampaign?.id) {
-      params.set('campaignId', activeCampaign.id)
-    }
-    return `${window.location.origin}/report-view?${params.toString()}`
-  }
-
-  const fallbackCopy = (value: string) => {
-    const textArea = document.createElement('textarea')
-    textArea.value = value
-    textArea.style.position = 'fixed'
-    textArea.style.opacity = '0'
-    document.body.appendChild(textArea)
-    textArea.select()
-    const copied = document.execCommand('copy')
-    document.body.removeChild(textArea)
-    return copied
-  }
-
-  const handleShareLink = async () => {
-    if (!canShareReports) {
-      setShareStatus('Only campaign admins and internal members can share report links.')
-      return
-    }
-    const shareUrl = buildShareUrl()
-    try {
-      if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(shareUrl)
-      } else if (!fallbackCopy(shareUrl)) {
-        window.prompt('Copy this report link', shareUrl)
-      }
-      setShareStatus('Shareable link copied.')
-    } catch {
-      if (!fallbackCopy(shareUrl)) {
-        window.prompt('Copy this report link', shareUrl)
-        setShareStatus('Clipboard blocked. Link opened for manual copy.')
-        return
-      }
-      setShareStatus('Shareable link copied.')
-    }
-  }
-
   useEffect(() => {
     if (!shareStatus) return
     const timeoutId = window.setTimeout(() => setShareStatus(''), 2500)
@@ -2480,11 +2411,6 @@ export const ReportBuilder = ({ role }: ReportBuilderProps) => {
               >
                 View CSV
               </button>
-              {canShareReports ? (
-                <button className="ghost-button" onClick={handleShareLink}>
-                  Shareable link
-                </button>
-              ) : null}
             </div>
           ) : null}
           {shareStatus ? (

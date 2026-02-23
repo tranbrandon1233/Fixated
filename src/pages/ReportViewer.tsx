@@ -80,22 +80,36 @@ export const ReportViewer = ({ onLogout }: ReportViewerProps) => {
     }
   }, [])
 
-  const scopedCampaigns = useMemo(() => {
-    if (!campaigns.length) return []
-
+  const requestedCampaignIds = useMemo(() => {
     const params = new URLSearchParams(window.location.search)
     const queryCampaignIds = parseCampaignIds(params.get('campaignIds'))
     const queryCampaignId = sanitizeTokenInput(params.get('campaignId'), 80)
     if (queryCampaignId && !queryCampaignIds.includes(queryCampaignId)) {
       queryCampaignIds.push(queryCampaignId)
     }
+    return queryCampaignIds
+  }, [])
 
-    if (queryCampaignIds.length) {
-      const selectedCampaignIdSet = new Set(queryCampaignIds)
+  const sharedScopeAccessError = useMemo(() => {
+    if (!requestedCampaignIds.length) return ''
+    const accessibleIdSet = new Set(campaigns.map((campaign) => campaign.id))
+    const hasAllRequestedCampaigns = requestedCampaignIds.every((campaignId) =>
+      accessibleIdSet.has(campaignId))
+    if (hasAllRequestedCampaigns) return ''
+    return 'You can view this shared report only if you have access to all campaigns in the report.'
+  }, [campaigns, requestedCampaignIds])
+
+  const scopedCampaigns = useMemo(() => {
+    if (!campaigns.length) return []
+
+    if (requestedCampaignIds.length) {
+      const selectedCampaignIdSet = new Set(requestedCampaignIds)
       const byId = campaigns.filter((campaign) => selectedCampaignIdSet.has(campaign.id))
-      if (byId.length) return byId
+      if (byId.length === requestedCampaignIds.length) return byId
+      return []
     }
 
+    const params = new URLSearchParams(window.location.search)
     const queryCampaign = sanitizeTextInput(params.get('campaign'), { maxLength: 140 })
     const queryFilter = sanitizeTextInput(params.get('filter'), { maxLength: 140 })
     const wantsAllCampaigns =
@@ -113,7 +127,7 @@ export const ReportViewer = ({ onLogout }: ReportViewerProps) => {
 
     if (!fallbackCampaignName) return campaigns.length ? [campaigns[0]] : []
     return [campaigns.find((campaign) => campaign.name === fallbackCampaignName) ?? campaigns[0]]
-  }, [campaigns])
+  }, [campaigns, requestedCampaignIds])
 
   const activeCampaign = scopedCampaigns.length === 1 ? scopedCampaigns[0] : null
   const campaignBrandLabel = useMemo(() => {
@@ -287,6 +301,19 @@ export const ReportViewer = ({ onLogout }: ReportViewerProps) => {
         <div className="card">
           <div className="section-subtitle" style={{ color: 'var(--danger)' }}>
             {error}
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  if (sharedScopeAccessError) {
+    return (
+      <div className="page" style={{ maxWidth: '1100px', margin: '0 auto' }}>
+        {logoutControl}
+        <div className="card">
+          <div className="section-subtitle" style={{ color: 'var(--danger)' }}>
+            {sharedScopeAccessError}
           </div>
         </div>
       </div>
