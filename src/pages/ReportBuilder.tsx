@@ -954,7 +954,12 @@ export const ReportBuilder = ({ role }: ReportBuilderProps) => {
 
   const loadLogoDataUrl = async () => {
     try {
-      const response = await fetch('/logo.png', { cache: 'no-store' })
+      const baseUrl =
+        typeof import.meta !== 'undefined' && import.meta.env?.BASE_URL
+          ? import.meta.env.BASE_URL
+          : '/'
+      const resolvedBase = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`
+      const response = await fetch(`${resolvedBase}logo.png`, { cache: 'no-store' })
       if (!response.ok) return ''
       const blob = await response.blob()
       return await readBlobAsDataUrl(blob)
