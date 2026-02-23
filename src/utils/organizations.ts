@@ -84,6 +84,7 @@ export interface CreateOrganizationResult {
 export interface UpdateOrganizationMembersInput {
   addMembers?: MemberAccessInput[]
   roleUpdates?: OrganizationMemberRoleUpdateInput[]
+  campaignAccessUpdates?: OrganizationCampaignAccessUpdateInput[]
   addEmails?: string[]
   removeEmails?: string[]
   removeUserIds?: string[]
@@ -97,6 +98,12 @@ export interface UpdateOrganizationMembersResult {
 export interface OrganizationMemberRoleUpdateInput {
   userId: string
   role?: OrganizationMemberRole
+}
+
+export interface OrganizationCampaignAccessUpdateInput {
+  campaignId: string
+  userId: string
+  hasAccess: boolean
 }
 
 export interface UpdateOrganizationDetailsInput {
@@ -324,6 +331,27 @@ const sanitizeRoleUpdates = (value: unknown): OrganizationMemberRoleUpdateInput[
   return [...roleByUserId.entries()].map(([userId, role]) => ({ userId, role }))
 }
 
+const sanitizeCampaignAccessUpdates = (value: unknown): OrganizationCampaignAccessUpdateInput[] => {
+  if (!Array.isArray(value)) return []
+  const updateByKey = new Map<string, OrganizationCampaignAccessUpdateInput>()
+  value.forEach((entry) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return
+    const campaignId = sanitizeTokenInput((entry as { campaignId?: unknown }).campaignId, 80)
+    const userId = sanitizeTokenInput((entry as { userId?: unknown }).userId, 80)
+    if (!isUuid(campaignId) || !isUuid(userId)) return
+    const rawHasAccess = (entry as { hasAccess?: unknown }).hasAccess
+    const hasAccess =
+      typeof rawHasAccess === 'boolean'
+        ? rawHasAccess
+        : typeof rawHasAccess === 'string'
+          ? rawHasAccess.trim().toLowerCase() === 'true'
+          : Boolean(rawHasAccess)
+    const key = `${campaignId}:${userId}`
+    updateByKey.set(key, { campaignId, userId, hasAccess })
+  })
+  return [...updateByKey.values()]
+}
+
 const sanitizeEmailArray = (value: unknown): string[] => {
   if (!Array.isArray(value)) return []
   return [...new Set(value.map((entry) => sanitizeEmailInput(entry)).filter((entry) => Boolean(entry)))]
@@ -402,6 +430,7 @@ export const updateOrganizationMembers = async (
   const sanitizedInput: UpdateOrganizationMembersInput = {
     addMembers: sanitizeMemberAccess(input.addMembers),
     roleUpdates: sanitizeRoleUpdates(input.roleUpdates),
+    campaignAccessUpdates: sanitizeCampaignAccessUpdates(input.campaignAccessUpdates),
     addEmails: sanitizeEmailArray(input.addEmails),
     removeEmails: sanitizeEmailArray(input.removeEmails),
     removeUserIds: toUniqueUuidArray(input.removeUserIds),

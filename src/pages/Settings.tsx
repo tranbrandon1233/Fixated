@@ -16,7 +16,7 @@ export const Settings = ({ role, lastDataRefreshAt, onDataRefreshed }: SettingsP
   const [refreshMessage, setRefreshMessage] = useState<string | null>(null)
   const [refreshClock, setRefreshClock] = useState(() => Date.now())
   const [refreshCount24h, setRefreshCount24h] = useState<number | null>(null)
-  const canRefreshData = role === 'admin'
+  const canRefreshData = role === 'admin' || role === 'internal'
 
   useEffect(() => {
     const intervalId = window.setInterval(() => {

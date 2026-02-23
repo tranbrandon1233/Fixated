@@ -418,7 +418,8 @@ export const Campaigns = ({ role }: CampaignsProps) => {
   }, [manageCampaign, viewerUserId])
   const normalizedViewerId = useMemo(() => sanitizeTokenInput(viewerUserId, 80), [viewerUserId])
   const isManageViewerAdmin = manageViewerRole === 'admin'
-  const canManageMembersForManageCampaign = manageViewerRole === 'admin'
+  // Campaign member assignment is managed from the organization member modal.
+  const canManageMembersForManageCampaign = false
 
   const sortedMembers = useMemo(() => {
     if (!manageCampaign) return members
@@ -2088,7 +2089,6 @@ export const Campaigns = ({ role }: CampaignsProps) => {
             : 0
           const viewerCampaignRole = resolveViewerCampaignRole(campaign, viewerUserId)
           const canViewMembers = Boolean(viewerCampaignRole)
-          const canManageMembers = viewerCampaignRole === 'admin'
           const canManageCampaignPosts = viewerCampaignRole === 'admin' || viewerCampaignRole === 'internal'
           const canEditCampaign = viewerCampaignRole === 'admin'
           const canDeleteCampaign = viewerCampaignRole === 'admin'
@@ -2201,14 +2201,14 @@ export const Campaigns = ({ role }: CampaignsProps) => {
                 <div style={{ marginTop: '14px', display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
                   {canViewMembers ? (
                     <button
-                      className={canManageMembers ? 'primary-button' : 'ghost-button'}
+                      className="ghost-button"
                       type="button"
                       onClick={() => {
                         void openManageModal(campaign)
                       }}
                       style={{ flex: '1 1 180px' }}
                     >
-                      {canManageMembers ? 'Manage Members' : 'View Members'}
+                      View Members
                     </button>
                   ) : null}
                   {canManageCampaignPosts ? (

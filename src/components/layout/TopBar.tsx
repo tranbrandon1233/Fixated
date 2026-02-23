@@ -26,7 +26,7 @@ export const TopBar = ({
   const [refreshClock, setRefreshClock] = useState(() => Date.now())
   const [isRefreshingData, setIsRefreshingData] = useState(false)
   const [refreshMessage, setRefreshMessage] = useState<string | null>(null)
-  const canRefreshData = role === 'admin'
+  const canRefreshData = role === 'admin' || role === 'internal'
 
   useEffect(() => {
     const intervalId = window.setInterval(() => {

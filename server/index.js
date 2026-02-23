@@ -2130,12 +2130,12 @@ const resolveRefreshCounterViewer = async (req, res) => {
       details: viewer.details ?? null,
     }
   }
-  if (!canRoleConnectAccounts(viewer.appRole)) {
+  if (!canViewerRefreshConnectedAccountData(viewer)) {
     return {
       ok: false,
       status: 403,
       error: 'forbidden',
-      message: 'Only admins can refresh connected account data.',
+      message: 'Only organization internal/admin members can refresh connected account data.',
     }
   }
   return { ok: true, viewer }
@@ -2476,6 +2476,9 @@ const canRoleTagCampaignContent = (role) => {
   return normalized === APP_ROLE_ADMIN || normalized === APP_ROLE_INTERNAL
 }
 const canRoleGenerateReports = canRoleTagCampaignContent
+const canViewerManageConnectedAccounts = (viewer) =>
+  normalizeUuidArray(viewer?.organizationIds).length > 0
+const canViewerRefreshConnectedAccountData = (viewer) => canViewerManageConnectedAccounts(viewer)
 
 const CAMPAIGN_MEMBER_ROLE_ADMIN = 'admin'
 const CAMPAIGN_MEMBER_ROLE_INTERNAL = 'internal'
@@ -2826,6 +2829,54 @@ const normalizeOrganizationMemberRoleUpdateInputArray = (value) => {
   return { validUpdates, invalidUserIds }
 }
 
+const normalizeOrganizationCampaignAccessUpdateInputArray = (value) => {
+  if (!Array.isArray(value)) return { validUpdates: [], invalidEntries: [] }
+  const updatesByKey = new Map()
+  const invalidEntries = []
+  const seenInvalid = new Set()
+
+  for (const entry of value.slice(0, MAX_INPUT_LIST_SIZE)) {
+    const campaignId =
+      entry && typeof entry === 'object' && typeof entry.campaignId === 'string'
+        ? normalizeTextInput(entry.campaignId, { maxLength: 80 })
+        : ''
+    const userId =
+      entry && typeof entry === 'object' && typeof entry.userId === 'string'
+        ? normalizeTextInput(entry.userId, { maxLength: 80 })
+        : ''
+    const hasAccessRaw =
+      entry && typeof entry === 'object' && Object.prototype.hasOwnProperty.call(entry, 'hasAccess')
+        ? entry.hasAccess
+        : null
+    const hasAccess =
+      typeof hasAccessRaw === 'boolean'
+        ? hasAccessRaw
+        : typeof hasAccessRaw === 'string'
+          ? hasAccessRaw.trim().toLowerCase() === 'true'
+          : null
+
+    if (!isUuid(campaignId) || !isUuid(userId) || hasAccess === null) {
+      const invalidKey = `${campaignId || 'invalid_campaign'}:${userId || 'invalid_user'}`
+      if (!seenInvalid.has(invalidKey)) {
+        seenInvalid.add(invalidKey)
+        invalidEntries.push({ campaignId, userId })
+      }
+      continue
+    }
+
+    updatesByKey.set(`${campaignId}:${userId}`, {
+      campaignId,
+      userId,
+      hasAccess,
+    })
+  }
+
+  return {
+    validUpdates: [...updatesByKey.values()],
+    invalidEntries,
+  }
+}
+
 const resolveCampaignUserRole = (row, userId) => {
   if (!isUuid(userId)) return ''
   const creator = normalizeTextInput(row?.creator, { maxLength: 80 })
@@ -2834,26 +2885,61 @@ const resolveCampaignUserRole = (row, userId) => {
   return allowedMemberRoles[userId] || ''
 }
 
-const canUserManageCampaignDetails = (row, userId) => {
-  return resolveCampaignUserRole(row, userId) === CAMPAIGN_MEMBER_ROLE_ADMIN
+const resolveCampaignOrgScopedRole = (
+  row,
+  { organizationIds = [], organizationAdminIds = [] } = {},
+) => {
+  const allowedOrgs = normalizeUuidArray(row?.allowed_orgs)
+  if (!allowedOrgs.length) return ''
+  const adminOrgIdSet = new Set(normalizeUuidArray(organizationAdminIds))
+  if (allowedOrgs.some((organizationId) => adminOrgIdSet.has(organizationId))) {
+    return CAMPAIGN_MEMBER_ROLE_ADMIN
+  }
+  const internalOrgIdSet = new Set(normalizeUuidArray(organizationIds))
+  if (allowedOrgs.some((organizationId) => internalOrgIdSet.has(organizationId))) {
+    return CAMPAIGN_MEMBER_ROLE_INTERNAL
+  }
+  return ''
 }
 
-const canUserManageCampaignPosts = (row, userId) => {
-  const role = resolveCampaignUserRole(row, userId)
+const resolveCampaignEffectiveRole = (
+  row,
+  userId,
+  { organizationIds = [], organizationAdminIds = [] } = {},
+) => {
+  const explicitRole = resolveCampaignUserRole(row, userId)
+  const orgScopedRole = resolveCampaignOrgScopedRole(row, {
+    organizationIds,
+    organizationAdminIds,
+  })
+  if (!explicitRole) return orgScopedRole
+  if (!orgScopedRole) return explicitRole
+  return campaignMemberRolePriority(orgScopedRole) > campaignMemberRolePriority(explicitRole)
+    ? orgScopedRole
+    : explicitRole
+}
+
+const canUserManageCampaignDetails = (row, userId, organizationAdminIds = []) => {
+  return resolveCampaignEffectiveRole(row, userId, { organizationAdminIds }) === CAMPAIGN_MEMBER_ROLE_ADMIN
+}
+
+const canUserManageCampaignPosts = (row, userId, organizationIds = [], organizationAdminIds = []) => {
+  const role = resolveCampaignEffectiveRole(row, userId, { organizationIds, organizationAdminIds })
   return role === CAMPAIGN_MEMBER_ROLE_ADMIN || role === CAMPAIGN_MEMBER_ROLE_INTERNAL
 }
 
-const canUserDeleteCampaign = (row, userId) =>
-  resolveCampaignUserRole(row, userId) === CAMPAIGN_MEMBER_ROLE_ADMIN
+const canUserDeleteCampaign = (row, userId, organizationAdminIds = []) =>
+  resolveCampaignEffectiveRole(row, userId, { organizationAdminIds }) === CAMPAIGN_MEMBER_ROLE_ADMIN
 
-const canUserManageCampaignMembers = (row, userId) => {
-  return resolveCampaignUserRole(row, userId) === CAMPAIGN_MEMBER_ROLE_ADMIN
+const canUserManageCampaignMembers = (row, userId, organizationAdminIds = []) => {
+  return resolveCampaignEffectiveRole(row, userId, { organizationAdminIds }) === CAMPAIGN_MEMBER_ROLE_ADMIN
 }
 
-const canUserViewCampaignMembers = (row, userId) => Boolean(resolveCampaignUserRole(row, userId))
+const canUserViewCampaignMembers = (row, userId, organizationIds = [], organizationAdminIds = []) =>
+  Boolean(resolveCampaignEffectiveRole(row, userId, { organizationIds, organizationAdminIds }))
 
-const canUserChangeCampaignMemberRoles = (row, userId) =>
-  resolveCampaignUserRole(row, userId) === CAMPAIGN_MEMBER_ROLE_ADMIN
+const canUserChangeCampaignMemberRoles = (row, userId, organizationAdminIds = []) =>
+  resolveCampaignEffectiveRole(row, userId, { organizationAdminIds }) === CAMPAIGN_MEMBER_ROLE_ADMIN
 
 const hasIntersection = (left, right) => {
   if (!left.length || !right.length) return false
@@ -3299,10 +3385,16 @@ const resolveOrganizationMemberIdsFromEmails = async (members) => {
     ) {
       resolvedMembersByUserId.set(userId, {
         userId,
+        email,
         role,
       })
     }
+  }
 
+  for (const member of resolvedMembersByUserId.values()) {
+    const email = normalizeEmail(member?.email) || normalizeTextInput(member?.userId, { maxLength: 80 })
+    const role = normalizeOrganizationMemberRole(member?.role)
+    const userId = normalizeTextInput(member?.userId, { maxLength: 80 })
     resolution.added.push({
       action: 'add',
       email,
@@ -3410,14 +3502,49 @@ const resolveAuthedUserContext = async (req, res) => {
     }
   }
 
-  const organizationIds = normalizeUuidArray(appUserResult.row?.organization_ids)
-  const appRole = APP_ROLE_ADMIN
+  const organizationIdsFromUserRow = normalizeUuidArray(appUserResult.row?.organization_ids)
+  let organizationIds = [...organizationIdsFromUserRow]
+  let organizationAdminIds = []
+  let appRole = normalizeAppRole(appUserResult.row?.role)
+  const organizationsResult = await listOrganizationRows()
+  if (organizationsResult.ok) {
+    const internalOrAdminOrganizationIds = []
+    const adminOrganizationIds = []
+    let hasBrandOrganizationMembership = false
+    for (const row of organizationsResult.rows) {
+      const organizationId = normalizeTextInput(row?.id, { maxLength: 80 })
+      if (!isUuid(organizationId)) continue
+      const organizationRole = resolveOrganizationUserRole(row, userId)
+      if (organizationRole === ORGANIZATION_MEMBER_ROLE_ADMIN) {
+        internalOrAdminOrganizationIds.push(organizationId)
+        adminOrganizationIds.push(organizationId)
+      } else if (organizationRole === ORGANIZATION_MEMBER_ROLE_INTERNAL) {
+        internalOrAdminOrganizationIds.push(organizationId)
+      } else if (organizationRole === ORGANIZATION_MEMBER_ROLE_BRAND_VIEWER) {
+        hasBrandOrganizationMembership = true
+      }
+    }
+    organizationIds = uniqueValues(internalOrAdminOrganizationIds)
+    organizationAdminIds = uniqueValues(adminOrganizationIds)
+    if (organizationAdminIds.length) {
+      appRole = APP_ROLE_ADMIN
+    } else if (organizationIds.length) {
+      appRole = APP_ROLE_INTERNAL
+    } else if (hasBrandOrganizationMembership) {
+      appRole = APP_ROLE_BRAND
+    }
+  } else if (organizationIdsFromUserRow.length) {
+    // Fall back to Users.organization_ids when Organizations read fails.
+    organizationIds = organizationIdsFromUserRow
+    organizationAdminIds = []
+  }
   return {
     ok: true,
     userId,
     email,
     accessToken: resolvedAccessToken,
     organizationIds,
+    organizationAdminIds,
     appRole,
   }
 }
@@ -3787,11 +3914,12 @@ const deleteCampaignRowById = async (campaignId) => {
   return lastResult
 }
 
-const canUserSeeCampaign = (row, userId, organizationIds) => {
-  const viewerRole = resolveCampaignUserRole(row, userId)
-  if (viewerRole) return true
-  const allowedOrgs = normalizeUuidArray(row?.allowed_orgs)
-  return hasIntersection(allowedOrgs, organizationIds)
+const canUserSeeCampaign = (row, userId, organizationIds = [], organizationAdminIds = []) => {
+  const viewerRole = resolveCampaignEffectiveRole(row, userId, {
+    organizationIds,
+    organizationAdminIds,
+  })
+  return Boolean(viewerRole)
 }
 
 const buildCampaignMemberIds = (row) => {
@@ -3866,6 +3994,22 @@ const mapCampaignForClient = (row, options = {}) => {
     }
   }
   const allowedMemberRoles = normalizeCampaignMemberRoles(row?.allowed_members, creator)
+  const viewerUserId = normalizeTextInput(options?.viewerUserId, { maxLength: 80 })
+  if (isUuid(viewerUserId)) {
+    const effectiveViewerRole = resolveCampaignEffectiveRole(row, viewerUserId, {
+      organizationIds: normalizeUuidArray(options?.viewerOrganizationIds),
+      organizationAdminIds: normalizeUuidArray(options?.viewerOrganizationAdminIds),
+    })
+    if (effectiveViewerRole) {
+      const existingViewerRole = allowedMemberRoles[viewerUserId]
+      if (
+        !existingViewerRole
+        || campaignMemberRolePriority(effectiveViewerRole) > campaignMemberRolePriority(existingViewerRole)
+      ) {
+        allowedMemberRoles[viewerUserId] = effectiveViewerRole
+      }
+    }
+  }
 
   return {
     id,
@@ -4976,7 +5120,7 @@ app.get('/api/campaigns', async (req, res) => {
     : new Map()
 
   const visibleCampaigns = campaignsResult.rows
-    .filter((row) => canUserSeeCampaign(row, viewer.userId, viewer.organizationIds, viewer.appRole))
+    .filter((row) => canUserSeeCampaign(row, viewer.userId, viewer.organizationIds, viewer.organizationAdminIds))
     .map((row) => {
       const visibleChannelIds = resolveVisibleCampaignChannelIdsForViewerFromRows({
         campaignRow: row,
@@ -4984,7 +5128,12 @@ app.get('/api/campaigns', async (req, res) => {
         organizationRows,
         allowedOrgsByCampaignId,
       })
-      return mapCampaignForClient(row, { visibleChannelIds })
+      return mapCampaignForClient(row, {
+        visibleChannelIds,
+        viewerUserId: viewer.userId,
+        viewerOrganizationIds: viewer.organizationIds,
+        viewerOrganizationAdminIds: viewer.organizationAdminIds,
+      })
     })
   res.json({ campaigns: visibleCampaigns, viewerUserId: viewer.userId })
 })
@@ -4999,10 +5148,10 @@ app.post('/api/campaigns', async (req, res) => {
     })
     return
   }
-  if (!canRoleCreateCampaigns(viewer.appRole)) {
+  if (!viewer.organizationAdminIds.length) {
     res.status(403).json({
       error: 'forbidden',
-      message: 'Only admins can create campaigns.',
+      message: 'Only organization admin members can create campaigns.',
     })
     return
   }
@@ -5020,7 +5169,18 @@ app.post('/api/campaigns', async (req, res) => {
   const guaranteed = toNumber(payload.guaranteed)
   const viewsDelivered = Math.max(0, toNumber(payload.viewsDelivered))
   const engagementRate = Math.max(0, toNumber(payload.engagementRate))
-  let allowedOrgs = normalizeUuidArray(payload.allowedOrgs)
+  const requestedAllowedOrgs = normalizeUuidArray(payload.allowedOrgs)
+  const adminOrganizationIdSet = new Set(viewer.organizationAdminIds)
+  let allowedOrgs = uniqueValues(
+    requestedAllowedOrgs.filter((organizationId) => adminOrganizationIdSet.has(organizationId)),
+  )
+  if (requestedAllowedOrgs.length && allowedOrgs.length !== requestedAllowedOrgs.length) {
+    res.status(403).json({
+      error: 'forbidden',
+      message: 'Campaigns can only be created for organizations where you are an admin member.',
+    })
+    return
+  }
   const requestedMembers = normalizeUuidArray(payload.allowedMembers).filter(
     (userId) => userId !== viewer.userId,
   )
@@ -5074,18 +5234,14 @@ app.post('/api/campaigns', async (req, res) => {
   }
 
   if (!allowedOrgs.length) {
-    const organizationsResult = await listOrganizationRows()
-    if (organizationsResult.ok) {
-      allowedOrgs = uniqueValues(
-        organizationsResult.rows
-          .filter((row) => canUserSeeOrganization(row, viewer.userId))
-          .map((row) => normalizeTextInput(row?.id, { maxLength: 80 }))
-          .filter((organizationId) => isUuid(organizationId)),
-      )
-    }
+    allowedOrgs = uniqueValues(viewer.organizationAdminIds)
   }
-  if (!allowedOrgs.length && viewer.organizationIds.length) {
-    allowedOrgs = viewer.organizationIds
+  if (!allowedOrgs.length) {
+    res.status(403).json({
+      error: 'forbidden',
+      message: 'You must be an admin member of at least one organization to create campaigns.',
+    })
+    return
   }
 
   let memberResolution = buildEmptyMemberResolution()
@@ -5171,7 +5327,12 @@ app.post('/api/campaigns', async (req, res) => {
   const createdRow = inserted.row ?? rowToInsert
   const visibleChannelIds = await resolveVisibleCampaignChannelIdsForViewer(createdRow, viewer.userId)
   res.status(201).json({
-    campaign: mapCampaignForClient(createdRow, { visibleChannelIds }),
+    campaign: mapCampaignForClient(createdRow, {
+      visibleChannelIds,
+      viewerUserId: viewer.userId,
+      viewerOrganizationIds: viewer.organizationIds,
+      viewerOrganizationAdminIds: viewer.organizationAdminIds,
+    }),
     viewerUserId: viewer.userId,
     memberResolution,
   })
@@ -5253,7 +5414,7 @@ app.post('/api/campaigns/:campaignId/details', async (req, res) => {
     return
   }
 
-  if (!canUserSeeCampaign(campaignRow, viewer.userId, viewer.organizationIds, viewer.appRole)) {
+  if (!canUserSeeCampaign(campaignRow, viewer.userId, viewer.organizationIds, viewer.organizationAdminIds)) {
     res.status(403).json({
       error: 'forbidden',
       message: 'You do not have access to this campaign.',
@@ -5261,7 +5422,7 @@ app.post('/api/campaigns/:campaignId/details', async (req, res) => {
     return
   }
 
-  if (!canUserManageCampaignDetails(campaignRow, viewer.userId)) {
+  if (!canUserManageCampaignDetails(campaignRow, viewer.userId, viewer.organizationAdminIds)) {
     res.status(403).json({
       error: 'forbidden',
       message: 'Only campaign admins can edit campaign details.',
@@ -5298,7 +5459,12 @@ app.post('/api/campaigns/:campaignId/details', async (req, res) => {
   }
   const visibleChannelIds = await resolveVisibleCampaignChannelIdsForViewer(updatedRow, viewer.userId)
   res.json({
-    campaign: mapCampaignForClient(updatedRow, { visibleChannelIds }),
+    campaign: mapCampaignForClient(updatedRow, {
+      visibleChannelIds,
+      viewerUserId: viewer.userId,
+      viewerOrganizationIds: viewer.organizationIds,
+      viewerOrganizationAdminIds: viewer.organizationAdminIds,
+    }),
   })
 })
 
@@ -5341,7 +5507,7 @@ app.delete('/api/campaigns/:campaignId', async (req, res) => {
     return
   }
 
-  if (!canUserSeeCampaign(campaignRow, viewer.userId, viewer.organizationIds, viewer.appRole)) {
+  if (!canUserSeeCampaign(campaignRow, viewer.userId, viewer.organizationIds, viewer.organizationAdminIds)) {
     res.status(403).json({
       error: 'forbidden',
       message: 'You do not have access to this campaign.',
@@ -5349,7 +5515,7 @@ app.delete('/api/campaigns/:campaignId', async (req, res) => {
     return
   }
 
-  if (!canUserDeleteCampaign(campaignRow, viewer.userId)) {
+  if (!canUserDeleteCampaign(campaignRow, viewer.userId, viewer.organizationAdminIds)) {
     res.status(403).json({
       error: 'forbidden',
       message: 'Only campaign admins can delete campaigns.',
@@ -5409,14 +5575,14 @@ app.get('/api/campaigns/:campaignId/members', async (req, res) => {
     return
   }
 
-  if (!canUserSeeCampaign(campaignRow, viewer.userId, viewer.organizationIds, viewer.appRole)) {
+  if (!canUserSeeCampaign(campaignRow, viewer.userId, viewer.organizationIds, viewer.organizationAdminIds)) {
     res.status(403).json({
       error: 'forbidden',
       message: 'You do not have access to this campaign.',
     })
     return
   }
-  if (!canUserViewCampaignMembers(campaignRow, viewer.userId)) {
+  if (!canUserViewCampaignMembers(campaignRow, viewer.userId, viewer.organizationIds, viewer.organizationAdminIds)) {
     res.status(403).json({
       error: 'forbidden',
       message: 'Only invited campaign members can view campaign members.',
@@ -5525,7 +5691,7 @@ app.post('/api/campaigns/:campaignId/members', async (req, res) => {
     return
   }
 
-  if (!canUserSeeCampaign(campaignRow, viewer.userId, viewer.organizationIds, viewer.appRole)) {
+  if (!canUserSeeCampaign(campaignRow, viewer.userId, viewer.organizationIds, viewer.organizationAdminIds)) {
     res.status(403).json({
       error: 'forbidden',
       message: 'You do not have access to this campaign.',
@@ -5533,7 +5699,7 @@ app.post('/api/campaigns/:campaignId/members', async (req, res) => {
     return
   }
 
-  if (!canUserManageCampaignMembers(campaignRow, viewer.userId)) {
+  if (!canUserManageCampaignMembers(campaignRow, viewer.userId, viewer.organizationAdminIds)) {
     res.status(403).json({
       error: 'forbidden',
       message: 'Only campaign admins can manage members.',
@@ -5541,7 +5707,7 @@ app.post('/api/campaigns/:campaignId/members', async (req, res) => {
     return
   }
   const creatorId = normalizeTextInput(campaignRow.creator, { maxLength: 80 })
-  const canChangeRoles = canUserChangeCampaignMemberRoles(campaignRow, viewer.userId)
+  const canChangeRoles = canUserChangeCampaignMemberRoles(campaignRow, viewer.userId, viewer.organizationAdminIds)
   const hasRoleMutations = Boolean(roleUpdates.length || roleUpdateInputs.invalidUserIds.length)
   if (!canChangeRoles && hasRoleMutations) {
     res.status(403).json({
@@ -5684,6 +5850,16 @@ app.post('/api/campaigns/:campaignId/members', async (req, res) => {
       })
       continue
     }
+    if (userId === viewer.userId) {
+      updateResult.failed.push({
+        action: 'remove',
+        email,
+        userId,
+        error: 'cannot_remove_self',
+        message: 'You cannot remove yourself from campaign members.',
+      })
+      continue
+    }
 
     if (!memberRoleByUserId[userId]) {
       updateResult.failed.push({
@@ -5729,6 +5905,16 @@ app.post('/api/campaigns/:campaignId/members', async (req, res) => {
       })
       continue
     }
+    if (userId === viewer.userId) {
+      updateResult.failed.push({
+        action: 'remove',
+        email: label,
+        userId,
+        error: 'cannot_remove_self',
+        message: 'You cannot remove yourself from campaign members.',
+      })
+      continue
+    }
 
     if (!memberRoleByUserId[userId]) {
       updateResult.failed.push({
@@ -5754,6 +5940,15 @@ app.post('/api/campaigns/:campaignId/members', async (req, res) => {
     const userId = update.userId
     const role = normalizeCampaignMemberRole(update.role)
     const label = userLabelById.get(userId) || userId
+    if (userId === viewer.userId) {
+      updateResult.failed.push({
+        email: label,
+        userId,
+        error: 'cannot_change_own_role',
+        message: 'You cannot change your own campaign role.',
+      })
+      continue
+    }
     if (userId === creatorId) {
       updateResult.failed.push({
         email: label,
@@ -5879,7 +6074,7 @@ app.get('/api/campaigns/:campaignId/available-posts', async (req, res) => {
     return
   }
 
-  if (!canUserSeeCampaign(campaignRow, viewer.userId, viewer.organizationIds, viewer.appRole)) {
+  if (!canUserSeeCampaign(campaignRow, viewer.userId, viewer.organizationIds, viewer.organizationAdminIds)) {
     res.status(403).json({
       error: 'forbidden',
       message: 'You do not have access to this campaign.',
@@ -5890,7 +6085,7 @@ app.get('/api/campaigns/:campaignId/available-posts', async (req, res) => {
     return
   }
 
-  if (!canUserManageCampaignPosts(campaignRow, viewer.userId)) {
+  if (!canUserManageCampaignPosts(campaignRow, viewer.userId, viewer.organizationIds, viewer.organizationAdminIds)) {
     res.status(403).json({
       error: 'forbidden',
       message: 'Only campaign admins and internal members can tag campaign content.',
@@ -5959,14 +6154,14 @@ app.post('/api/campaigns/:campaignId/posts', async (req, res) => {
     return
   }
 
-  if (!canUserSeeCampaign(campaignRow, viewer.userId, viewer.organizationIds, viewer.appRole)) {
+  if (!canUserSeeCampaign(campaignRow, viewer.userId, viewer.organizationIds, viewer.organizationAdminIds)) {
     res.status(403).json({
       error: 'forbidden',
       message: 'You do not have access to this campaign.',
     })
     return
   }
-  if (!canUserManageCampaignPosts(campaignRow, viewer.userId)) {
+  if (!canUserManageCampaignPosts(campaignRow, viewer.userId, viewer.organizationIds, viewer.organizationAdminIds)) {
     res.status(403).json({
       error: 'forbidden',
       message: 'Only campaign admins and internal members can tag campaign content.',
@@ -6060,7 +6255,12 @@ app.post('/api/campaigns/:campaignId/posts', async (req, res) => {
   )
 
   res.json({
-    campaign: mapCampaignForClient(updatedCampaignRow, { visibleChannelIds }),
+    campaign: mapCampaignForClient(updatedCampaignRow, {
+      visibleChannelIds,
+      viewerUserId: viewer.userId,
+      viewerOrganizationIds: viewer.organizationIds,
+      viewerOrganizationAdminIds: viewer.organizationAdminIds,
+    }),
   })
 })
 
@@ -6195,7 +6395,7 @@ app.post('/api/organizations', async (req, res) => {
 
   const visibleCampaignIds = new Set(
     campaignsResult.rows
-      .filter((row) => canUserSeeCampaign(row, viewer.userId, viewer.organizationIds, viewer.appRole))
+      .filter((row) => canUserSeeCampaign(row, viewer.userId, viewer.organizationIds, viewer.organizationAdminIds))
       .map((row) => normalizeTextInput(row?.id, { maxLength: 80 }))
       .filter((id) => isUuid(id)),
   )
@@ -6408,7 +6608,7 @@ app.post('/api/organizations/:organizationId/details', async (req, res) => {
 
   const visibleCampaignIds = new Set(
     campaignsResult.rows
-      .filter((row) => canUserSeeCampaign(row, viewer.userId, viewer.organizationIds, viewer.appRole))
+      .filter((row) => canUserSeeCampaign(row, viewer.userId, viewer.organizationIds, viewer.organizationAdminIds))
       .map((row) => normalizeTextInput(row?.id, { maxLength: 80 }))
       .filter((id) => isUuid(id)),
   )
@@ -6593,6 +6793,8 @@ app.post('/api/organizations/:organizationId/members', async (req, res) => {
   const removeEmailInputs = normalizeEmailInputArray(payload.removeEmails)
   const removeUserIds = normalizeUuidArray(payload.removeUserIds)
   const roleUpdateInputs = normalizeOrganizationMemberRoleUpdateInputArray(payload.roleUpdates)
+  const campaignAccessUpdateInputs =
+    normalizeOrganizationCampaignAccessUpdateInputArray(payload.campaignAccessUpdates)
   const hasInput =
     addMemberInputs.validMembers.length ||
     addMemberInputs.invalidEmails.length ||
@@ -6602,12 +6804,14 @@ app.post('/api/organizations/:organizationId/members', async (req, res) => {
     removeEmailInputs.invalidEmails.length ||
     removeUserIds.length ||
     roleUpdateInputs.validUpdates.length ||
-    roleUpdateInputs.invalidUserIds.length
+    roleUpdateInputs.invalidUserIds.length ||
+    campaignAccessUpdateInputs.validUpdates.length ||
+    campaignAccessUpdateInputs.invalidEntries.length
   if (!hasInput) {
     res.status(400).json({
       error: 'invalid_organization_member_payload',
       message:
-        'Provide at least one valid member in addMembers, roleUpdates, addEmails, removeEmails, or removeUserIds.',
+        'Provide at least one valid member in addMembers, roleUpdates, campaignAccessUpdates, addEmails, removeEmails, or removeUserIds.',
     })
     return
   }
@@ -6645,6 +6849,7 @@ app.post('/api/organizations/:organizationId/members', async (req, res) => {
   }
 
   const canChangeRoles = canUserChangeOrganizationMemberRoles(organizationRow, viewer.userId)
+  const canChangeCampaignAccess = canChangeRoles
   const addMembersContainRoleMutations = addMemberInputs.validMembers.some(
     (member) => normalizeOrganizationMemberRole(member.role) !== ORGANIZATION_MEMBER_ROLE_INTERNAL,
   )
@@ -6657,6 +6862,16 @@ app.post('/api/organizations/:organizationId/members', async (req, res) => {
     res.status(403).json({
       error: 'forbidden',
       message: 'Only organization admin members can change member roles.',
+    })
+    return
+  }
+  const hasCampaignAccessMutations = Boolean(
+    campaignAccessUpdateInputs.validUpdates.length || campaignAccessUpdateInputs.invalidEntries.length,
+  )
+  if (!canChangeCampaignAccess && hasCampaignAccessMutations) {
+    res.status(403).json({
+      error: 'forbidden',
+      message: 'Only organization admin members can update campaign access.',
     })
     return
   }
@@ -6717,22 +6932,76 @@ app.post('/api/organizations/:organizationId/members', async (req, res) => {
       message: 'User id must be a valid UUID.',
     })
   }
+  for (const invalidEntry of campaignAccessUpdateInputs.invalidEntries) {
+    const campaignId = normalizeTextInput(invalidEntry?.campaignId, { maxLength: 80 }) || 'invalid_campaign_id'
+    const userId = normalizeTextInput(invalidEntry?.userId, { maxLength: 80 }) || 'invalid_user_id'
+    memberUpdateResult.failed.push({
+      email: userId,
+      userId,
+      error: 'invalid_campaign_access_update',
+      message: `Campaign access update is invalid for campaign ${campaignId}.`,
+    })
+  }
 
   const addMembers = [...addMemberByEmail.entries()].map(([email, role]) => ({ email, role }))
   if (addMembers.length) {
     const resolvedMembers = await resolveOrganizationMemberIdsFromEmails(addMembers)
-    memberUpdateResult.added.push(...resolvedMembers.resolution.added)
-    memberUpdateResult.removed.push(...resolvedMembers.resolution.removed)
     memberUpdateResult.failed.push(...resolvedMembers.resolution.failed)
     for (const member of resolvedMembers.resolvedMembers) {
-      if (member.userId === creatorId) continue
-      const existingRole = memberRoleByUserId[member.userId]
-      if (
-        !existingRole ||
-        organizationMemberRolePriority(member.role) > organizationMemberRolePriority(existingRole)
-      ) {
-        memberRoleByUserId[member.userId] = member.role
+      const userId = normalizeTextInput(member?.userId, { maxLength: 80 })
+      const email =
+        normalizeEmail(member?.email) || (isUuid(userId) ? userId : 'unknown')
+      const role = canChangeRoles
+        ? normalizeOrganizationMemberRole(member?.role)
+        : ORGANIZATION_MEMBER_ROLE_INTERNAL
+      if (!isUuid(userId)) {
+        memberUpdateResult.failed.push({
+          action: 'add',
+          email,
+          error: 'invalid_user_id',
+          message: 'User id must be a valid UUID.',
+        })
+        continue
       }
+      if (userId === creatorId) {
+        memberUpdateResult.failed.push({
+          action: 'add',
+          email,
+          userId,
+          error: 'cannot_add_creator',
+          message: 'Organization creator is added automatically and cannot be invited as a member.',
+        })
+        continue
+      }
+      const existingRole = memberRoleByUserId[userId]
+      if (existingRole) {
+        const currentRole = normalizeOrganizationMemberRole(existingRole)
+        if (organizationMemberRolePriority(role) > organizationMemberRolePriority(currentRole)) {
+          memberRoleByUserId[userId] = role
+          memberUpdateResult.added.push({
+            action: 'add',
+            email,
+            userId,
+            message: `User role updated to ${role}.`,
+          })
+        } else {
+          memberUpdateResult.failed.push({
+            action: 'add',
+            email,
+            userId,
+            error: 'user_already_member',
+            message: 'User is already a member of this organization.',
+          })
+        }
+        continue
+      }
+      memberRoleByUserId[userId] = role
+      memberUpdateResult.added.push({
+        action: 'add',
+        email,
+        userId,
+        message: `User added to organization members as ${role}.`,
+      })
     }
   }
 
@@ -6766,6 +7035,16 @@ app.post('/api/organizations/:organizationId/members', async (req, res) => {
       })
       continue
     }
+    if (userId === viewer.userId) {
+      memberUpdateResult.failed.push({
+        action: 'remove',
+        email,
+        userId,
+        error: 'cannot_remove_self',
+        message: 'You cannot remove yourself from organization members.',
+      })
+      continue
+    }
     if (!memberRoleByUserId[userId]) {
       memberUpdateResult.failed.push({
         action: 'remove',
@@ -6784,7 +7063,11 @@ app.post('/api/organizations/:organizationId/members', async (req, res) => {
     })
   }
 
-  const lookupUserIds = uniqueValues([...removeUserIds, ...roleUpdates.map((entry) => entry.userId)])
+  const lookupUserIds = uniqueValues([
+    ...removeUserIds,
+    ...roleUpdates.map((entry) => entry.userId),
+    ...campaignAccessUpdateInputs.validUpdates.map((entry) => entry.userId),
+  ])
   const usersLookup = lookupUserIds.length
     ? await fetchUsersRowsByIds(lookupUserIds)
     : { ok: true, rows: [] }
@@ -6805,6 +7088,16 @@ app.post('/api/organizations/:organizationId/members', async (req, res) => {
         userId,
         error: 'cannot_remove_creator',
         message: 'Organization creator cannot be removed.',
+      })
+      continue
+    }
+    if (userId === viewer.userId) {
+      memberUpdateResult.failed.push({
+        action: 'remove',
+        email: displayEmail,
+        userId,
+        error: 'cannot_remove_self',
+        message: 'You cannot remove yourself from organization members.',
       })
       continue
     }
@@ -6831,6 +7124,15 @@ app.post('/api/organizations/:organizationId/members', async (req, res) => {
     const userId = update.userId
     const role = normalizeOrganizationMemberRole(update.role)
     const label = userLabelById.get(userId) || userId
+    if (userId === viewer.userId) {
+      memberUpdateResult.failed.push({
+        email: label,
+        userId,
+        error: 'cannot_change_own_role',
+        message: 'You cannot change your own organization role.',
+      })
+      continue
+    }
     if (userId === creatorId) {
       memberUpdateResult.failed.push({
         email: label,
@@ -6894,6 +7196,157 @@ app.post('/api/organizations/:organizationId/members', async (req, res) => {
       status: usersResult.status,
       details: usersResult.payload,
     })
+  }
+
+  const organizationCampaignIdSet = new Set(normalizeUuidArray(updatedOrganizationRow?.campaigns))
+  const campaignAccessUpdatesByCampaignId = new Map()
+  for (const update of campaignAccessUpdateInputs.validUpdates) {
+    const campaignId = normalizeTextInput(update?.campaignId, { maxLength: 80 })
+    const userId = normalizeTextInput(update?.userId, { maxLength: 80 })
+    if (!isUuid(campaignId) || !isUuid(userId)) continue
+    if (!organizationCampaignIdSet.has(campaignId)) {
+      const label = userLabelById.get(userId) || userId
+      memberUpdateResult.failed.push({
+        email: label,
+        userId,
+        error: 'campaign_not_in_organization',
+        message: `Campaign ${campaignId} is not assigned to this organization.`,
+      })
+      continue
+    }
+    const existing = campaignAccessUpdatesByCampaignId.get(campaignId) ?? []
+    existing.push({ userId, hasAccess: Boolean(update?.hasAccess) })
+    campaignAccessUpdatesByCampaignId.set(campaignId, existing)
+  }
+
+  for (const [campaignId, updates] of campaignAccessUpdatesByCampaignId.entries()) {
+    const campaignResult = await fetchCampaignRowById(campaignId)
+    if (!campaignResult.ok || !campaignResult.row) {
+      const failedStatus = campaignResult.status || 500
+      for (const update of updates) {
+        const label = userLabelById.get(update.userId) || update.userId
+        memberUpdateResult.failed.push({
+          email: label,
+          userId: update.userId,
+          error: 'campaign_lookup_failed',
+          message: `Unable to load campaign ${campaignId} (status ${failedStatus}).`,
+        })
+      }
+      continue
+    }
+
+    const campaignRow = campaignResult.row
+    if (!canUserManageCampaignMembers(campaignRow, viewer.userId, viewer.organizationAdminIds)) {
+      for (const update of updates) {
+        const label = userLabelById.get(update.userId) || update.userId
+        memberUpdateResult.failed.push({
+          email: label,
+          userId: update.userId,
+          error: 'campaign_access_forbidden',
+          message: 'Only campaign admins can update campaign access.',
+        })
+      }
+      continue
+    }
+
+    const campaignCreatorId = normalizeTextInput(campaignRow?.creator, { maxLength: 80 })
+    const campaignName =
+      normalizeTextInput(campaignRow?.campaign_name, { maxLength: 140 }) || campaignId
+    const nextCampaignMemberRoles = normalizeCampaignMemberRoles(
+      campaignRow?.allowed_members,
+      campaignCreatorId,
+    )
+
+    let hasCampaignAccessChange = false
+    for (const update of updates) {
+      const userId = update.userId
+      const label = userLabelById.get(userId) || userId
+      if (!isUuid(userId)) {
+        memberUpdateResult.failed.push({
+          email: label,
+          userId,
+          error: 'invalid_user_id',
+          message: 'User id must be a valid UUID.',
+        })
+        continue
+      }
+      if (!update.hasAccess && userId === viewer.userId) {
+        memberUpdateResult.failed.push({
+          email: label,
+          userId,
+          error: 'cannot_remove_self',
+          message: `You cannot remove your own campaign access for ${campaignName}.`,
+        })
+        continue
+      }
+
+      if (userId === campaignCreatorId && !update.hasAccess) {
+        memberUpdateResult.failed.push({
+          email: label,
+          userId,
+          error: 'cannot_remove_creator',
+          message: `Campaign creator access cannot be removed for ${campaignName}.`,
+        })
+        continue
+      }
+
+      if (update.hasAccess) {
+        const organizationRole = normalizeOrganizationMemberRole(nextMemberRoles[userId])
+        if (!organizationRole && userId !== campaignCreatorId) {
+          memberUpdateResult.failed.push({
+            email: label,
+            userId,
+            error: 'not_member',
+            message: 'User is not currently a member of this organization.',
+          })
+          continue
+        }
+        if (!nextCampaignMemberRoles[userId]) {
+          const campaignRole = organizationRole === ORGANIZATION_MEMBER_ROLE_BRAND_VIEWER
+            ? CAMPAIGN_MEMBER_ROLE_BRAND_VIEWER
+            : CAMPAIGN_MEMBER_ROLE_INTERNAL
+          nextCampaignMemberRoles[userId] = campaignRole
+          hasCampaignAccessChange = true
+          memberUpdateResult.added.push({
+            action: 'add',
+            email: label,
+            userId,
+            message: `Campaign access granted for ${campaignName}.`,
+          })
+        }
+        continue
+      }
+
+      if (nextCampaignMemberRoles[userId]) {
+        delete nextCampaignMemberRoles[userId]
+        hasCampaignAccessChange = true
+        memberUpdateResult.removed.push({
+          action: 'remove',
+          email: label,
+          userId,
+          message: `Campaign access removed for ${campaignName}.`,
+        })
+      }
+    }
+
+    if (!hasCampaignAccessChange) continue
+
+    const campaignAccessUpdateResult = await updateCampaignAllowedMembers(
+      campaignId,
+      nextCampaignMemberRoles,
+      campaignCreatorId,
+    )
+    if (!campaignAccessUpdateResult.ok) {
+      for (const update of updates) {
+        const label = userLabelById.get(update.userId) || update.userId
+        memberUpdateResult.failed.push({
+          email: label,
+          userId: update.userId,
+          error: 'campaign_access_update_failed',
+          message: `Unable to save campaign access for ${campaignName}.`,
+        })
+      }
+    }
   }
 
   const campaignNameById = await resolveCampaignNameByIdForOrganizations([updatedOrganizationRow])
@@ -14582,10 +15035,10 @@ app.post('/api/instagram/refresh', async (req, res) => {
     })
     return
   }
-  if (!canRoleConnectAccounts(viewerResult.viewer.appRole)) {
+  if (!canViewerRefreshConnectedAccountData(viewerResult.viewer)) {
     res.status(403).json({
       error: 'forbidden',
-      message: 'Only admins can refresh Instagram data.',
+      message: 'Only organization internal/admin members can refresh Instagram data.',
     })
     return
   }
@@ -14636,10 +15089,10 @@ app.get('/api/instagram/refresh/:jobId', async (req, res) => {
     })
     return
   }
-  if (!canRoleConnectAccounts(viewerResult.viewer.appRole)) {
+  if (!canViewerRefreshConnectedAccountData(viewerResult.viewer)) {
     res.status(403).json({
       error: 'forbidden',
-      message: 'Only admins can check Instagram refresh jobs.',
+      message: 'Only organization internal/admin members can check Instagram refresh jobs.',
     })
     return
   }
@@ -14816,10 +15269,10 @@ app.post('/api/x/refresh', async (req, res) => {
     })
     return
   }
-  if (!canRoleConnectAccounts(viewerResult.viewer.appRole)) {
+  if (!canViewerRefreshConnectedAccountData(viewerResult.viewer)) {
     res.status(403).json({
       error: 'forbidden',
-      message: 'Only admins can refresh X data.',
+      message: 'Only organization internal/admin members can refresh X data.',
     })
     return
   }
@@ -15336,10 +15789,10 @@ app.post('/api/youtube/refresh', async (req, res) => {
     })
     return
   }
-  if (!canRoleConnectAccounts(viewerResult.viewer.appRole)) {
+  if (!canViewerRefreshConnectedAccountData(viewerResult.viewer)) {
     res.status(403).json({
       error: 'forbidden',
-      message: 'Only admins can refresh YouTube data.',
+      message: 'Only organization internal/admin members can refresh YouTube data.',
     })
     return
   }
@@ -15376,10 +15829,10 @@ app.get('/api/youtube/refresh/:jobId', async (req, res) => {
     })
     return
   }
-  if (!canRoleConnectAccounts(viewerResult.viewer.appRole)) {
+  if (!canViewerRefreshConnectedAccountData(viewerResult.viewer)) {
     res.status(403).json({
       error: 'forbidden',
-      message: 'Only admins can check YouTube refresh jobs.',
+      message: 'Only organization internal/admin members can check YouTube refresh jobs.',
     })
     return
   }

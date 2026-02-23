@@ -25,6 +25,7 @@ import {
   type MemberResolutionItem,
   type MemberResolutionSummary,
   type OrganizationApiItem,
+  type OrganizationCampaignAccessUpdateInput,
   type OrganizationConnectedAccount,
   type OrganizationMember,
   type OrganizationMemberRole,
@@ -172,6 +173,8 @@ const resolveViewerOrganizationRole = (
 
 const canManageOrganizationMembersByRole = (viewerRole: OrganizationViewerRole) =>
   viewerRole === 'admin'
+const canViewOrganizationMembersByRole = (viewerRole: OrganizationViewerRole) =>
+  viewerRole === 'admin' || viewerRole === 'internal'
 
 const canEditOrganizationByRole = (viewerRole: OrganizationViewerRole) =>
   viewerRole === 'admin' || viewerRole === 'internal'
@@ -187,6 +190,8 @@ const canManageOrganizationConnectionsByRole = (viewerRole: OrganizationViewerRo
 
 const formatConnectedAccountLabel = (account: OrganizationConnectedAccount) =>
   `${sanitizeTextInput(account.accountName, { maxLength: 180 }) || 'Unknown account'} [${account.platform}]`
+
+const buildMemberCampaignAccessKey = (memberId: string, campaignId: string) => `${memberId}:${campaignId}`
 
 const MemberFeedback = ({
   title,
@@ -279,6 +284,8 @@ export const Organizations = ({ role }: OrganizationsProps) => {
   const [manageSubmitting, setManageSubmitting] = useState(false)
   const [removeUserIdSubmitting, setRemoveUserIdSubmitting] = useState('')
   const [memberRoleEdits, setMemberRoleEdits] = useState<Record<string, OrganizationMemberRole>>({})
+  const [campaignAccessBaseline, setCampaignAccessBaseline] = useState<Record<string, boolean>>({})
+  const [campaignAccessEdits, setCampaignAccessEdits] = useState<Record<string, boolean>>({})
   const [editOrg, setEditOrg] = useState<OrganizationApiItem | null>(null)
   const [editName, setEditName] = useState('')
   const [editCampaignIds, setEditCampaignIds] = useState<string[]>([])
@@ -296,6 +303,13 @@ export const Organizations = ({ role }: OrganizationsProps) => {
 
   const canCreateOrganizations = role === 'admin'
   const normalizedViewerId = useMemo(() => sanitizeTokenInput(viewerUserId, 80), [viewerUserId])
+  const campaignById = useMemo(
+    () =>
+      new Map<string, CampaignApiItem>(
+        campaigns.map((campaign) => [campaign.id, campaign]),
+      ),
+    [campaigns],
+  )
 
   useEffect(() => {
     let cancelled = false
@@ -388,6 +402,8 @@ export const Organizations = ({ role }: OrganizationsProps) => {
   )
   const canManageMembersForManageOrg = canManageOrganizationMembersByRole(manageViewerRole)
   const canChangeMemberRolesForManageOrg = canChangeOrganizationMemberRolesByRole(manageViewerRole)
+  const canChangeCampaignAccessForManageOrg = canChangeMemberRolesForManageOrg
+  const isManageMemberMutationInFlight = manageSubmitting || Boolean(removeUserIdSubmitting)
   const editViewerRole = useMemo(
     () => (editOrg ? resolveViewerOrganizationRole(editOrg, viewerUserId) : ''),
     [editOrg, viewerUserId],
@@ -398,6 +414,43 @@ export const Organizations = ({ role }: OrganizationsProps) => {
     [connectionsOrg, viewerUserId],
   )
   const canManageConnectionsForConnectionsOrg = canManageOrganizationConnectionsByRole(connectionsViewerRole)
+
+  const buildCampaignAccessSnapshotForOrganization = (organization: OrganizationApiItem) => {
+    const snapshot: Record<string, boolean> = {}
+    const members = resolveOrganizationMembers(organization)
+    organization.campaigns.forEach((campaignId) => {
+      const campaign = campaignById.get(campaignId)
+      if (!campaign) return
+      members.forEach((member) => {
+        const key = buildMemberCampaignAccessKey(member.id, campaignId)
+        snapshot[key] =
+          campaign.creator === member.id ||
+          Boolean(campaign.allowedMemberRoles?.[member.id])
+      })
+    })
+    return snapshot
+  }
+
+  const resolveMemberCampaignAccessValue = (memberId: string, campaignId: string) => {
+    const key = buildMemberCampaignAccessKey(memberId, campaignId)
+    if (Object.prototype.hasOwnProperty.call(campaignAccessEdits, key)) {
+      return Boolean(campaignAccessEdits[key])
+    }
+    return Boolean(campaignAccessBaseline[key])
+  }
+
+  const toggleMemberCampaignAccessEdit = (memberId: string, campaignId: string, nextHasAccess: boolean) => {
+    const key = buildMemberCampaignAccessKey(memberId, campaignId)
+    setCampaignAccessEdits((previous) => {
+      const baselineValue = Boolean(campaignAccessBaseline[key])
+      if (nextHasAccess === baselineValue) {
+        const remaining = { ...previous }
+        delete remaining[key]
+        return remaining
+      }
+      return { ...previous, [key]: nextHasAccess }
+    })
+  }
 
   const toggleCampaign = (campaignId: string) => {
     setSelectedCampaignIds((previous) =>
@@ -544,7 +597,7 @@ export const Organizations = ({ role }: OrganizationsProps) => {
 
   const openManageModal = (organization: OrganizationApiItem) => {
     const viewerOrganizationRole = resolveViewerOrganizationRole(organization, viewerUserId)
-    if (!canManageOrganizationMembersByRole(viewerOrganizationRole)) return
+    if (!canViewOrganizationMembersByRole(viewerOrganizationRole)) return
     setManageOrg(organization)
     setManageMemberInputs([createEmptyMemberInput()])
     setManageError(null)
@@ -552,6 +605,8 @@ export const Organizations = ({ role }: OrganizationsProps) => {
     setManageFeedback(null)
     setRemoveUserIdSubmitting('')
     setMemberRoleEdits({})
+    setCampaignAccessBaseline(buildCampaignAccessSnapshotForOrganization(organization))
+    setCampaignAccessEdits({})
   }
 
   const closeManageModal = () => {
@@ -563,6 +618,8 @@ export const Organizations = ({ role }: OrganizationsProps) => {
     setManageFeedback(null)
     setRemoveUserIdSubmitting('')
     setMemberRoleEdits({})
+    setCampaignAccessBaseline({})
+    setCampaignAccessEdits({})
   }
 
   const applyOrganizationUpdate = (organization: OrganizationApiItem) => {
@@ -572,6 +629,7 @@ export const Organizations = ({ role }: OrganizationsProps) => {
     setDeleteOrg((previous) => (previous && previous.id === organization.id ? organization : previous))
     setConnectionsOrg((previous) => (previous && previous.id === organization.id ? organization : previous))
     setMemberRoleEdits({})
+    setCampaignAccessEdits({})
   }
 
   const openConnectionsModal = (organization: OrganizationApiItem) => {
@@ -670,11 +728,28 @@ export const Organizations = ({ role }: OrganizationsProps) => {
           [],
         )
       : []
+    const campaignAccessUpdates = canChangeCampaignAccessForManageOrg
+      ? Object.entries(campaignAccessEdits).reduce<OrganizationCampaignAccessUpdateInput[]>(
+          (updates, [compositeKey, hasAccess]) => {
+            const [userId = '', campaignId = ''] = compositeKey.split(':')
+            const normalizedUserId = sanitizeTokenInput(userId, 80)
+            const normalizedCampaignId = sanitizeTokenInput(campaignId, 80)
+            if (!normalizedUserId || !normalizedCampaignId) return updates
+            updates.push({
+              userId: normalizedUserId,
+              campaignId: normalizedCampaignId,
+              hasAccess: Boolean(hasAccess),
+            })
+            return updates
+          },
+          [],
+        )
+      : []
 
-    if (!addMembers.length && !roleUpdates.length) {
+    if (!addMembers.length && !roleUpdates.length && !campaignAccessUpdates.length) {
       setManageError(
         canChangeMemberRolesForManageOrg
-          ? 'Enter at least one valid email to add or update at least one member role.'
+          ? 'Enter at least one valid email, update a member role, or change campaign access.'
           : 'Enter at least one valid email to add.',
       )
       return
@@ -685,10 +760,25 @@ export const Organizations = ({ role }: OrganizationsProps) => {
       const result = await updateOrganizationMembers(manageOrg.id, {
         addMembers: addMembers.length ? addMembers : undefined,
         roleUpdates: roleUpdates.length ? roleUpdates : undefined,
+        campaignAccessUpdates: campaignAccessUpdates.length ? campaignAccessUpdates : undefined,
       })
       applyOrganizationUpdate(result.organization)
+      try {
+        const refreshedCampaigns = await fetchCampaigns()
+        setCampaigns(refreshedCampaigns.campaigns)
+      } catch {
+        // Keep previous campaign cache if refresh fails.
+      }
+      setCampaignAccessBaseline(buildCampaignAccessSnapshotForOrganization(result.organization))
+      setCampaignAccessEdits({})
       setManageMemberInputs([createEmptyMemberInput()])
-      setManageSuccess(roleUpdates.length ? 'Members and roles updated.' : 'Members updated.')
+      setManageSuccess(
+        campaignAccessUpdates.length
+          ? 'Members and campaign access updated.'
+          : roleUpdates.length
+            ? 'Members and roles updated.'
+            : 'Members updated.',
+      )
       setManageFeedback(result.updateResult)
     } catch (err) {
       setManageError(err instanceof Error ? err.message : 'Unable to update organization members.')
@@ -713,6 +803,8 @@ export const Organizations = ({ role }: OrganizationsProps) => {
     try {
       const result = await updateOrganizationMembers(manageOrg.id, { removeUserIds: [member.id] })
       applyOrganizationUpdate(result.organization)
+      setCampaignAccessBaseline(buildCampaignAccessSnapshotForOrganization(result.organization))
+      setCampaignAccessEdits({})
       setManageSuccess('Member removed.')
       setManageFeedback(result.updateResult)
     } catch (err) {
@@ -943,16 +1035,27 @@ export const Organizations = ({ role }: OrganizationsProps) => {
                 type="button"
                 className="ghost-button"
                 onClick={() => setCreateMemberInputs((previous) => [...previous, createEmptyMemberInput()])}
+                disabled={isSubmitting}
+                style={{ cursor: isSubmitting ? 'not-allowed' : 'pointer' }}
               >
                 Add member email
               </button>
-              <label className="ghost-button" style={{ display: 'inline-flex', alignItems: 'center', cursor: 'pointer' }}>
+              <label
+                className="ghost-button"
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  cursor: isSubmitting ? 'not-allowed' : 'pointer',
+                  opacity: isSubmitting ? 0.6 : 1,
+                }}
+              >
                 Import CSV emails
                 <input
                   type="file"
                   accept=".csv,text/csv"
                   style={{ display: 'none' }}
                   onChange={(event) => void handleCreateCsvImport(event)}
+                  disabled={isSubmitting}
                 />
               </label>
             </div>
@@ -1010,7 +1113,7 @@ export const Organizations = ({ role }: OrganizationsProps) => {
             const viewerOrganizationRole = resolveViewerOrganizationRole(organization, viewerUserId)
             const canEditOrganization = canEditOrganizationByRole(viewerOrganizationRole)
             const canDeleteOrganization = canDeleteOrganizationByRole(viewerOrganizationRole)
-            const canManageOrganizationMembers = canManageOrganizationMembersByRole(viewerOrganizationRole)
+            const canViewOrganizationMembers = canViewOrganizationMembersByRole(viewerOrganizationRole)
             const canEditOrganizationName = canEditOrganizationNameByRole(viewerOrganizationRole)
             const canManageOrganizationConnections = canManageOrganizationConnectionsByRole(viewerOrganizationRole)
             const connectedAccountLabels = organization.connectedAccounts.map((account) =>
@@ -1128,7 +1231,7 @@ export const Organizations = ({ role }: OrganizationsProps) => {
                   </div>
                 </div>
 
-                {canEditOrganization || canManageOrganizationMembers || canManageOrganizationConnections ? (
+                {canEditOrganization || canViewOrganizationMembers || canManageOrganizationConnections ? (
                   <div className="modal-actions" style={{ marginTop: '14px' }}>
                     {canEditOrganization ? (
                       <button
@@ -1139,13 +1242,13 @@ export const Organizations = ({ role }: OrganizationsProps) => {
                         {canEditOrganizationName ? 'Edit Organization' : 'Manage Campaigns'}
                       </button>
                     ) : null}
-                    {canManageOrganizationMembers ? (
+                    {canViewOrganizationMembers ? (
                       <button
                         type="button"
                         className="ghost-button"
                         onClick={() => openManageModal(organization)}
                       >
-                        Manage members
+                        View Members
                       </button>
                     ) : null}
                     {canManageOrganizationConnections ? (
@@ -1258,133 +1361,205 @@ export const Organizations = ({ role }: OrganizationsProps) => {
       {manageOrg ? (
         <div className="modal-backdrop" role="presentation" onClick={closeManageModal}>
           <div className="modal-card" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
-            <div className="section-title">Manage organization members</div>
+            <div className="section-title">Organization members</div>
             <div className="section-subtitle">{manageOrg.name}</div>
+            {!canChangeCampaignAccessForManageOrg ? (
+              <div className="section-subtitle" style={{ marginTop: '6px' }}>
+                Read-only access. Only organization admins can edit member roles and campaign access.
+              </div>
+            ) : null}
 
             <div style={{ marginTop: '12px' }}>
               <div className="section-subtitle">Current members</div>
               <div className="grid" style={{ marginTop: '8px', gap: '8px' }}>
                 {sortOrganizationMembers(manageOrg, resolveOrganizationMembers(manageOrg)).map((member) => {
                   const isViewer = Boolean(normalizedViewerId && member.id === normalizedViewerId)
+                  const organizationCampaignIds = manageOrg.campaigns
+                  const isCreatorMember = member.id === manageOrg.creator
+                  const isSelfMember = Boolean(normalizedViewerId && member.id === normalizedViewerId)
+                  const disableRoleSelect =
+                    manageSubmitting || !canChangeMemberRolesForManageOrg || isSelfMember
+                  const disableRemoveMember =
+                    !canManageMembersForManageOrg || manageSubmitting || isCreatorMember || isSelfMember
                   return (
                   <div
                     key={member.id}
-                    className={`split member-row ${isViewer ? 'self' : ''}`}
-                    style={{ fontSize: '13px' }}
+                    className={`member-row ${isViewer ? 'self' : ''}`}
+                    style={{ fontSize: '13px', display: 'grid', gap: '8px' }}
                   >
-                    <div style={{ display: 'flex', flexDirection: 'column' }}>
-                      <span>{member.email || member.id}</span>
-                    </div>
-                    <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-                      {isViewer ? <span className="pill self-tag">You</span> : null}
-                      {member.id === manageOrg.creator ? (
-                        <span className="pill">Creator</span>
-                      ) : (
-                        <select
-                          className="select"
-                          value={memberRoleEdits[member.id] ?? normalizeMemberRole(member.role)}
-                          onChange={(event) => {
-                            if (!canChangeMemberRolesForManageOrg) {
-                              setManageError('Only organization admin members can change member roles.')
-                              return
-                            }
-                            updateMemberRoleEdit(
-                              member.id,
-                              normalizeMemberRole(member.role),
-                              event.target.value,
-                            )
-                          }}
-                          disabled={manageSubmitting}
-                          aria-label={`Organization member role for ${member.email || member.id}`}
-                          style={{ minWidth: roleSelectMinWidth }}
+                    <div className="split">
+                      <div style={{ display: 'flex', flexDirection: 'column' }}>
+                        <span>{member.email || member.id}</span>
+                      </div>
+                      <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                        {isViewer ? <span className="pill self-tag">You</span> : null}
+                        {isCreatorMember ? (
+                          <span className="pill">Creator</span>
+                        ) : (
+                          <select
+                            className="select"
+                            value={memberRoleEdits[member.id] ?? normalizeMemberRole(member.role)}
+                            onChange={(event) => {
+                              if (!canChangeMemberRolesForManageOrg) {
+                                setManageError('Only organization admin members can change member roles.')
+                                return
+                              }
+                              updateMemberRoleEdit(
+                                member.id,
+                                normalizeMemberRole(member.role),
+                                event.target.value,
+                              )
+                            }}
+                            disabled={disableRoleSelect}
+                            aria-label={`Organization member role for ${member.email || member.id}`}
+                            style={{ minWidth: roleSelectMinWidth, cursor: disableRoleSelect ? 'not-allowed' : 'pointer' }}
+                          >
+                            {memberRoleOptions.map((option) => (
+                              <option key={option} value={option}>
+                                {formatMemberRoleLabel(option)}
+                              </option>
+                            ))}
+                          </select>
+                        )}
+                        <button
+                          type="button"
+                          className="ghost-button"
+                          onClick={() => void handleRemoveMember(member)}
+                          disabled={disableRemoveMember}
+                          style={{ cursor: disableRemoveMember ? 'not-allowed' : 'pointer' }}
                         >
-                          {memberRoleOptions.map((option) => (
-                            <option key={option} value={option}>
-                              {formatMemberRoleLabel(option)}
-                            </option>
-                          ))}
-                        </select>
-                      )}
-                      <button
-                        type="button"
-                        className="ghost-button"
-                        onClick={() => void handleRemoveMember(member)}
-                        disabled={!canManageMembersForManageOrg || manageSubmitting || member.id === manageOrg.creator}
-                      >
-                        {removeUserIdSubmitting === member.id ? 'Removing...' : 'Remove'}
-                      </button>
+                          {removeUserIdSubmitting === member.id ? 'Removing...' : 'Remove'}
+                        </button>
+                      </div>
                     </div>
+
+                    {organizationCampaignIds.length ? (
+                      <div>
+                        <div className="section-subtitle">Campaign access</div>
+                        <div className="check-row" style={{ marginTop: '8px' }}>
+                          {organizationCampaignIds.map((campaignId) => {
+                            const campaign = campaignById.get(campaignId)
+                            const campaignLabel =
+                              campaignLabelById.get(campaignId)
+                              || sanitizeTextInput(campaign?.campaignName, { maxLength: 140 })
+                              || campaignId
+                            const isCampaignCreator = Boolean(campaign && campaign.creator === member.id)
+                            const currentHasAccess = resolveMemberCampaignAccessValue(member.id, campaignId)
+                            const disableCampaignAccessToggle =
+                              manageSubmitting
+                              || !canChangeCampaignAccessForManageOrg
+                              || isCampaignCreator
+                              || (isSelfMember && currentHasAccess)
+                            return (
+                              <label
+                                key={`${member.id}-${campaignId}`}
+                                className="check-pill"
+                                style={{ cursor: disableCampaignAccessToggle ? 'not-allowed' : 'pointer' }}
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={currentHasAccess}
+                                  disabled={disableCampaignAccessToggle}
+                                  onChange={(event) =>
+                                    toggleMemberCampaignAccessEdit(
+                                      member.id,
+                                      campaignId,
+                                      event.target.checked,
+                                    )}
+                                  style={{ cursor: disableCampaignAccessToggle ? 'not-allowed' : 'pointer' }}
+                                />
+                                <span>{campaignLabel}</span>
+                              </label>
+                            )
+                          })}
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="muted">No campaigns are assigned to this organization.</div>
+                    )}
                   </div>
                 )})}
               </div>
             </div>
 
-            <div style={{ marginTop: '16px' }}>
-              <div className="section-subtitle">Add members by email</div>
-              <div className="grid" style={{ marginTop: '8px' }}>
-                {manageMemberInputs.map((entry) => (
-                  <div key={entry.rowId} className="split">
-                    <input
-                      className="input"
-                      type="email"
-                      value={entry.email}
-                      onChange={(event) =>
-                        updateMemberInput(setManageMemberInputs, entry.rowId, 'email', event.target.value)}
-                      placeholder="name@company.com"
-                      autoComplete="off"
-                    />
-                    <select
-                      className="select"
-                      value={entry.role}
-                      onChange={(event) => {
-                        if (!canChangeMemberRolesForManageOrg) {
-                          setManageError('Only organization admin members can change member roles.')
-                          return
-                        }
-                        updateMemberInput(setManageMemberInputs, entry.rowId, 'role', event.target.value)
-                      }}
-                      disabled={manageSubmitting}
-                      style={{ minWidth: roleSelectMinWidth }}
-                    >
-                      {memberRoleOptions.map((option) => (
-                        <option key={option} value={option}>
-                          {formatMemberRoleLabel(option)}
-                        </option>
-                      ))}
-                    </select>
-                    <button
-                      type="button"
-                      className="ghost-button"
-                      onClick={() => removeMemberInput(setManageMemberInputs, entry.rowId)}
-                      disabled={manageMemberInputs.length <= 1}
-                    >
-                      Remove
-                    </button>
-                  </div>
-                ))}
-              </div>
+            {canManageMembersForManageOrg ? (
+              <div style={{ marginTop: '16px' }}>
+                <div className="section-subtitle">Add members by email</div>
+                <div className="grid" style={{ marginTop: '8px' }}>
+                  {manageMemberInputs.map((entry) => (
+                    <div key={entry.rowId} className="split">
+                      <input
+                        className="input"
+                        type="email"
+                        value={entry.email}
+                        onChange={(event) =>
+                          updateMemberInput(setManageMemberInputs, entry.rowId, 'email', event.target.value)}
+                        placeholder="name@company.com"
+                        autoComplete="off"
+                        disabled={isManageMemberMutationInFlight}
+                      />
+                      <select
+                        className="select"
+                        value={entry.role}
+                        onChange={(event) => {
+                          if (!canChangeMemberRolesForManageOrg) {
+                            setManageError('Only organization admin members can change member roles.')
+                            return
+                          }
+                          updateMemberInput(setManageMemberInputs, entry.rowId, 'role', event.target.value)
+                        }}
+                        disabled={isManageMemberMutationInFlight}
+                        style={{ minWidth: roleSelectMinWidth }}
+                      >
+                        {memberRoleOptions.map((option) => (
+                          <option key={option} value={option}>
+                            {formatMemberRoleLabel(option)}
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        type="button"
+                        className="ghost-button"
+                        onClick={() => removeMemberInput(setManageMemberInputs, entry.rowId)}
+                        disabled={manageMemberInputs.length <= 1 || isManageMemberMutationInFlight}
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  ))}
+                </div>
 
-              <div className="filter-bar" style={{ marginTop: '10px' }}>
-                <button
-                  type="button"
-                  className="ghost-button"
-                  onClick={() => setManageMemberInputs((previous) => [...previous, createEmptyMemberInput()])}
-                  disabled={manageSubmitting}
-                >
-                  Add row
-                </button>
-                <label className="ghost-button" style={{ display: 'inline-flex', alignItems: 'center', cursor: 'pointer' }}>
-                  Import CSV emails
-                  <input
-                    type="file"
-                    accept=".csv,text/csv"
-                    style={{ display: 'none' }}
-                    onChange={(event) => void handleManageCsvImport(event)}
-                    disabled={manageSubmitting}
-                  />
-                </label>
+                <div className="filter-bar" style={{ marginTop: '10px' }}>
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    onClick={() => setManageMemberInputs((previous) => [...previous, createEmptyMemberInput()])}
+                    disabled={isManageMemberMutationInFlight}
+                    style={{ cursor: isManageMemberMutationInFlight ? 'not-allowed' : 'pointer' }}
+                  >
+                    Add row
+                  </button>
+                  <label
+                    className="ghost-button"
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      cursor: isManageMemberMutationInFlight ? 'not-allowed' : 'pointer',
+                      opacity: isManageMemberMutationInFlight ? 0.6 : 1,
+                    }}
+                  >
+                    Import CSV emails
+                    <input
+                      type="file"
+                      accept=".csv,text/csv"
+                      style={{ display: 'none' }}
+                      onChange={(event) => void handleManageCsvImport(event)}
+                      disabled={isManageMemberMutationInFlight}
+                    />
+                  </label>
+                </div>
               </div>
-            </div>
+            ) : null}
 
             {manageError ? (
               <div className="section-subtitle" style={{ color: 'var(--danger)', marginTop: '12px' }}>
@@ -1404,9 +1579,11 @@ export const Organizations = ({ role }: OrganizationsProps) => {
               <button type="button" className="ghost-button" onClick={closeManageModal} disabled={manageSubmitting}>
                 Close
               </button>
-              <button type="button" className="primary-button" onClick={() => void handleAddMembers()} disabled={manageSubmitting}>
-                {manageSubmitting ? 'Saving...' : canChangeMemberRolesForManageOrg ? 'Save member changes' : 'Add members'}
-              </button>
+              {canManageMembersForManageOrg ? (
+                <button type="button" className="primary-button" onClick={() => void handleAddMembers()} disabled={manageSubmitting}>
+                  {manageSubmitting ? 'Saving...' : 'Save member changes'}
+                </button>
+              ) : null}
             </div>
           </div>
         </div>
