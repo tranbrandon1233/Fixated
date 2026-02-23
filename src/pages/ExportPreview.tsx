@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { resolveAuthBaseUrl } from '../utils/baseUrl'
+import { getExportPreviewFallback } from '../utils/exportPreviewFallback'
 import { sanitizeTextInput, sanitizeTokenInput } from '../utils/sanitize'
 
 type PreviewType = 'pdf' | 'csv'
@@ -14,6 +15,7 @@ export const ExportPreview = () => {
   const fileName = sanitizeTextInput(searchParams.get('fileName'), { maxLength: 180 })
   const [csvContent, setCsvContent] = useState('')
   const [pdfObjectUrl, setPdfObjectUrl] = useState('')
+  const [downloadUrl, setDownloadUrl] = useState('')
   const [errorMessage, setErrorMessage] = useState('')
   const [loadedId, setLoadedId] = useState('')
   const authBaseUrl = resolveAuthBaseUrl()
@@ -28,6 +30,21 @@ export const ExportPreview = () => {
 
     let cancelled = false
     let nextPdfObjectUrl = ''
+    let nextFallbackDownloadUrl = ''
+
+    const decodeBase64ToBlob = (dataBase64: string, type: PreviewType) => {
+      try {
+        const binary = window.atob(dataBase64)
+        const bytes = new Uint8Array(binary.length)
+        for (let index = 0; index < binary.length; index += 1) {
+          bytes[index] = binary.charCodeAt(index)
+        }
+        const contentType = type === 'pdf' ? 'application/pdf' : 'text/csv; charset=utf-8'
+        return new Blob([bytes], { type: contentType })
+      } catch {
+        return null
+      }
+    }
 
     const loadPreview = async () => {
       try {
@@ -36,12 +53,40 @@ export const ExportPreview = () => {
           cache: 'no-store',
         })
         if (!response.ok) {
+          const fallback = getExportPreviewFallback(previewId)
+          if (fallback && fallback.type === previewType) {
+            const fallbackBlob = decodeBase64ToBlob(fallback.dataBase64, previewType)
+            if (fallbackBlob) {
+              nextFallbackDownloadUrl = URL.createObjectURL(fallbackBlob)
+              if (previewType === 'pdf') {
+                nextPdfObjectUrl = nextFallbackDownloadUrl
+                if (!cancelled) {
+                  setPdfObjectUrl(nextPdfObjectUrl)
+                  setCsvContent('')
+                  setDownloadUrl(nextFallbackDownloadUrl)
+                  setErrorMessage('')
+                  setLoadedId(previewId)
+                }
+                return
+              }
+              const fallbackText = await fallbackBlob.text()
+              if (!cancelled) {
+                setCsvContent(fallbackText)
+                setPdfObjectUrl('')
+                setDownloadUrl(nextFallbackDownloadUrl)
+                setErrorMessage('')
+                setLoadedId(previewId)
+              }
+              return
+            }
+          }
           const payload = await response.json().catch(() => null)
           const message =
             payload && typeof payload === 'object' && typeof (payload as { message?: unknown }).message === 'string'
               ? (payload as { message: string }).message
               : 'Export preview not found or expired.'
           if (!cancelled) {
+            setDownloadUrl('')
             setErrorMessage(message)
             setLoadedId(previewId)
           }
@@ -54,6 +99,7 @@ export const ExportPreview = () => {
           if (!cancelled) {
             setPdfObjectUrl(nextPdfObjectUrl)
             setCsvContent('')
+            setDownloadUrl(fileUrl)
             setErrorMessage('')
             setLoadedId(previewId)
           }
@@ -64,11 +110,13 @@ export const ExportPreview = () => {
         if (!cancelled) {
           setCsvContent(text)
           setPdfObjectUrl('')
+          setDownloadUrl(fileUrl)
           setErrorMessage('')
           setLoadedId(previewId)
         }
       } catch {
         if (!cancelled) {
+          setDownloadUrl('')
           setErrorMessage('Unable to load export preview.')
           setLoadedId(previewId)
         }
@@ -80,6 +128,9 @@ export const ExportPreview = () => {
     return () => {
       cancelled = true
       if (nextPdfObjectUrl) URL.revokeObjectURL(nextPdfObjectUrl)
+      if (nextFallbackDownloadUrl && nextFallbackDownloadUrl !== nextPdfObjectUrl) {
+        URL.revokeObjectURL(nextFallbackDownloadUrl)
+      }
     }
   }, [fileUrl, previewId, previewType])
 
@@ -115,7 +166,7 @@ export const ExportPreview = () => {
           <div className="section-title">Export preview</div>
           <div className="section-subtitle">{resolvedFileName}</div>
         </div>
-        <a className="primary-button" href={fileUrl} download={resolvedFileName}>
+        <a className="primary-button" href={downloadUrl || fileUrl} download={resolvedFileName}>
           Download file
         </a>
       </div>

@@ -6,6 +6,7 @@ import type { Role } from '../types/dashboard'
 import { resolveAuthBaseUrl } from '../utils/baseUrl'
 import { fetchCampaigns } from '../utils/campaigns'
 import { createCsvContent, downloadCsv, toFileSlug } from '../utils/csv'
+import { cacheExportPreviewFallback } from '../utils/exportPreviewFallback'
 import { formatNumber } from '../utils/format'
 import {
   mapCampaignForReport,
@@ -259,6 +260,11 @@ export const ReportBuilder = ({ role }: ReportBuilderProps) => {
       if (!previewId) {
         throw new Error('Unable to create export preview.')
       }
+      cacheExportPreviewFallback(previewId, {
+        type,
+        fileName,
+        dataBase64,
+      })
       const previewUrl = `${window.location.origin}/exports/preview?id=${encodeURIComponent(previewId)}&type=${encodeURIComponent(type)}&fileName=${encodeURIComponent(fileName)}`
       try {
         previewWindow.location.href = previewUrl
