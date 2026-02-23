@@ -383,8 +383,11 @@ const REFRESH_WINDOW_DURATION_MS = 24 * 60 * 60 * 1000
 const EXPORT_PREVIEW_TTL_MS = 30 * 60 * 1000
 const EXPORT_PREVIEW_MAX_ENTRIES = 64
 const EXPORT_PREVIEW_MAX_BASE64_SIZE = 20 * 1024 * 1024
+const EXPORT_PREVIEW_STORAGE_BUCKET = 'export-previews'
+const EXPORT_PREVIEW_STORAGE_PREFIX = 'previews'
 const MAX_INPUT_LIST_SIZE = 500
 const exportPreviewStore = new Map()
+let exportPreviewStorageBucketReady = false
 const ORGANIZATION_CONNECTION_PLATFORM_YOUTUBE = 'YouTube'
 const ORGANIZATION_CONNECTION_PLATFORM_INSTAGRAM = 'Instagram'
 const ORGANIZATION_CONNECTION_PLATFORM_X = 'X'
@@ -2334,9 +2337,8 @@ app.post('/api/exports/preview', async (req, res) => {
     return
   }
 
-  pruneExpiredExportPreviews()
   const id = crypto.randomUUID()
-  exportPreviewStore.set(id, {
+  const entry = {
     id,
     userId: viewer.userId,
     campaignId,
@@ -2345,9 +2347,16 @@ app.post('/api/exports/preview', async (req, res) => {
     fileName,
     contentType: type === 'pdf' ? 'application/pdf' : 'text/csv; charset=utf-8',
     dataBase64,
-    createdAt: Date.now(),
-  })
-  pruneExpiredExportPreviews()
+    createdAtMs: Date.now(),
+  }
+  const persistResult = await persistExportPreviewEntry(entry)
+  if (!persistResult.ok) {
+    res.status(persistResult.status || 500).json({
+      error: 'export_preview_create_failed',
+      message: 'Unable to store export preview.',
+    })
+    return
+  }
 
   res.status(201).json({
     id,
@@ -2367,9 +2376,23 @@ app.get('/api/exports/preview/:previewId', async (req, res) => {
     return
   }
 
-  pruneExpiredExportPreviews()
   const previewId = normalizeTextInput(req.params?.previewId, { maxLength: 80 })
-  const entry = previewId ? exportPreviewStore.get(previewId) : null
+  const previewResult = await resolveExportPreviewEntry(previewId)
+  if (!previewResult.ok) {
+    if (previewResult.notFound) {
+      res.status(404).json({
+        error: 'export_preview_not_found',
+        message: 'Export preview not found or expired.',
+      })
+      return
+    }
+    res.status(previewResult.status || 503).json({
+      error: 'export_preview_unavailable',
+      message: 'Unable to load export preview right now.',
+    })
+    return
+  }
+  const entry = previewResult.entry
   if (!entry) {
     res.status(404).json({
       error: 'export_preview_not_found',
@@ -2417,7 +2440,7 @@ app.get('/api/exports/preview/:previewId', async (req, res) => {
 
   const payloadBuffer = Buffer.from(entry.dataBase64, 'base64')
   if (!payloadBuffer.length) {
-    exportPreviewStore.delete(entry.id)
+    await removeExportPreviewEntry(entry.id)
     res.status(404).json({
       error: 'export_preview_not_found',
       message: 'Export preview not found or expired.',
@@ -2709,16 +2732,287 @@ const normalizeExportPreviewType = (value) => {
   return ''
 }
 
+const normalizeExportPreviewEntry = (value) => {
+  if (!value || typeof value !== 'object') return null
+  const id = normalizeTextInput(value.id, { maxLength: 80 })
+  const userId = normalizeTextInput(value.userId, { maxLength: 80 })
+  const campaignId = normalizeTextInput(value.campaignId, { maxLength: 80 })
+  const type = normalizeExportPreviewType(value.type)
+  const fallbackFileName = type === 'pdf' ? 'report.pdf' : 'report.csv'
+  const fileName = sanitizeFileName(value.fileName, fallbackFileName)
+  const dataBase64 = typeof value.dataBase64 === 'string' ? value.dataBase64.trim() : ''
+  const createdAtMsCandidate =
+    Number.isFinite(Number(value.createdAtMs))
+      ? Number(value.createdAtMs)
+      : Number.parseInt(String(Date.parse(String(value.createdAt || ''))), 10)
+  const createdAtMs = Number.isFinite(createdAtMsCandidate) ? Math.max(0, createdAtMsCandidate) : 0
+  const campaignIds = uniqueValues([campaignId, ...normalizeUuidArray(value.campaignIds)])
+  if (!isUuid(id) || !isUuid(userId) || !isUuid(campaignId) || !type || !dataBase64 || !createdAtMs) {
+    return null
+  }
+  if (dataBase64.length > EXPORT_PREVIEW_MAX_BASE64_SIZE) return null
+  return {
+    id,
+    userId,
+    campaignId,
+    campaignIds,
+    type,
+    fileName,
+    contentType: type === 'pdf' ? 'application/pdf' : 'text/csv; charset=utf-8',
+    dataBase64,
+    createdAtMs,
+  }
+}
+
+const isExportPreviewExpired = (entry, nowMs = Date.now()) =>
+  nowMs - Number(entry?.createdAtMs || entry?.createdAt || 0) > EXPORT_PREVIEW_TTL_MS
+
+const buildExportPreviewStorageObjectPath = (previewId) => {
+  const normalizedPreviewId = normalizeTextInput(previewId, { maxLength: 80 })
+  if (!isUuid(normalizedPreviewId)) return ''
+  return `${EXPORT_PREVIEW_STORAGE_PREFIX}/${normalizedPreviewId}.json`
+}
+
+const buildSupabaseStorageObjectUrl = (bucketName, objectPath) => {
+  const encodedBucket = encodeURIComponent(bucketName)
+  const encodedObjectPath = String(objectPath || '')
+    .split('/')
+    .map((segment) => encodeURIComponent(segment))
+    .join('/')
+  return `${supabaseUrl}/storage/v1/object/${encodedBucket}/${encodedObjectPath}`
+}
+
+const createSupabaseServiceHeaders = (extraHeaders = {}) => ({
+  apikey: supabaseSecretKey,
+  Authorization: `Bearer ${supabaseSecretKey}`,
+  ...extraHeaders,
+})
+
+const isMissingExportPreviewBucketError = (status, payload) => {
+  const message = normalizeTextInput(payload?.message, { maxLength: 240 }).toLowerCase()
+  const error = normalizeTextInput(payload?.error, { maxLength: 240 }).toLowerCase()
+  return status === 404 || (
+    (message.includes('bucket') && message.includes('not found'))
+    || (error.includes('bucket') && error.includes('not found'))
+  )
+}
+
+const isDuplicateBucketError = (payload) => {
+  const message = normalizeTextInput(payload?.message, { maxLength: 240 }).toLowerCase()
+  const error = normalizeTextInput(payload?.error, { maxLength: 240 }).toLowerCase()
+  const code = normalizeTextInput(payload?.code, { maxLength: 80 }).toLowerCase()
+  return code === '23505' || message.includes('already exists') || error.includes('duplicate')
+}
+
+const ensureExportPreviewStorageBucket = async () => {
+  if (!isSupabaseConfigured) {
+    return { ok: false, status: 500, payload: null }
+  }
+  if (exportPreviewStorageBucketReady) {
+    return { ok: true, status: 200, payload: null }
+  }
+  try {
+    const response = await fetch(`${supabaseUrl}/storage/v1/bucket`, {
+      method: 'POST',
+      headers: createSupabaseServiceHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({
+        id: EXPORT_PREVIEW_STORAGE_BUCKET,
+        name: EXPORT_PREVIEW_STORAGE_BUCKET,
+        public: false,
+      }),
+    })
+    const payload = await response.json().catch(() => null)
+    if (response.ok || isDuplicateBucketError(payload)) {
+      exportPreviewStorageBucketReady = true
+      return { ok: true, status: response.status, payload }
+    }
+    return { ok: false, status: response.status, payload }
+  } catch (_err) {
+    return { ok: false, status: 500, payload: null }
+  }
+}
+
+const writeExportPreviewToSupabaseStorage = async (entry) => {
+  if (!isSupabaseConfigured) {
+    return { ok: false, status: 500, payload: null }
+  }
+  const normalizedEntry = normalizeExportPreviewEntry(entry)
+  if (!normalizedEntry) {
+    return { ok: false, status: 400, payload: null }
+  }
+  const objectPath = buildExportPreviewStorageObjectPath(normalizedEntry.id)
+  if (!objectPath) {
+    return { ok: false, status: 400, payload: null }
+  }
+  const body = JSON.stringify(normalizedEntry)
+  const upload = async () => {
+    const response = await fetch(buildSupabaseStorageObjectUrl(EXPORT_PREVIEW_STORAGE_BUCKET, objectPath), {
+      method: 'POST',
+      headers: createSupabaseServiceHeaders({
+        'Content-Type': 'application/json',
+        'x-upsert': 'true',
+      }),
+      body,
+    })
+    const payload = await response.json().catch(() => null)
+    return { ok: response.ok, status: response.status, payload }
+  }
+
+  const firstAttempt = await upload()
+  if (firstAttempt.ok) return firstAttempt
+  if (!isMissingExportPreviewBucketError(firstAttempt.status, firstAttempt.payload)) {
+    return firstAttempt
+  }
+  const ensureResult = await ensureExportPreviewStorageBucket()
+  if (!ensureResult.ok) return ensureResult
+  exportPreviewStorageBucketReady = true
+  return upload()
+}
+
+const deleteExportPreviewFromSupabaseStorage = async (previewId) => {
+  if (!isSupabaseConfigured) return
+  const objectPath = buildExportPreviewStorageObjectPath(previewId)
+  if (!objectPath) return
+  try {
+    await fetch(buildSupabaseStorageObjectUrl(EXPORT_PREVIEW_STORAGE_BUCKET, objectPath), {
+      method: 'DELETE',
+      headers: createSupabaseServiceHeaders(),
+    })
+  } catch (_err) {
+    // Ignore cleanup failures for expired previews.
+  }
+}
+
+const readExportPreviewFromSupabaseStorage = async (previewId) => {
+  if (!isSupabaseConfigured) {
+    return { ok: false, status: 500, payload: null, notFound: true, entry: null }
+  }
+  const objectPath = buildExportPreviewStorageObjectPath(previewId)
+  if (!objectPath) {
+    return { ok: false, status: 404, payload: null, notFound: true, entry: null }
+  }
+  try {
+    const response = await fetch(buildSupabaseStorageObjectUrl(EXPORT_PREVIEW_STORAGE_BUCKET, objectPath), {
+      method: 'GET',
+      headers: createSupabaseServiceHeaders(),
+    })
+    if (response.status === 404) {
+      return { ok: false, status: 404, payload: null, notFound: true, entry: null }
+    }
+    if (!response.ok) {
+      const payload = await response.json().catch(() => null)
+      return { ok: false, status: response.status, payload, notFound: false, entry: null }
+    }
+    const payload = await response.json().catch(() => null)
+    const entry = normalizeExportPreviewEntry(payload)
+    if (!entry || isExportPreviewExpired(entry)) {
+      await deleteExportPreviewFromSupabaseStorage(previewId)
+      return { ok: false, status: 404, payload: null, notFound: true, entry: null }
+    }
+    return { ok: true, status: 200, payload: null, notFound: false, entry }
+  } catch (_err) {
+    return { ok: false, status: 500, payload: null, notFound: false, entry: null }
+  }
+}
+
+const writeExportPreviewToInMemoryStore = (entry) => {
+  const normalizedEntry = normalizeExportPreviewEntry(entry)
+  if (!normalizedEntry) {
+    return { ok: false, status: 400 }
+  }
+  pruneExpiredExportPreviews()
+  exportPreviewStore.set(normalizedEntry.id, {
+    ...normalizedEntry,
+    createdAt: normalizedEntry.createdAtMs,
+  })
+  pruneExpiredExportPreviews()
+  return { ok: true, status: 200 }
+}
+
+const readExportPreviewFromInMemoryStore = (previewId) => {
+  const normalizedPreviewId = normalizeTextInput(previewId, { maxLength: 80 })
+  if (!isUuid(normalizedPreviewId)) return null
+  pruneExpiredExportPreviews()
+  const rawEntry = exportPreviewStore.get(normalizedPreviewId)
+  if (!rawEntry) return null
+  const normalizedEntry = normalizeExportPreviewEntry({
+    ...rawEntry,
+    createdAtMs: rawEntry.createdAtMs ?? rawEntry.createdAt,
+  })
+  if (!normalizedEntry || isExportPreviewExpired(normalizedEntry)) {
+    exportPreviewStore.delete(normalizedPreviewId)
+    return null
+  }
+  return normalizedEntry
+}
+
+const persistExportPreviewEntry = async (entry) => {
+  if (isSupabaseConfigured) {
+    const result = await writeExportPreviewToSupabaseStorage(entry)
+    if (!result.ok) {
+      console.error('Failed to persist export preview in Supabase Storage:', {
+        status: result.status,
+        payload: result.payload,
+      })
+      return { ok: false, status: result.status || 500 }
+    }
+    return { ok: true, status: 201 }
+  }
+  return writeExportPreviewToInMemoryStore(entry)
+}
+
+const resolveExportPreviewEntry = async (previewId) => {
+  const normalizedPreviewId = normalizeTextInput(previewId, { maxLength: 80 })
+  if (!isUuid(normalizedPreviewId)) {
+    return { ok: false, status: 404, notFound: true, entry: null }
+  }
+
+  let supabaseFailureStatus = 0
+  if (isSupabaseConfigured) {
+    const supabaseResult = await readExportPreviewFromSupabaseStorage(normalizedPreviewId)
+    if (supabaseResult.ok && supabaseResult.entry) {
+      return { ok: true, status: 200, notFound: false, entry: supabaseResult.entry }
+    }
+    if (!supabaseResult.notFound) {
+      supabaseFailureStatus = supabaseResult.status || 503
+    }
+  }
+
+  const inMemoryEntry = readExportPreviewFromInMemoryStore(normalizedPreviewId)
+  if (inMemoryEntry) {
+    return { ok: true, status: 200, notFound: false, entry: inMemoryEntry }
+  }
+
+  if (supabaseFailureStatus) {
+    return { ok: false, status: supabaseFailureStatus, notFound: false, entry: null }
+  }
+  return { ok: false, status: 404, notFound: true, entry: null }
+}
+
+const removeExportPreviewEntry = async (previewId) => {
+  const normalizedPreviewId = normalizeTextInput(previewId, { maxLength: 80 })
+  if (!isUuid(normalizedPreviewId)) return
+  exportPreviewStore.delete(normalizedPreviewId)
+  if (isSupabaseConfigured) {
+    await deleteExportPreviewFromSupabaseStorage(normalizedPreviewId)
+  }
+}
+
 const pruneExpiredExportPreviews = () => {
   const now = Date.now()
   for (const [id, entry] of exportPreviewStore.entries()) {
-    if (!entry || now - entry.createdAt > EXPORT_PREVIEW_TTL_MS) {
+    const createdAtMs = Number(entry?.createdAtMs || entry?.createdAt || 0)
+    if (!entry || !createdAtMs || now - createdAtMs > EXPORT_PREVIEW_TTL_MS) {
       exportPreviewStore.delete(id)
     }
   }
 
   if (exportPreviewStore.size <= EXPORT_PREVIEW_MAX_ENTRIES) return
-  const ordered = [...exportPreviewStore.values()].sort((left, right) => left.createdAt - right.createdAt)
+  const ordered = [...exportPreviewStore.values()].sort(
+    (left, right) =>
+      Number(left?.createdAtMs || left?.createdAt || 0)
+      - Number(right?.createdAtMs || right?.createdAt || 0),
+  )
   const overflow = exportPreviewStore.size - EXPORT_PREVIEW_MAX_ENTRIES
   for (let index = 0; index < overflow; index += 1) {
     const entry = ordered[index]
