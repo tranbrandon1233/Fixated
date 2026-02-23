@@ -1526,7 +1526,7 @@ export const Campaigns = ({ role }: CampaignsProps) => {
           <div className="modal-card">
             <div className="section-title">Campaign members</div>
             <div className="section-subtitle">{manageCampaign.name}</div>
-            {!canManageMembersForManageCampaign ? (
+            {!isManageViewerAdmin ? (
               <div className="section-subtitle">Read-only access. Only campaign admins can edit members.</div>
             ) : null}
 
