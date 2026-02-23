@@ -308,7 +308,10 @@ export const fetchAndCacheYouTubeSummary = async (options?: { force?: boolean })
       existing.topPosts.some((post) => Number(post?.views) > 0)
       && existing.channels.every((channel) => Number(channel?.views) <= 0)
       && existing.timeSeries.every((point) => Number(point?.views) <= 0)
-    const needsLiveRecovery = looksInconsistent || !hasMeaningfulSummaryMetrics(existing)
+    const hasZeroPostSeriesWithPosts =
+      existing.topPosts.length > 0
+      && existing.timeSeries.every((point) => Number(point?.posts) <= 0)
+    const needsLiveRecovery = looksInconsistent || hasZeroPostSeriesWithPosts || !hasMeaningfulSummaryMetrics(existing)
 
     if (isSummaryCacheFresh()) {
       if (!needsLiveRecovery && existing.channels.length > 0) {

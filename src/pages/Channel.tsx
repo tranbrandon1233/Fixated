@@ -51,6 +51,12 @@ export const Channel = () => {
       return true
     })
   }, [channel, summary.topPosts])
+  const resolvedTopGeos = useMemo(() => {
+    if (!channel) return summary.topGeos
+    const byChannel = summary.topGeosByChannel?.[channel.id]
+    if (Array.isArray(byChannel) && byChannel.length) return byChannel
+    return []
+  }, [channel, summary.topGeos, summary.topGeosByChannel])
   const channelCount = summary.channels.length
   const portfolioViewsAverage =
     channelCount > 0
@@ -60,7 +66,7 @@ export const Channel = () => {
     channelCount > 0
       ? summary.channels.reduce((total, item) => total + item.engagementRate, 0) / channelCount
       : 0
-  const normalizedSeries = useMemo(() => {
+  const normalizedPortfolioSeries = useMemo(() => {
     return summary.timeSeries
       .map((point) => ({
         ...point,
@@ -69,6 +75,31 @@ export const Channel = () => {
       }))
       .filter((point) => point.isoDate)
   }, [summary.timeSeries, today])
+  const normalizedSeriesByChannel = useMemo(() => {
+    return summary.timeSeriesByChannel
+      .map((point) => ({
+        ...point,
+        isoDate: normalizeSummaryIsoDate(point.date, today),
+        label: point.date,
+      }))
+      .filter((point) => point.isoDate)
+  }, [summary.timeSeriesByChannel, today])
+  const activeSeries = useMemo(() => {
+    if (!channel) return normalizedPortfolioSeries
+    const scopedSeries = normalizedSeriesByChannel
+      .filter((point) => point.channelId === channel.id)
+      .map((point) => ({
+        date: point.date,
+        views: point.views,
+        engagements: point.engagements,
+        posts: point.posts,
+        watchTimeHours: point.watchTimeHours,
+        followersNetChange: point.followersNetChange,
+        isoDate: point.isoDate,
+        label: point.label,
+      }))
+    return scopedSeries.length ? scopedSeries : normalizedPortfolioSeries
+  }, [channel, normalizedPortfolioSeries, normalizedSeriesByChannel])
   const selectedChannelFirstVideoDate = useMemo(
     () => normalizeSummaryIsoDate(channel?.firstVideoUploadDate, today),
     [channel?.firstVideoUploadDate, today],
@@ -78,7 +109,7 @@ export const Channel = () => {
     [summary.firstVideoUploadDate, today],
   )
   const dateBounds = useMemo(() => {
-    const orderedDates = normalizedSeries.map((record) => record.isoDate).sort((a, b) => a.localeCompare(b))
+    const orderedDates = activeSeries.map((record) => record.isoDate).sort((a, b) => a.localeCompare(b))
     const nonFutureDates = orderedDates.filter((value) => value <= today)
     const earliestSeriesDate = nonFutureDates.length ? nonFutureDates[0] : ''
     const firstUploadDate = selectedChannelFirstVideoDate || fallbackFirstVideoUploadDate
@@ -88,7 +119,7 @@ export const Channel = () => {
       min: minDate,
       max: today,
     }
-  }, [fallbackFirstVideoUploadDate, normalizedSeries, selectedChannelFirstVideoDate, today])
+  }, [activeSeries, fallbackFirstVideoUploadDate, selectedChannelFirstVideoDate, today])
   const hasDateBounds = Boolean(dateBounds.min && dateBounds.max)
   const boundedStartDate = useMemo(() => {
     if (!dateBounds.min) return startDate
@@ -104,11 +135,11 @@ export const Channel = () => {
     boundedStartDate <= boundedEndDate ? boundedStartDate : boundedEndDate
   const effectiveEndDate = boundedStartDate <= boundedEndDate ? boundedEndDate : boundedStartDate
   const filteredSeries = useMemo(() => {
-    if (!hasDateBounds) return normalizedSeries
-    return normalizedSeries.filter(
+    if (!hasDateBounds) return activeSeries
+    return activeSeries.filter(
       (point) => point.isoDate >= effectiveStartDate && point.isoDate <= effectiveEndDate,
     )
-  }, [effectiveEndDate, effectiveStartDate, hasDateBounds, normalizedSeries])
+  }, [activeSeries, effectiveEndDate, effectiveStartDate, hasDateBounds])
   const viewsSeries = useMemo(() => {
     if (!hasDateBounds || !effectiveStartDate || !effectiveEndDate) {
       return filteredSeries.map((point) => ({ label: point.label, value: point.views }))
@@ -130,13 +161,13 @@ export const Channel = () => {
 
     return series
   }, [effectiveEndDate, effectiveStartDate, filteredSeries, hasDateBounds])
-  const isLiveViews = summary.timeSeries.length > 0
+  const isLiveViews = activeSeries.length > 0
   const hasChannel = Boolean(channel)
   const hasPosts = resolvedPosts.length > 0
-  const hasTimeSeries = summary.timeSeries.length > 0
+  const hasTimeSeries = viewsSeries.length > 0
   const hasAgeDistribution = summary.ageDistribution.length > 0
   const hasGenderDistribution = summary.genderDistribution.length > 0
-  const hasTopGeos = summary.topGeos.length > 0
+  const hasTopGeos = resolvedTopGeos.length > 0
   const pieColors = [
     'var(--primary)',
     '#FC46AA',
@@ -175,7 +206,7 @@ export const Channel = () => {
   return (
     <>
       <SectionHeader
-        title={hasChannel ? `${channel?.name ?? 'YouTube Channel'} (${channel?.platform ?? 'YouTube'})` : 'YouTube Channel'}
+        title={hasChannel ? `${channel?.name ?? 'Channel'} (${channel?.platform ?? 'YouTube'})` : 'Channel'}
         subtitle="Per-channel drilldown with audience insights."
         actions={(
           <div className="filter-bar">
@@ -443,14 +474,14 @@ export const Channel = () => {
                     }}
                   />
                   <Pie
-                    data={summary.topGeos}
+                    data={resolvedTopGeos}
                     dataKey="value"
                     nameKey="label"
                     innerRadius={45}
                     outerRadius={80}
                     paddingAngle={2}
                   >
-                    {summary.topGeos.map((entry, index) => (
+                    {resolvedTopGeos.map((entry, index) => (
                       <Cell key={entry.label} fill={pieColors[index % pieColors.length]} />
                     ))}
                   </Pie>

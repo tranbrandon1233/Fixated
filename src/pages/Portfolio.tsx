@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   Area,
   AreaChart,
@@ -12,15 +12,17 @@ import { MetricCard } from '../components/ui/MetricCard'
 import { SectionHeader } from '../components/ui/SectionHeader'
 import { useYouTubeSummary } from '../hooks/useYouTubeSummary'
 import type { KPI, Platform } from '../types/dashboard'
+import { fetchCampaigns } from '../utils/campaigns'
 import { normalizeSummaryIsoDate, todayIsoDate } from '../utils/date'
 import { formatNumber, formatPercent, formatThousands } from '../utils/format'
-import { sanitizeDateInput } from '../utils/sanitize'
+import { sanitizeDateInput, sanitizeTextInput, sanitizeTokenInput } from '../utils/sanitize'
 
 type PortfolioRange = 'daily' | 'weekly' | 'monthly'
 
 interface PortfolioRecord {
   date: string
   platform: Platform
+  channelId: string
   channel: string
   campaign: string
   views: number
@@ -42,6 +44,13 @@ interface ChannelRollup {
   platform: Platform
   views: number
   engagementRate: number
+}
+
+interface CampaignFilterOption {
+  id: string
+  label: string
+  channelIds: string[]
+  postIds: string[]
 }
 
 const formatDate = (isoDate: string) => {
@@ -101,7 +110,16 @@ const aggregateSeries = (records: PortfolioRecord[], range: PortfolioRange): Agg
 
 const inferPlatformFromChannelId = (channelId: string): Platform => {
   if (channelId.toLowerCase().startsWith('instagram:')) return 'Instagram'
+  if (channelId.toLowerCase().startsWith('x:')) return 'X'
   return 'YouTube'
+}
+
+const earliestDateFrom = (values: string[], maxDate = '') => {
+  const ordered = values
+    .filter((value) => Boolean(value))
+    .filter((value) => !maxDate || value <= maxDate)
+    .sort((left, right) => left.localeCompare(right))
+  return ordered[0] || ''
 }
 
 export const Portfolio = () => {
@@ -109,11 +127,54 @@ export const Portfolio = () => {
   const [range, setRange] = useState<PortfolioRange>('daily')
   const [selectedPlatform, setSelectedPlatform] = useState('All')
   const [selectedChannel, setSelectedChannel] = useState('All')
-  const [selectedCampaign, setSelectedCampaign] = useState('All')
+  const [selectedCampaignId, setSelectedCampaignId] = useState('all')
   const [startDate, setStartDate] = useState('')
   const [endDate, setEndDate] = useState('')
+  const [campaignFilterOptions, setCampaignFilterOptions] = useState<CampaignFilterOption[]>([])
   const isLoading = status === 'loading'
   const today = useMemo(() => todayIsoDate(), [])
+
+  useEffect(() => {
+    let cancelled = false
+    const loadCampaignFilterOptions = async () => {
+      try {
+        const payload = await fetchCampaigns()
+        if (cancelled) return
+        const options = payload.campaigns
+          .map((campaign) => {
+            const id = sanitizeTokenInput(campaign.id, 80)
+            const label = sanitizeTextInput(campaign.campaignName, { maxLength: 140 })
+            if (!id || !label) return null
+            const channelIds = [
+              ...new Set(
+                (Array.isArray(campaign.posts) ? campaign.posts : [])
+                  .map((group) => sanitizeTokenInput(group?.channelId, 300))
+                  .filter((value) => Boolean(value)),
+              ),
+            ]
+            const postIds = [
+              ...new Set(
+                (Array.isArray(campaign.selectedPostIds) ? campaign.selectedPostIds : [])
+                  .map((value) => sanitizeTokenInput(value, 300))
+                  .filter((value) => Boolean(value)),
+              ),
+            ]
+            return { id, label, channelIds, postIds }
+          })
+          .filter((entry): entry is CampaignFilterOption => Boolean(entry))
+          .sort((left, right) => left.label.localeCompare(right.label))
+        setCampaignFilterOptions(options)
+      } catch {
+        if (!cancelled) {
+          setCampaignFilterOptions([])
+        }
+      }
+    }
+    void loadCampaignFilterOptions()
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   const normalizedSeries = useMemo(() => {
     return summary.timeSeries
@@ -128,6 +189,20 @@ export const Portfolio = () => {
     () => normalizeSummaryIsoDate(summary.firstVideoUploadDate, today),
     [summary.firstVideoUploadDate, today],
   )
+  const earliestChannelUploadDate = useMemo(() => {
+    const sortedDates = summary.channels
+      .map((channel) => normalizeSummaryIsoDate(channel.firstVideoUploadDate || '', today))
+      .filter((value) => value)
+      .sort((left, right) => left.localeCompare(right))
+    return sortedDates[0] || ''
+  }, [summary.channels, today])
+  const earliestTopPostPublishedDate = useMemo(() => {
+    const sortedDates = summary.topPosts
+      .map((post) => normalizeSummaryIsoDate(post.publishedAt || '', today))
+      .filter((value) => value)
+      .sort((left, right) => left.localeCompare(right))
+    return sortedDates[0] || ''
+  }, [summary.topPosts, today])
 
   const portfolioRecords = useMemo<PortfolioRecord[]>(() => {
     const channelById = new Map(summary.channels.map((channel) => [channel.id, channel]))
@@ -141,6 +216,7 @@ export const Portfolio = () => {
           return {
             date: isoDate,
             platform,
+            channelId: point.channelId || channel?.id || '',
             channel: channel?.name || point.channelId || 'Unknown channel',
             campaign: `${platform} Portfolio`,
             views: Number(point.views || 0),
@@ -157,6 +233,7 @@ export const Portfolio = () => {
     return normalizedSeries.map((point) => ({
       date: point.isoDate,
       platform: 'YouTube',
+      channelId: '',
       channel: 'All Channels',
       campaign: 'Portfolio',
       views: Number(point.views || 0),
@@ -175,27 +252,112 @@ export const Portfolio = () => {
 
   const channelOptions = useMemo(() => {
     const channels = summary.channels.length
-      ? summary.channels.map((channel) => channel.name)
-      : portfolioRecords.map((record) => record.channel)
+      ? summary.channels
+        .filter((channel) => selectedPlatform === 'All' || channel.platform === selectedPlatform)
+        .map((channel) => channel.name)
+      : portfolioRecords
+        .filter((record) => selectedPlatform === 'All' || record.platform === selectedPlatform)
+        .map((record) => record.channel)
     return ['All', ...new Set(channels)]
-  }, [portfolioRecords, summary.channels])
+  }, [portfolioRecords, selectedPlatform, summary.channels])
+
+  useEffect(() => {
+    if (!channelOptions.includes(selectedChannel)) {
+      setSelectedChannel('All')
+    }
+  }, [channelOptions, selectedChannel])
 
   const campaignOptions = useMemo(
-    () => ['All', ...new Set(portfolioRecords.map((record) => record.campaign))],
-    [portfolioRecords],
+    () => [{ id: 'all', label: 'All' }, ...campaignFilterOptions.map((campaign) => ({
+      id: campaign.id,
+      label: campaign.label,
+    }))],
+    [campaignFilterOptions],
   )
 
+  useEffect(() => {
+    if (selectedCampaignId === 'all') return
+    if (!campaignFilterOptions.some((campaign) => campaign.id === selectedCampaignId)) {
+      setSelectedCampaignId('all')
+    }
+  }, [campaignFilterOptions, selectedCampaignId])
+
+  const selectedCampaign = useMemo(
+    () => campaignFilterOptions.find((campaign) => campaign.id === selectedCampaignId) ?? null,
+    [campaignFilterOptions, selectedCampaignId],
+  )
+  const selectedCampaignChannelIds = useMemo(
+    () => new Set((selectedCampaign?.channelIds ?? []).filter(Boolean)),
+    [selectedCampaign],
+  )
+  const selectedCampaignPostIds = useMemo(
+    () => new Set((selectedCampaign?.postIds ?? []).filter(Boolean)),
+    [selectedCampaign],
+  )
+
+  const earliestXPostDate = useMemo(
+    () => earliestDateFrom(
+      portfolioRecords
+        .filter((record) => record.platform === 'X')
+        .map((record) => record.date),
+      today,
+    ),
+    [portfolioRecords, today],
+  )
+  const earliestYouTubeVideoDate = useMemo(() => {
+    const channelFirstUploadDate = earliestDateFrom(
+      summary.channels
+        .filter((channel) => channel.platform === 'YouTube')
+        .map((channel) => normalizeSummaryIsoDate(channel.firstVideoUploadDate || '', today)),
+      today,
+    )
+    const topPostDate = earliestDateFrom(
+      summary.topPosts
+        .filter((post) => (post.platform || inferPlatformFromChannelId(post.channelId || '')) === 'YouTube')
+        .map((post) => normalizeSummaryIsoDate(post.publishedAt || '', today)),
+      today,
+    )
+    const seriesDate = earliestDateFrom(
+      portfolioRecords
+        .filter((record) => record.platform === 'YouTube')
+        .map((record) => record.date),
+      today,
+    )
+    return earliestDateFrom([channelFirstUploadDate, topPostDate, seriesDate], today)
+  }, [portfolioRecords, summary.channels, summary.topPosts, today])
+
   const dateBounds = useMemo(() => {
-    const orderedDates = portfolioRecords.map((record) => record.date).sort((a, b) => a.localeCompare(b))
-    const nonFutureDates = orderedDates.filter((value) => value <= today)
-    const earliestSeriesDate = nonFutureDates.length ? nonFutureDates[0] : ''
-    const minDate = firstVideoUploadDate || earliestSeriesDate
+    const scopedRecords = selectedPlatform === 'All'
+      ? portfolioRecords
+      : portfolioRecords.filter((record) => record.platform === selectedPlatform)
+    const earliestSeriesDate = earliestDateFrom(scopedRecords.map((record) => record.date), today)
+    const minDateCandidates = selectedPlatform === 'YouTube'
+      ? [earliestYouTubeVideoDate, earliestSeriesDate]
+      : selectedPlatform === 'X'
+        ? [earliestXPostDate, earliestSeriesDate]
+        : [
+          earliestChannelUploadDate,
+          firstVideoUploadDate,
+          earliestTopPostPublishedDate,
+          earliestXPostDate,
+          earliestSeriesDate,
+        ]
+    const minDate = earliestDateFrom(minDateCandidates, today)
     if (!minDate) return { min: '', max: today }
     return {
       min: minDate,
       max: today,
     }
-  }, [firstVideoUploadDate, portfolioRecords, today])
+  }, [
+    earliestChannelUploadDate,
+    earliestYouTubeVideoDate,
+    earliestXPostDate,
+    earliestTopPostPublishedDate,
+    firstVideoUploadDate,
+    portfolioRecords,
+    selectedPlatform,
+    today,
+  ])
 
   const hasDateBounds = Boolean(dateBounds.min && dateBounds.max)
   const boundedStartDate = useMemo(() => {
@@ -216,7 +378,9 @@ export const Portfolio = () => {
     const filtered = portfolioRecords.filter((record) => {
       const platformMatch = selectedPlatform === 'All' || record.platform === selectedPlatform
       const channelMatch = selectedChannel === 'All' || record.channel === selectedChannel
-      const campaignMatch = selectedCampaign === 'All' || record.campaign === selectedCampaign
+      const campaignMatch =
+        selectedCampaignId === 'all'
+        || (selectedCampaignChannelIds.size ? selectedCampaignChannelIds.has(record.channelId) : false)
       const dateMatch =
         !hasDateBounds || (record.date >= effectiveStartDate && record.date <= effectiveEndDate)
       return platformMatch && channelMatch && campaignMatch && dateMatch
@@ -228,7 +392,8 @@ export const Portfolio = () => {
     effectiveStartDate,
     hasDateBounds,
     range,
-    selectedCampaign,
+    selectedCampaignChannelIds,
+    selectedCampaignId,
     selectedChannel,
     selectedPlatform,
     portfolioRecords,
@@ -239,7 +404,9 @@ export const Portfolio = () => {
       portfolioRecords.filter((record) => {
         const platformMatch = selectedPlatform === 'All' || record.platform === selectedPlatform
         const channelMatch = selectedChannel === 'All' || record.channel === selectedChannel
-        const campaignMatch = selectedCampaign === 'All' || record.campaign === selectedCampaign
+        const campaignMatch =
+          selectedCampaignId === 'all'
+          || (selectedCampaignChannelIds.size ? selectedCampaignChannelIds.has(record.channelId) : false)
         const dateMatch =
           !hasDateBounds || (record.date >= effectiveStartDate && record.date <= effectiveEndDate)
         return platformMatch && channelMatch && campaignMatch && dateMatch
@@ -249,7 +416,8 @@ export const Portfolio = () => {
       effectiveStartDate,
       hasDateBounds,
       portfolioRecords,
-      selectedCampaign,
+      selectedCampaignChannelIds,
+      selectedCampaignId,
       selectedChannel,
       selectedPlatform,
     ],
@@ -288,7 +456,7 @@ export const Portfolio = () => {
   )
 
   const isAllChannelScope =
-    selectedPlatform === 'All' && selectedChannel === 'All' && selectedCampaign === 'All'
+    selectedPlatform === 'All' && selectedChannel === 'All' && selectedCampaignId === 'all'
 
   const totals = useMemo(() => {
     if (!isAllChannelScope) return filteredRecordTotals
@@ -296,13 +464,55 @@ export const Portfolio = () => {
       (sum, channel) => sum + Number(channel.views || 0),
       0,
     )
+    const youtubeVideoTotal = summary.channels.reduce(
+      (sum, channel) =>
+        channel.platform === 'YouTube' ? sum + Number(channel.videoCount || 0) : sum,
+      0,
+    )
     return {
       views: channelViewsTotal > 0 ? channelViewsTotal : summaryDateTotals.views,
       engagements: summaryDateTotals.engagements,
-      posts: summaryDateTotals.posts,
+      posts: youtubeVideoTotal > 0 ? youtubeVideoTotal : summaryDateTotals.posts,
       watchTimeHours: summaryDateTotals.watchTimeHours,
     }
   }, [filteredRecordTotals, isAllChannelScope, summary.channels, summaryDateTotals])
+
+  const fallbackPostCount = useMemo(() => {
+    const channelNameById = new Map(summary.channels.map((channel) => [channel.id, channel.name]))
+    return summary.topPosts.filter((post) => {
+      const platform = post.platform || inferPlatformFromChannelId(post.channelId || '')
+      const channelName = post.channelName || (post.channelId ? channelNameById.get(post.channelId) || '' : '')
+      const platformMatch = selectedPlatform === 'All' || platform === selectedPlatform
+      const channelMatch = selectedChannel === 'All' || channelName === selectedChannel
+      const normalizedPostId = sanitizeTokenInput(post.id, 300)
+      const campaignMatch = selectedCampaignId === 'all'
+        || (
+          selectedCampaignPostIds.size
+            ? selectedCampaignPostIds.has(normalizedPostId)
+            : post.channelId
+              ? selectedCampaignChannelIds.has(post.channelId)
+              : false
+        )
+      if (!platformMatch || !channelMatch || !campaignMatch) return false
+      if (!hasDateBounds) return true
+      const publishedDate = normalizeSummaryIsoDate(post.publishedAt || '', today)
+      if (!publishedDate) return true
+      return publishedDate >= effectiveStartDate && publishedDate <= effectiveEndDate
+    }).length
+  }, [
+    effectiveEndDate,
+    effectiveStartDate,
+    hasDateBounds,
+    selectedCampaignChannelIds,
+    selectedCampaignId,
+    selectedCampaignPostIds,
+    selectedChannel,
+    selectedPlatform,
+    summary.channels,
+    summary.topPosts,
+    today,
+  ])
+  const displayedPostsPublished = totals.posts > 0 ? totals.posts : fallbackPostCount
 
   const baselineTotals = useMemo(
     () => {
@@ -322,7 +532,7 @@ export const Portfolio = () => {
 
   const hasRecords = isAllChannelScope
     ? summary.channels.length > 0 || summaryDateTotals.posts > 0 || summaryDateTotals.watchTimeHours > 0
-    : filteredRecords.length > 0
+    : filteredRecords.length > 0 || fallbackPostCount > 0
   const hasViewsOverTimeData = series.some((point) => point.views > 0)
   const hasDeliveryLift = !isAllChannelScope && hasRecords && baselineTotals.views > 0
   const deliveryLift = baselineTotals.views
@@ -343,7 +553,7 @@ export const Portfolio = () => {
     },
     {
       label: 'Posts Published',
-      value: hasRecords ? formatThousands(totals.posts) : '—',
+      value: hasRecords ? formatThousands(displayedPostsPublished) : '—',
     },
     {
       label: 'Watch Time',
@@ -472,7 +682,7 @@ export const Portfolio = () => {
           {status === 'ready' && !summary.channels.length ? (
             <div className="card">
               <div className="section-subtitle">
-                No connected YouTube accounts yet. Connect a channel to populate the portfolio.
+                No connected accounts yet. Connect YouTube, Instagram, or X to populate the portfolio.
               </div>
             </div>
           ) : null}
@@ -631,12 +841,12 @@ export const Portfolio = () => {
                   <select
                     id="campaign-filter"
                     className="select"
-                    value={selectedCampaign}
-                    onChange={(event) => setSelectedCampaign(event.target.value)}
+                    value={selectedCampaignId}
+                    onChange={(event) => setSelectedCampaignId(event.target.value)}
                   >
                     {campaignOptions.map((option) => (
-                      <option key={option} value={option}>
-                        {option}
+                      <option key={option.id} value={option.id}>
+                        {option.label}
                       </option>
                     ))}
                   </select>
@@ -712,7 +922,7 @@ export const Portfolio = () => {
                   </div>
                   <div className="card compact">
                     <div className="kpi-label">Posts</div>
-                    <div className="kpi-value">{hasRecords ? formatThousands(totals.posts) : '—'}</div>
+                    <div className="kpi-value">{hasRecords ? formatThousands(displayedPostsPublished) : '—'}</div>
                   </div>
                   <div className="card compact">
                     <div className="kpi-label">Watch Time</div>

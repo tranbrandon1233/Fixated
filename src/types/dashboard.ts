@@ -30,6 +30,7 @@ export interface ChannelSummary {
   views: number
   engagementRate: number
   followers: number
+  videoCount?: number
   followersDelta30d?: number
   firstVideoUploadDate?: string
   status: string

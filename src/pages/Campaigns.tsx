@@ -52,6 +52,13 @@ interface CampaignChannelOption {
   label: string
 }
 
+interface CampaignChannelSelectionState extends CampaignChannelOption {
+  totalPosts: number
+  selectedPosts: number
+  checked: boolean
+  partial: boolean
+}
+
 interface CampaignsProps {
   role: Role
 }
@@ -476,6 +483,46 @@ export const Campaigns = ({ role }: CampaignsProps) => {
   const selectedPostIdSet = useMemo(
     () => new Set(selectedPostIdsDraft.map((entry) => normalizePostId(entry)).filter(Boolean)),
     [selectedPostIdsDraft],
+  )
+
+  const campaignChannelSelectableOptions = useMemo(
+    () => campaignChannelOptions.filter((option) => option.id !== 'all'),
+    [campaignChannelOptions],
+  )
+
+  const postIdsByChannelId = useMemo(() => {
+    const grouped = new Map<string, Set<string>>()
+    availablePosts.forEach((post) => {
+      const channelId = sanitizeTokenInput(post.channelId, 300)
+      const postId = normalizePostId(post.id)
+      if (!channelId || !postId) return
+      const existing = grouped.get(channelId) ?? new Set<string>()
+      existing.add(postId)
+      grouped.set(channelId, existing)
+    })
+    return new Map(
+      [...grouped.entries()].map(([channelId, postIds]) => [channelId, [...postIds.values()]]),
+    )
+  }, [availablePosts])
+
+  const campaignChannelSelections = useMemo<CampaignChannelSelectionState[]>(
+    () =>
+      campaignChannelSelectableOptions.map((option) => {
+        const postIds = postIdsByChannelId.get(option.id) ?? []
+        const selectedPosts = postIds.reduce(
+          (count, postId) => (selectedPostIdSet.has(postId) ? count + 1 : count),
+          0,
+        )
+        const totalPosts = postIds.length
+        return {
+          ...option,
+          totalPosts,
+          selectedPosts,
+          checked: totalPosts > 0 && selectedPosts === totalPosts,
+          partial: selectedPosts > 0 && selectedPosts < totalPosts,
+        }
+      }),
+    [campaignChannelSelectableOptions, postIdsByChannelId, selectedPostIdSet],
   )
 
   const availablePostIdSet = useMemo(
@@ -1054,6 +1101,23 @@ export const Campaigns = ({ role }: CampaignsProps) => {
     } finally {
       setManagePostsSubmitting(false)
     }
+  }
+
+  const toggleChannelPosts = (channelId: string, enabled: boolean) => {
+    const normalizedChannelId = sanitizeTokenInput(channelId, 300)
+    if (!normalizedChannelId) return
+    setSelectedPostIdsDraft((previous) => {
+      const next = new Set(previous.map((entry) => normalizePostId(entry)).filter(Boolean))
+      const channelPostIds = postIdsByChannelId.get(normalizedChannelId) ?? []
+      channelPostIds.forEach((postId) => {
+        if (enabled) {
+          next.add(postId)
+        } else {
+          next.delete(postId)
+        }
+      })
+      return [...next]
+    })
   }
 
   return (
@@ -1710,6 +1774,57 @@ export const Campaigns = ({ role }: CampaignsProps) => {
                 )}
               </div>
 
+              <div
+                style={{
+                  border: '1px solid var(--border)',
+                  borderRadius: '10px',
+                  padding: '8px 10px',
+                  fontSize: '13px',
+                  display: 'grid',
+                  gap: '8px',
+                }}
+              >
+                <div className="section-subtitle">Campaign account checkmarks</div>
+                {campaignChannelSelections.length ? (
+                  <div style={{ display: 'grid', gap: '8px' }}>
+                    {campaignChannelSelections.map((option) => (
+                      <label
+                        key={option.id}
+                        style={{
+                          display: 'grid',
+                          gridTemplateColumns: '20px 1fr',
+                          gap: '10px',
+                          alignItems: 'start',
+                          cursor: option.totalPosts > 0 ? 'pointer' : 'not-allowed',
+                          opacity: option.totalPosts > 0 ? 1 : 0.65,
+                        }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={option.checked}
+                          ref={(node) => {
+                            if (!node) return
+                            node.indeterminate = option.partial
+                          }}
+                          onChange={(event) => toggleChannelPosts(option.id, event.target.checked)}
+                          disabled={managePostsLoading || option.totalPosts === 0}
+                        />
+                        <div style={{ display: 'grid', gap: '2px' }}>
+                          <span>{option.label}</span>
+                          <span className="muted">
+                            {option.totalPosts > 0
+                              ? `${formatNumber(option.selectedPosts)}/${formatNumber(option.totalPosts)} posts selected`
+                              : 'No posts available yet for this account'}
+                          </span>
+                        </div>
+                      </label>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="muted">No connected accounts can be selected for this campaign yet.</div>
+                )}
+              </div>
+
               <div className="form-field">
                 <label className="section-subtitle">Channel</label>
                 <select
@@ -1809,7 +1924,7 @@ export const Campaigns = ({ role }: CampaignsProps) => {
                   <div className="muted">
                     {availablePosts.length
                       ? 'No posts found for the selected channel.'
-                      : 'No posts are available from connected YouTube accounts yet.'}
+                      : 'No posts are available from connected accounts yet.'}
                   </div>
                 )}
               </div>

@@ -73,14 +73,20 @@ export const Settings = ({ role, lastDataRefreshAt, onDataRefreshed }: SettingsP
         }
         const remainingLabel =
           result.refreshesRemaining !== null ? ` ${result.refreshesRemaining} remaining today.` : ''
-        setRefreshMessage(`Data refreshed successfully.${remainingLabel}`)
+        const warningLabel = result.warnings.length
+          ? ` Warnings: ${result.warnings.join(' ')}`
+          : ''
+        setRefreshMessage(`Data refreshed successfully.${remainingLabel}${warningLabel}`)
       } catch (error) {
         if (error instanceof RefreshCounterLimitError) {
           const nextWindowLabel = formatNextWindowLabel(error.payload.nextWindowStartsAt)
           window.alert(`Daily refresh limit reached. You can refresh again ${nextWindowLabel}.`)
           setRefreshMessage(`Daily refresh limit reached. Next window: ${nextWindowLabel}.`)
         } else {
-          setRefreshMessage('Unable to refresh data.')
+          const message = error instanceof Error && error.message
+            ? error.message
+            : 'Unknown refresh error.'
+          setRefreshMessage(`Unable to refresh data: ${message}`)
         }
       } finally {
         setIsRefreshing(false)
@@ -97,7 +103,7 @@ export const Settings = ({ role, lastDataRefreshAt, onDataRefreshed }: SettingsP
     
       <div className="card">
         <div className="section-title">Data refresh</div>
-        <div className="section-subtitle">Refreshes YouTube reporting data and campaign pacing inputs.</div>
+        <div className="section-subtitle">Refreshes YouTube, Instagram, and X reporting data and campaign pacing inputs.</div>
         <div className="filter-bar" style={{ marginTop: '16px' }}>
           <button
             className="ghost-button"

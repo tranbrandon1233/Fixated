@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from 'react'
 import { fetchAndCacheYouTubeSummary, getCachedYouTubeSummary } from '../utils/youtube'
-import { fetchAndCacheInstagramSummary, getCachedInstagramSummary } from '../utils/instagram'
 import type { YouTubeSummary } from '../utils/youtube'
+import { fetchAndCacheInstagramSummary, getCachedInstagramSummary } from '../utils/instagram'
+import { fetchAndCacheXSummary, getCachedXSummary } from '../utils/x'
 import { DASHBOARD_DATA_REFRESHED_EVENT } from '../utils/dataRefresh'
 
 type LoadStatus = 'idle' | 'loading' | 'ready' | 'error'
@@ -20,26 +21,73 @@ const emptySummary: YouTubeSummary = {
   topGeosByChannel: {},
 }
 
-export const useYouTubeSummary = () => {
-  const mergeSummaries = useCallback((youtubeSummary: YouTubeSummary, instagramSummary: YouTubeSummary) => {
-    const channelByKey = new Map<string, YouTubeSummary['channels'][number]>()
-    const postByKey = new Map<string, YouTubeSummary['topPosts'][number]>()
-    const timeSeriesByDate = new Map<string, YouTubeSummary['timeSeries'][number]>()
-    const seriesByChannelDate = new Map<string, YouTubeSummary['timeSeriesByChannel'][number]>()
+const toNumber = (value: unknown) => {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : 0
+}
 
-    const addChannel = (channel: YouTubeSummary['channels'][number]) => {
-      if (!channel || !channel.id) return
-      const key = `${channel.platform}:${channel.id}`
-      channelByKey.set(key, channel)
-    }
-    const addPost = (post: YouTubeSummary['topPosts'][number]) => {
-      if (!post || !post.id) return
-      const key = `${post.platform}:${post.id}`
-      postByKey.set(key, post)
-    }
-    const addTimeSeries = (point: YouTubeSummary['timeSeries'][number]) => {
-      if (!point || !point.date) return
-      const existing = timeSeriesByDate.get(point.date) ?? {
+const mergeDemographicList = (
+  lists: YouTubeSummary['ageDistribution'][],
+): YouTubeSummary['ageDistribution'] => {
+  const totalsByLabel = new Map<string, number>()
+  lists.forEach((rows) => {
+    rows.forEach((row) => {
+      if (!row?.label) return
+      totalsByLabel.set(row.label, (totalsByLabel.get(row.label) ?? 0) + toNumber(row.value))
+    })
+  })
+  return [...totalsByLabel.entries()]
+    .map(([label, value]) => ({ label, value }))
+    .sort((left, right) => right.value - left.value)
+}
+
+const mergeDemographicMapByChannel = (
+  maps: YouTubeSummary['ageDistributionByChannel'][],
+): YouTubeSummary['ageDistributionByChannel'] => {
+  const byChannel = new Map<string, Map<string, number>>()
+  maps.forEach((entry) => {
+    Object.entries(entry ?? {}).forEach(([channelId, rows]) => {
+      const labelTotals = byChannel.get(channelId) ?? new Map<string, number>()
+      rows.forEach((row) => {
+        if (!row?.label) return
+        labelTotals.set(row.label, (labelTotals.get(row.label) ?? 0) + toNumber(row.value))
+      })
+      byChannel.set(channelId, labelTotals)
+    })
+  })
+  const merged: YouTubeSummary['ageDistributionByChannel'] = {}
+  byChannel.forEach((labelTotals, channelId) => {
+    merged[channelId] = [...labelTotals.entries()]
+      .map(([label, value]) => ({ label, value }))
+      .sort((left, right) => right.value - left.value)
+  })
+  return merged
+}
+
+const mergeSummaryPayloads = (summaries: YouTubeSummary[]): YouTubeSummary => {
+  if (!summaries.length) return emptySummary
+  const firstVideoDates = summaries
+    .map((summary) => summary.firstVideoUploadDate)
+    .filter((value) => Boolean(value))
+    .sort((left, right) => left.localeCompare(right))
+
+  const channelsById = new Map<string, YouTubeSummary['channels'][number]>()
+  const postsById = new Map<string, YouTubeSummary['topPosts'][number]>()
+  const timeSeriesByDate = new Map<string, YouTubeSummary['timeSeries'][number]>()
+  const timeSeriesByChannelDate = new Map<string, YouTubeSummary['timeSeriesByChannel'][number]>()
+
+  summaries.forEach((summary) => {
+    summary.channels.forEach((channel) => {
+      if (!channel?.id) return
+      channelsById.set(channel.id, channel)
+    })
+    summary.topPosts.forEach((post) => {
+      if (!post?.id || postsById.has(post.id)) return
+      postsById.set(post.id, post)
+    })
+    summary.timeSeries.forEach((point) => {
+      if (!point?.date) return
+      const current = timeSeriesByDate.get(point.date) ?? {
         date: point.date,
         views: 0,
         engagements: 0,
@@ -48,18 +96,19 @@ export const useYouTubeSummary = () => {
         followersNetChange: 0,
       }
       timeSeriesByDate.set(point.date, {
-        ...existing,
-        views: existing.views + Number(point.views || 0),
-        engagements: existing.engagements + Number(point.engagements || 0),
-        posts: existing.posts + Number(point.posts || 0),
-        watchTimeHours: Number(existing.watchTimeHours || 0) + Number(point.watchTimeHours || 0),
-        followersNetChange: Number(existing.followersNetChange || 0) + Number(point.followersNetChange || 0),
+        date: point.date,
+        views: current.views + toNumber(point.views),
+        engagements: current.engagements + toNumber(point.engagements),
+        posts: current.posts + toNumber(point.posts),
+        watchTimeHours: toNumber(current.watchTimeHours) + toNumber(point.watchTimeHours),
+        followersNetChange:
+          Math.round(toNumber(current.followersNetChange) + toNumber(point.followersNetChange)),
       })
-    }
-    const addTimeSeriesByChannel = (point: YouTubeSummary['timeSeriesByChannel'][number]) => {
-      if (!point || !point.channelId || !point.date) return
+    })
+    summary.timeSeriesByChannel.forEach((point) => {
+      if (!point?.channelId || !point?.date) return
       const key = `${point.channelId}:${point.date}`
-      const existing = seriesByChannelDate.get(key) ?? {
+      const current = timeSeriesByChannelDate.get(key) ?? {
         channelId: point.channelId,
         date: point.date,
         views: 0,
@@ -68,77 +117,110 @@ export const useYouTubeSummary = () => {
         watchTimeHours: 0,
         followersNetChange: 0,
       }
-      seriesByChannelDate.set(key, {
-        ...existing,
-        views: existing.views + Number(point.views || 0),
-        engagements: existing.engagements + Number(point.engagements || 0),
-        posts: existing.posts + Number(point.posts || 0),
-        watchTimeHours: Number(existing.watchTimeHours || 0) + Number(point.watchTimeHours || 0),
-        followersNetChange: Number(existing.followersNetChange || 0) + Number(point.followersNetChange || 0),
+      timeSeriesByChannelDate.set(key, {
+        channelId: point.channelId,
+        date: point.date,
+        views: current.views + toNumber(point.views),
+        engagements: current.engagements + toNumber(point.engagements),
+        posts: current.posts + toNumber(point.posts),
+        watchTimeHours: toNumber(current.watchTimeHours) + toNumber(point.watchTimeHours),
+        followersNetChange:
+          Math.round(toNumber(current.followersNetChange) + toNumber(point.followersNetChange)),
       })
-    }
+    })
+  })
 
-    ;[...youtubeSummary.channels, ...instagramSummary.channels].forEach(addChannel)
-    ;[...youtubeSummary.topPosts, ...instagramSummary.topPosts].forEach(addPost)
-    ;[...youtubeSummary.timeSeries, ...instagramSummary.timeSeries].forEach(addTimeSeries)
-    ;[...youtubeSummary.timeSeriesByChannel, ...instagramSummary.timeSeriesByChannel].forEach(addTimeSeriesByChannel)
+  return {
+    firstVideoUploadDate: firstVideoDates[0] ?? '',
+    channels: [...channelsById.values()],
+    topPosts: [...postsById.values()].sort((left, right) => toNumber(right.views) - toNumber(left.views)),
+    timeSeries: [...timeSeriesByDate.values()].sort((left, right) => left.date.localeCompare(right.date)),
+    timeSeriesByChannel: [...timeSeriesByChannelDate.values()].sort((left, right) => {
+      const byChannel = left.channelId.localeCompare(right.channelId)
+      if (byChannel !== 0) return byChannel
+      return left.date.localeCompare(right.date)
+    }),
+    ageDistribution: mergeDemographicList(summaries.map((summary) => summary.ageDistribution)),
+    ageDistributionByChannel: mergeDemographicMapByChannel(
+      summaries.map((summary) => summary.ageDistributionByChannel),
+    ),
+    genderDistribution: mergeDemographicList(summaries.map((summary) => summary.genderDistribution)),
+    genderDistributionByChannel: mergeDemographicMapByChannel(
+      summaries.map((summary) => summary.genderDistributionByChannel),
+    ),
+    topGeos: mergeDemographicList(summaries.map((summary) => summary.topGeos)),
+    topGeosByChannel: mergeDemographicMapByChannel(
+      summaries.map((summary) => summary.topGeosByChannel),
+    ),
+  }
+}
 
-    const firstDateCandidates = [
-      youtubeSummary.firstVideoUploadDate,
-      instagramSummary.firstVideoUploadDate,
-    ].filter((value) => typeof value === 'string' && value.trim())
+const formatProviderErrorLabel = (failedProviders: string[]) => {
+  if (!failedProviders.length) return ''
+  if (failedProviders.length === 1) {
+    return `Live ${failedProviders[0]} sync is temporarily unavailable.`
+  }
+  if (failedProviders.length === 2) {
+    return `Live ${failedProviders[0]} and ${failedProviders[1]} sync are temporarily unavailable.`
+  }
+  return `Live ${failedProviders.slice(0, -1).join(', ')}, and ${failedProviders.at(-1)} sync are temporarily unavailable.`
+}
 
-    return {
-      firstVideoUploadDate: firstDateCandidates.sort()[0] ?? '',
-      channels: [...channelByKey.values()],
-      topPosts: [...postByKey.values()].sort((left, right) => Number(right.views) - Number(left.views)),
-      timeSeries: [...timeSeriesByDate.values()].sort((left, right) => left.date.localeCompare(right.date)),
-      timeSeriesByChannel: [...seriesByChannelDate.values()].sort((left, right) => {
-        const channelOrder = left.channelId.localeCompare(right.channelId)
-        if (channelOrder !== 0) return channelOrder
-        return left.date.localeCompare(right.date)
-      }),
-      ageDistribution: youtubeSummary.ageDistribution,
-      ageDistributionByChannel: youtubeSummary.ageDistributionByChannel,
-      genderDistribution: youtubeSummary.genderDistribution,
-      genderDistributionByChannel: youtubeSummary.genderDistributionByChannel,
-      topGeos: youtubeSummary.topGeos,
-      topGeosByChannel: youtubeSummary.topGeosByChannel,
-    }
-  }, [])
-
+export const useYouTubeSummary = () => {
   const initialYouTubeSummary = getCachedYouTubeSummary()
   const initialInstagramSummary = getCachedInstagramSummary()
-  const initialSummary =
-    initialYouTubeSummary || initialInstagramSummary
-      ? mergeSummaries(initialYouTubeSummary ?? emptySummary, initialInstagramSummary ?? emptySummary)
-      : null
+  const initialXSummary = getCachedXSummary()
+  const initialSummaryParts = [initialYouTubeSummary, initialInstagramSummary, initialXSummary].filter(
+    (entry): entry is YouTubeSummary => Boolean(entry),
+  )
+  const initialSummary = initialSummaryParts.length
+    ? mergeSummaryPayloads(initialSummaryParts)
+    : null
   const [summary, setSummary] = useState<YouTubeSummary>(initialSummary ?? emptySummary)
   const [status, setStatus] = useState<LoadStatus>(initialSummary ? 'ready' : 'loading')
   const [error, setError] = useState<string | null>(null)
 
   const loadSummary = useCallback(async (options?: { force?: boolean }) => {
-    try {
-      const [nextYouTubeSummary, nextInstagramSummary] = await Promise.all([
-        fetchAndCacheYouTubeSummary(options),
-        fetchAndCacheInstagramSummary(options).catch(() => emptySummary),
-      ])
-      setSummary(mergeSummaries(nextYouTubeSummary, nextInstagramSummary))
-      setStatus('ready')
-      setError(null)
-    } catch (err) {
-      const cachedYouTubeSummary = getCachedYouTubeSummary()
-      const cachedInstagramSummary = getCachedInstagramSummary()
-      if (cachedYouTubeSummary || cachedInstagramSummary) {
-        setSummary(mergeSummaries(cachedYouTubeSummary ?? emptySummary, cachedInstagramSummary ?? emptySummary))
+    const [youtubeResult, instagramResult, xResult] = await Promise.allSettled([
+      fetchAndCacheYouTubeSummary(options),
+      fetchAndCacheInstagramSummary(options),
+      fetchAndCacheXSummary(options),
+    ])
+    const successfulSummaries: YouTubeSummary[] = []
+    const failedProviders: string[] = []
+
+    const providerResults: Array<{ label: string; result: PromiseSettledResult<YouTubeSummary> }> = [
+      { label: 'YouTube', result: youtubeResult },
+      { label: 'Instagram', result: instagramResult },
+      { label: 'X', result: xResult },
+    ]
+    providerResults.forEach(({ label, result }) => {
+      if (result.status === 'fulfilled') {
+        successfulSummaries.push(result.value)
+      } else {
+        failedProviders.push(label)
+      }
+    })
+
+    if (!successfulSummaries.length) {
+      const cachedSummaries = [getCachedYouTubeSummary(), getCachedInstagramSummary(), getCachedXSummary()].filter(
+        (entry): entry is YouTubeSummary => Boolean(entry),
+      )
+      if (cachedSummaries.length) {
+        setSummary(mergeSummaryPayloads(cachedSummaries))
         setStatus('ready')
-        setError('Live social sync is temporarily unavailable.')
+        setError('Live platform sync is temporarily unavailable.')
         return
       }
       setStatus('error')
-      setError(err instanceof Error ? err.message : 'Unable to load YouTube data.')
+      setError('Unable to load dashboard platform data.')
+      return
     }
-  }, [mergeSummaries])
+
+    setSummary(mergeSummaryPayloads(successfulSummaries))
+    setStatus('ready')
+    setError(formatProviderErrorLabel(failedProviders) || null)
+  }, [])
 
   useEffect(() => {
     let cancelled = false

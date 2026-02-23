@@ -8,9 +8,11 @@ const normalizeText = (value, maxLength = 300) => {
 }
 
 const normalizeInstagramHandle = (value) => {
-  const normalized = normalizeText(value, 120).replace(/^@+/, '').toLowerCase()
+  const normalized = normalizeText(value, 120)
   if (!normalized) return ''
-  return normalized.replace(/[^a-z0-9._]/g, '')
+  const handleFromMention = normalized.match(/@([a-z0-9._]+)/i)?.[1] || ''
+  const candidate = handleFromMention || normalized.replace(/^@+/, '')
+  return candidate.toLowerCase().replace(/[^a-z0-9._]/g, '')
 }
 
 const createCollectorError = (code, message = '') => {
@@ -102,6 +104,113 @@ const sanitizeCookie = (cookie) => {
   }
 }
 
+const resolveInstagramCredentials = (credentials) => {
+  if (!credentials || typeof credentials !== 'object' || Array.isArray(credentials)) {
+    return { username: '', password: '' }
+  }
+  const passwordRaw = typeof credentials.password === 'string' ? credentials.password : ''
+  return {
+    username: normalizeText(credentials.username, 180),
+    password: passwordRaw.slice(0, 240),
+  }
+}
+
+const isLoginRequiredState = ({ currentUrl = '', pageState = null } = {}) =>
+  currentUrl.includes('/accounts/login') || Boolean(pageState?.loginRequired)
+
+const dismissInstagramLoginInterrupts = async (page) => {
+  const selectors = [
+    'button:has-text("Only allow essential cookies")',
+    'button:has-text("Allow all cookies")',
+    'button:has-text("Allow essential and optional cookies")',
+    'button:has-text("Allow optional cookies")',
+    'button:has-text("Not now")',
+    'button:has-text("Not Now")',
+  ]
+  for (const selector of selectors) {
+    const candidate = page.locator(selector).first()
+    try {
+      if (await candidate.isVisible({ timeout: 900 })) {
+        await candidate.click({ timeout: 1500 })
+        await page.waitForTimeout(200)
+      }
+    } catch {
+      // Ignore UI variants and stale elements.
+    }
+  }
+}
+
+const authenticateInstagramSession = async ({
+  page,
+  timeoutMs,
+  credentials,
+}) => {
+  const resolvedCredentials = resolveInstagramCredentials(credentials)
+  if (!resolvedCredentials.username || !resolvedCredentials.password) {
+    return { authenticatedByCredentials: false }
+  }
+
+  await page.goto(`${INSTAGRAM_BASE_URL}/accounts/login/`, {
+    waitUntil: 'domcontentloaded',
+    timeout: timeoutMs,
+  })
+  await page.waitForTimeout(900)
+  await dismissInstagramLoginInterrupts(page)
+
+  let currentUrl = page.url()
+  let pageState = await readPageState(page)
+  if (currentUrl.includes('/challenge/') || pageState.challengeRequired) {
+    throw createCollectorError('instagram_challenge_required', 'Instagram challenge is required.')
+  }
+  if (pageState.rateLimited) {
+    throw createCollectorError('instagram_rate_limited', 'Instagram rate-limited this request.')
+  }
+  if (!isLoginRequiredState({ currentUrl, pageState })) {
+    return { authenticatedByCredentials: false }
+  }
+
+  const usernameField = page.locator('input[name="username"]').first()
+  const passwordField = page.locator('input[name="password"]').first()
+  await usernameField.waitFor({ state: 'visible', timeout: Math.min(timeoutMs, 15_000) })
+  await usernameField.fill(resolvedCredentials.username)
+  await passwordField.fill(resolvedCredentials.password)
+
+  const submitButton = page.locator('button[type="submit"]').first()
+  let submitted = false
+  try {
+    await submitButton.click({ timeout: 4_000 })
+    submitted = true
+  } catch {
+    // Fall through to keyboard submit.
+  }
+  if (!submitted) {
+    try {
+      await passwordField.press('Enter', { timeout: 4_000 })
+      submitted = true
+    } catch {
+      // Fall through to auth error below.
+    }
+  }
+  if (!submitted) {
+    throw createCollectorError('instagram_auth_required', 'Instagram login form submission failed.')
+  }
+
+  await page.waitForTimeout(2_400)
+  await dismissInstagramLoginInterrupts(page)
+  currentUrl = page.url()
+  pageState = await readPageState(page)
+  if (currentUrl.includes('/challenge/') || pageState.challengeRequired) {
+    throw createCollectorError('instagram_challenge_required', 'Instagram challenge is required.')
+  }
+  if (pageState.rateLimited) {
+    throw createCollectorError('instagram_rate_limited', 'Instagram rate-limited this request.')
+  }
+  if (isLoginRequiredState({ currentUrl, pageState })) {
+    throw createCollectorError('instagram_auth_required', 'Instagram credentials were rejected.')
+  }
+  return { authenticatedByCredentials: true }
+}
+
 const loadPlaywrightChromium = async () => {
   try {
     const playwright = await import('playwright')
@@ -151,6 +260,7 @@ export const collectInstagramMetricsWithPlaywright = async ({
   accountHandle,
   accountName = '',
   cookies = [],
+  credentials = null,
   maxPosts = 12,
   timeoutMs = 45_000,
 } = {}) => {
@@ -183,6 +293,11 @@ export const collectInstagramMetricsWithPlaywright = async ({
     }
 
     const page = await context.newPage()
+    await authenticateInstagramSession({
+      page,
+      timeoutMs,
+      credentials,
+    })
     await page.goto(`${INSTAGRAM_BASE_URL}/${encodeURIComponent(normalizedHandle)}/`, {
       waitUntil: 'domcontentloaded',
       timeout: timeoutMs,
@@ -190,10 +305,7 @@ export const collectInstagramMetricsWithPlaywright = async ({
 
     const currentUrl = page.url()
     const pageState = await readPageState(page)
-    if (
-      currentUrl.includes('/accounts/login')
-      || pageState.loginRequired
-    ) {
+    if (isLoginRequiredState({ currentUrl, pageState })) {
       throw createCollectorError('instagram_auth_required', 'Instagram session is not authenticated.')
     }
     if (currentUrl.includes('/challenge/') || pageState.challengeRequired) {

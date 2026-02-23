@@ -48,7 +48,10 @@ const serverBaseUrl = withFallbackUrl(getEnv('SERVER_BASE_URL', defaultBaseUrl),
 const appBaseUrl = withFallbackUrl(getEnv('APP_BASE_URL', defaultBaseUrl), defaultBaseUrl)
 const clientId = getEnv('GOOGLE_CLIENT_ID')
 const clientSecret = getEnv('GOOGLE_CLIENT_SECRET')
-const redirectUri = getEnv('SUPABASE_REDIRECT_URI', `${serverBaseUrl}/oauth/google/callback`)
+const redirectUri = getEnv(
+  'GOOGLE_REDIRECT_URI',
+  getEnv('SUPABASE_REDIRECT_URI', `${serverBaseUrl}/oauth/google/callback`),
+)
 const scope = getEnv('GOOGLE_SCOPE', 'openid email profile')
 const youtubeClientId = getEnv('YOUTUBE_CLIENT_ID', clientId)
 const youtubeClientSecret = getEnv('YOUTUBE_CLIENT_SECRET', clientSecret)
@@ -64,7 +67,105 @@ const youtubeReportChannelDaily = getEnv('YOUTUBE_REPORT_CHANNEL_DAILY', 'channe
 const youtubeReportVideoDaily = getEnv('YOUTUBE_REPORT_VIDEO_DAILY', 'video_basic_a2')
 const youtubeReportDemographics = getEnv('YOUTUBE_REPORT_DEMOGRAPHICS', 'channel_demographics_a1')
 const youtubeReportGeo = getEnv('YOUTUBE_REPORT_GEO', 'channel_geography_a1')
-const instagramCollectorMode = getEnv('INSTAGRAM_COLLECTOR_MODE', 'playwright').toLowerCase()
+const instagramAppId = getEnv('INSTAGRAM_APP_ID')
+const instagramClientToken = getEnv('INSTAGRAM_CLIENT_TOKEN')
+const instagramAppToken = getEnv('INSTAGRAM_APP_TOKEN')
+const instagramAccessToken = getEnv('INSTAGRAM_ACCESS_TOKEN')
+const instagramFacebookPageId = getEnv('FB_PAGE_ID')
+const instagramRedirectUri = getEnv('INSTAGRAM_REDIRECT_URI', `${serverBaseUrl}/oauth/instagram/callback`)
+const instagramGraphApiVersion = getEnv('INSTAGRAM_GRAPH_API_VERSION', 'v22.0')
+const defaultInstagramOauthScope =
+  'pages_show_list,pages_read_engagement,instagram_business_basic'
+const normalizeInstagramOauthScope = (value) => {
+  const normalizedValue = String(value ?? '').trim().toLowerCase().slice(0, 500)
+  const inputScopes = normalizedValue
+    .split(/[\s,]+/)
+    .map((scope) => scope.trim())
+    .filter((scope) => Boolean(scope))
+  const allowedScopes = new Set([
+    'pages_show_list',
+    'pages_read_engagement',
+    'instagram_business_basic',
+    'instagram_content_publish',
+    'instagram_manage_comments',
+    'instagram_manage_messages',
+    'business_management',
+  ])
+  const normalizedScopes = []
+  for (const scope of inputScopes) {
+    if (!allowedScopes.has(scope)) continue
+    if (!normalizedScopes.includes(scope)) {
+      normalizedScopes.push(scope)
+    }
+  }
+  if (normalizedScopes.length) return normalizedScopes.join(',')
+  return defaultInstagramOauthScope
+}
+const instagramOauthScope = normalizeInstagramOauthScope(
+  getEnv('INSTAGRAM_OAUTH_SCOPE', defaultInstagramOauthScope),
+)
+const instagramOauthAuthorizeUrl = getEnv(
+  'INSTAGRAM_OAUTH_AUTHORIZE_URL',
+  'https://www.facebook.com/v25.0/dialog/oauth',
+)
+const instagramOauthEnableFbLogin = getEnv('INSTAGRAM_OAUTH_ENABLE_FB_LOGIN')
+const instagramOauthForceAuthentication = getEnv('INSTAGRAM_OAUTH_FORCE_AUTHENTICATION')
+const instagramOauthEnableBasicDisplayProbe = getEnv('INSTAGRAM_OAUTH_ENABLE_BASIC_DISPLAY_PROBE', 'false').toLowerCase() === 'true'
+const instagramAppSecret = getEnv('INSTAGRAM_APP_SECRET')
+if (instagramAppToken && !instagramAppSecret) {
+  console.warn('INSTAGRAM_APP_TOKEN is set but OAuth requires INSTAGRAM_APP_SECRET for client_secret.')
+}
+const resolveInstagramOauthAuthorizeUrl = (rawUrl, rawScope) => {
+  const normalizedScope = normalizeTextInput(rawScope, { maxLength: 500 }).toLowerCase()
+  const isBusinessScope = normalizedScope.includes('instagram_business')
+  const fallbackUrl = isBusinessScope
+    ? 'https://www.facebook.com/v25.0/dialog/oauth'
+    : 'https://www.facebook.com/v25.0/dialog/oauth'
+  const normalizedRaw = normalizeTextInput(rawUrl, { maxLength: 500 })
+  if (!normalizedRaw) return fallbackUrl
+  try {
+    const parsed = new URL(normalizedRaw)
+    const protocol = parsed.protocol.toLowerCase()
+    if (protocol !== 'https:' && protocol !== 'http:') {
+      return fallbackUrl
+    }
+    const host = parsed.hostname.toLowerCase()
+    if (host !== 'www.facebook.com') {
+      return fallbackUrl
+    }
+    const resolvedPath = parsed.pathname.replace(/\/+$/, '').toLowerCase()
+    const isDialogOauthPath =
+      resolvedPath === '/dialog/oauth'
+      || /^\/v\d+(?:\.\d+)?\/dialog\/oauth$/.test(resolvedPath)
+    if (!isDialogOauthPath) {
+      return fallbackUrl
+    }
+    parsed.search = ''
+    parsed.hash = ''
+    return parsed.toString().replace(/\/$/, '')
+  } catch {
+    return fallbackUrl
+  }
+}
+
+const resolveFacebookGraphOauthTokenUrl = () => {
+  const normalizedVersion = normalizeTextInput(instagramGraphApiVersion, { maxLength: 24 }).toLowerCase()
+  const parsedVersion = normalizedVersion.replace(/^v/, '')
+  const safeVersion = /^\d+(?:\.\d+)?$/.test(parsedVersion) ? `v${parsedVersion}` : 'v22.0'
+  return `https://graph.facebook.com/${safeVersion}/oauth/access_token`
+}
+// Instagram OAuth optional flags are intentionally not forwarded by default.
+// Meta may reject authorize requests for some app setups when these are present.
+const instagramCollectorMode = getEnv(
+  'INSTAGRAM_COLLECTOR_MODE',
+  instagramAccessToken ? 'graph' : 'playwright',
+).toLowerCase()
+const instagramCollectionEnabled = getEnv(
+  'INSTAGRAM_COLLECTION_ENABLED',
+  instagramAccessToken ? 'true' : 'false',
+).toLowerCase() === 'true'
+const instagramUsername = getEnv('INSTAGRAM_USERNAME')
+const instagramPassword = getEnv('INSTAGRAM_PWD')
 const instagramSessionEncryptionKey = getEnv('INSTAGRAM_SESSION_ENCRYPTION_KEY')
 const instagramCollectorMaxPosts = Math.max(1, Math.min(50, Number(getEnv('INSTAGRAM_COLLECTOR_MAX_POSTS', '12')) || 12))
 const instagramCollectorTimeoutMs = Math.max(
@@ -107,6 +208,10 @@ const instagramAlertFailureRateThresholdPct = Math.max(
   5,
   Math.min(100, Number(getEnv('INSTAGRAM_ALERT_FAILURE_RATE_THRESHOLD_PCT', '50')) || 50),
 )
+const instagramAlertFailureRateMinRuns = Math.max(
+  3,
+  Math.min(200, Number(getEnv('INSTAGRAM_ALERT_FAILURE_RATE_MIN_RUNS', '5')) || 5),
+)
 const instagramOpsRunWindowMs = Math.max(
   60_000,
   Math.min(24 * 60 * 60 * 1000, Number(getEnv('INSTAGRAM_OPS_RUN_WINDOW_MS', '21600000')) || 6 * 60 * 60 * 1000),
@@ -127,6 +232,88 @@ const instagramOpsRecentAlertsPerAccount = Math.max(
   3,
   Math.min(50, Number(getEnv('INSTAGRAM_OPS_RECENT_ALERTS_PER_ACCOUNT', '12')) || 12),
 )
+const decodeMaybeUriEncodedToken = (value) => {
+  const normalized = normalizeEnvValue(value)
+  if (!normalized) return ''
+  try {
+    const decoded = decodeURIComponent(normalized)
+    return decoded || normalized
+  } catch {
+    return normalized
+  }
+}
+const xApiBaseUrl = withFallbackUrl(getEnv('X_API_BASE_URL', 'https://api.x.com/2'), 'https://api.x.com/2')
+const xApiFallbackBaseUrl = withFallbackUrl(
+  getEnv('X_API_FALLBACK_BASE_URL', 'https://api.twitter.com/2'),
+  'https://api.twitter.com/2',
+)
+const xOauthClientId = getEnv('X_CLIENT_ID', getEnv('X_CLIENT_SECRET_ID'))
+const xOauthClientSecret = getEnv('X_CLIENT_SECRET')
+const xOauthEncryptionKey = getEnv(
+  'X_OAUTH_ENCRYPTION_KEY',
+  getEnv('INSTAGRAM_SESSION_ENCRYPTION_KEY', getEnv('SUPABASE_SECRET_KEY', getEnv('SUPABASE_SERVICE_ROLE_KEY'))),
+)
+const xOauthRedirectUri = getEnv(
+  'X_REDIRECT_URI',
+  getEnv('X_REDIRECT_URL', `${serverBaseUrl}/oauth/x/callback`),
+)
+const requiredXOauthScopes = ['users.read', 'tweet.read', 'offline.access']
+const defaultXOauthScope = 'users.read tweet.read offline.access'
+const tokenizeXOauthScope = (value) =>
+  String(value ?? '')
+    .toLowerCase()
+    .split(/[\s,]+/)
+    .map((scope) => scope.trim())
+    .filter((scope) => Boolean(scope))
+const normalizeXOauthScope = (value) => {
+  const normalizedValue = String(value ?? '').trim().toLowerCase().slice(0, 500)
+  const inputScopes = normalizedValue
+    .split(/[\s,]+/)
+    .map((scope) => scope.trim())
+    .filter((scope) => Boolean(scope))
+  const normalizedScopes = []
+  for (const scope of inputScopes) {
+    if (!/^[a-z0-9._:-]{1,64}$/i.test(scope)) continue
+    if (!normalizedScopes.includes(scope)) {
+      normalizedScopes.push(scope)
+    }
+  }
+  for (const requiredScope of requiredXOauthScopes) {
+    if (!normalizedScopes.includes(requiredScope)) {
+      normalizedScopes.push(requiredScope)
+    }
+  }
+  if (normalizedScopes.length) return normalizedScopes.join(' ')
+  return defaultXOauthScope
+}
+const hasRequiredXOauthScopes = (scopeValue, requiredScopes = []) => {
+  const scopeSet = new Set(tokenizeXOauthScope(scopeValue))
+  return requiredScopes.every((requiredScope) => scopeSet.has(String(requiredScope || '').toLowerCase()))
+}
+const xOauthScope = normalizeXOauthScope(getEnv('X_OAUTH_SCOPE', defaultXOauthScope))
+const xOauthAuthorizeUrl = getEnv('X_OAUTH_AUTHORIZE_URL', 'https://x.com/i/oauth2/authorize')
+const xOauthTokenUrl = withFallbackUrl(
+  getEnv('X_OAUTH_TOKEN_URL', 'https://api.x.com/2/oauth2/token'),
+  'https://api.x.com/2/oauth2/token',
+)
+const xOauthTokenFallbackUrl = withFallbackUrl(
+  getEnv('X_OAUTH_TOKEN_FALLBACK_URL', 'https://api.twitter.com/2/oauth2/token'),
+  'https://api.twitter.com/2/oauth2/token',
+)
+const xBearerToken = decodeMaybeUriEncodedToken(
+  getEnv(
+    'X_BEARER_TOKEN',
+    getEnv(
+      'X_API_BEARER_TOKEN',
+      getEnv('TWITTER_BEARER_TOKEN'),
+    ),
+  ),
+)
+const xCollectionEnabled = getEnv(
+  'X_COLLECTION_ENABLED',
+  xBearerToken || xOauthClientId ? 'true' : 'false',
+).toLowerCase() === 'true'
+const xCollectorMaxPosts = Math.max(5, Math.min(100, Number(getEnv('X_COLLECTOR_MAX_POSTS', '50')) || 50))
 const supabaseUrl = withFallbackUrl(getEnv('SUPABASE_URL'), '')
 const supabasePublishableKey = getEnv('SUPABASE_PUBLISHABLE_KEY', getEnv('SUPABASE_ANON_KEY'))
 const supabaseSecretKey = getEnv('SUPABASE_SECRET_KEY', getEnv('SUPABASE_SERVICE_ROLE_KEY'))
@@ -147,13 +334,39 @@ const internalRefreshRunnerToken = buildInternalRefreshRunnerToken()
 const parsedServerUrl = new URL(serverBaseUrl)
 const port = Number(getEnv('PORT', parsedServerUrl.port || '5000'))
 const isProd = getEnv('NODE_ENV') === 'production'
-const allowCrossSiteCookies = isProd
+const resolveCookieSiteKey = (value) => {
+  try {
+    const parsed = new URL(value)
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return ''
+    return `${parsed.protocol}//${parsed.hostname}`
+  } catch {
+    return ''
+  }
+}
+const appCookieSiteKey = resolveCookieSiteKey(appBaseUrl)
+const serverCookieSiteKey = resolveCookieSiteKey(serverBaseUrl)
+const isCrossSiteCookieContext = Boolean(
+  appCookieSiteKey
+  && serverCookieSiteKey
+  && appCookieSiteKey !== serverCookieSiteKey,
+)
+const supportsSecureCrossSiteCookies =
+  appCookieSiteKey.startsWith('https://') && serverCookieSiteKey.startsWith('https://')
+const allowCrossSiteCookies = isProd || (isCrossSiteCookieContext && supportsSecureCrossSiteCookies)
 const cookieSameSite = allowCrossSiteCookies ? 'none' : 'lax'
 const cookieSecure = allowCrossSiteCookies || isProd
 const YOUTUBE_CONNECTIONS_COOKIE = 'youtube_connections'
 const YOUTUBE_SESSION_COOKIE = 'youtube_session_id'
 const APP_REDIRECT_COOKIE = 'app_redirect_origin'
+const GOOGLE_OAUTH_CONTEXT_COOKIE = 'google_oauth_context'
 const YOUTUBE_OAUTH_CONTEXT_COOKIE = 'youtube_oauth_context'
+const INSTAGRAM_OAUTH_CONTEXT_COOKIE = 'instagram_oauth_context'
+const INSTAGRAM_OAUTH_STATE_COOKIE = 'instagram_oauth_state'
+const X_OAUTH_CONTEXT_COOKIE = 'x_oauth_context'
+const X_OAUTH_STATE_COOKIE = 'x_oauth_state'
+const INSTAGRAM_OAUTH_STATE_VERSION = 'v1'
+const INSTAGRAM_OAUTH_STATE_TTL_MS = 10 * 60 * 1000
+const X_OAUTH_STATE_TTL_MS = 10 * 60 * 1000
 const SUPABASE_ACCESS_TOKEN_COOKIE = 'sb_access_token'
 const SUPABASE_REFRESH_TOKEN_COOKIE = 'sb_refresh_token'
 const YOUTUBE_AUTO_REFRESH_INTERVAL_MS = 60 * 60 * 1000
@@ -182,6 +395,12 @@ const instagramOpsState = {
   alerts: [],
   failureStreakByUser: new Map(),
 }
+const instagramGraphConnectionCandidateCache = {
+  token: '',
+  expiresAtMs: 0,
+  candidates: [],
+}
+const instagramGraphAccessTokenByConnectionKey = new Map()
 
 const buildAppRedirect = ({
   status,
@@ -200,18 +419,230 @@ const buildAppRedirect = ({
   return `${baseUrl}${path}?${params.toString()}`
 }
 
+const safeTimingEqual = (left, right) => {
+  if (typeof left !== 'string' || typeof right !== 'string') return false
+  try {
+    const leftBuffer = Buffer.from(left)
+    const rightBuffer = Buffer.from(right)
+    if (leftBuffer.length !== rightBuffer.length) return false
+    return crypto.timingSafeEqual(leftBuffer, rightBuffer)
+  } catch {
+    return false
+  }
+}
+
+const buildInstagramOauthStateToken = ({
+  userId = '',
+  organizationId = '',
+  redirectUri = '',
+  issuedAtMs = Date.now(),
+} = {}) => {
+  if (!instagramAppSecret) return ''
+  if (!isUuid(userId) || !isUuid(organizationId)) return ''
+  const normalizedRedirectUri = normalizeTextInput(redirectUri, { maxLength: 500 })
+  const payload = {
+    v: INSTAGRAM_OAUTH_STATE_VERSION,
+    iat: Math.max(0, Math.floor(Number(issuedAtMs) || Date.now())),
+    nonce: crypto.randomBytes(12).toString('hex'),
+    userId,
+    organizationId,
+    redirectUri: normalizedRedirectUri,
+  }
+  const payloadJson = JSON.stringify(payload)
+  const payloadB64 = Buffer.from(payloadJson, 'utf8').toString('base64url')
+  const signature = crypto
+    .createHmac('sha256', instagramAppSecret)
+    .update(payloadB64)
+    .digest('base64url')
+  return `${INSTAGRAM_OAUTH_STATE_VERSION}.${payloadB64}.${signature}`
+}
+
+const verifyInstagramOauthStateToken = (rawState, { nowMs = Date.now() } = {}) => {
+  const normalized = normalizeTextInput(rawState, { maxLength: 4000, trim: true })
+  if (!normalized) return { ok: false, reason: 'missing' }
+  const segments = normalized.split('.')
+  if (segments.length !== 3) return { ok: false, reason: 'format' }
+  const [version, payloadB64, signature] = segments
+  if (version !== INSTAGRAM_OAUTH_STATE_VERSION || !payloadB64 || !signature) {
+    return { ok: false, reason: 'version_or_segments' }
+  }
+  if (!instagramAppSecret) return { ok: false, reason: 'missing_secret' }
+  const expectedSignature = crypto
+    .createHmac('sha256', instagramAppSecret)
+    .update(payloadB64)
+    .digest('base64url')
+  if (!safeTimingEqual(signature, expectedSignature)) {
+    return { ok: false, reason: 'signature' }
+  }
+  let parsedPayload = null
+  try {
+    const decodedPayload = Buffer.from(payloadB64, 'base64url').toString('utf8')
+    parsedPayload = JSON.parse(decodedPayload)
+  } catch {
+    return { ok: false, reason: 'payload_parse' }
+  }
+  if (!parsedPayload || typeof parsedPayload !== 'object') {
+    return { ok: false, reason: 'payload_shape' }
+  }
+  const issuedAtMs = Math.max(0, Number(parsedPayload.iat) || 0)
+  if (!issuedAtMs) return { ok: false, reason: 'issued_at' }
+  if (issuedAtMs > nowMs + 30_000) return { ok: false, reason: 'issued_in_future' }
+  if (nowMs - issuedAtMs > INSTAGRAM_OAUTH_STATE_TTL_MS) return { ok: false, reason: 'expired' }
+  const userId = normalizeTextInput(parsedPayload.userId, { maxLength: 80 })
+  const organizationId = normalizeTextInput(parsedPayload.organizationId, { maxLength: 80 })
+  const redirectUri = normalizeTextInput(parsedPayload.redirectUri, { maxLength: 500 })
+  if (!isUuid(userId) || !isUuid(organizationId)) {
+    return { ok: false, reason: 'identity' }
+  }
+  return {
+    ok: true,
+    payload: {
+      userId,
+      organizationId,
+      redirectUri,
+      issuedAtMs,
+    },
+  }
+}
+
 const normalizeChannelName = (value) => String(value ?? '').trim().toLowerCase()
-const normalizeInstagramHandle = (value) =>
-  normalizeTextInput(value, { maxLength: 120 })
+const normalizeInstagramHandle = (value) => {
+  const normalizedInput = normalizeTextInput(value, { maxLength: 240 }).toLowerCase()
+  if (!normalizedInput) return ''
+
+  let candidate = normalizedInput
+  const withProtocol =
+    candidate.startsWith('https://') || candidate.startsWith('http://')
+      ? candidate
+      : `https://${candidate}`
+  try {
+    const parsed = new URL(withProtocol)
+    const host = normalizeTextInput(parsed.hostname, { maxLength: 255 }).toLowerCase()
+    if (host === 'instagram.com' || host === 'www.instagram.com') {
+      const pathSegments = parsed.pathname
+        .split('/')
+        .map((segment) => normalizeTextInput(segment, { maxLength: 120 }).toLowerCase())
+        .filter((segment) => Boolean(segment))
+      if (pathSegments.length > 0) {
+        candidate = pathSegments[0]
+      }
+    }
+  } catch {
+    candidate = candidate.replace(/^https?:\/\//, '')
+  }
+
+  return candidate
     .replace(/^@+/, '')
-    .toLowerCase()
+    .replace(/^www\./, '')
+    .replace(/^instagram\.com\//, '')
+    .split(/[/?#]/)[0]
     .replace(/[^a-z0-9._]/g, '')
+}
 
 const resolveInstagramAccountId = (account) => {
   const explicitId = normalizeTextInput(account?.channelId, { maxLength: 300 })
   if (explicitId) return explicitId.toLowerCase()
   const fromName = normalizeInstagramHandle(account?.accountName)
   return fromName
+}
+
+const normalizeXUserId = (value) => {
+  let raw = ''
+  if (typeof value === 'string') {
+    raw = value
+  } else if (typeof value === 'number' && Number.isFinite(value)) {
+    raw = value.toLocaleString('en-US', { useGrouping: false, maximumFractionDigits: 0 })
+  } else if (typeof value === 'bigint') {
+    raw = value.toString()
+  } else if (value !== null && value !== undefined) {
+    raw = String(value)
+  }
+  return raw.replace(/[^0-9]/g, '').slice(0, 30)
+}
+
+const normalizeXUsername = (value) => {
+  const normalizedInput = normalizeTextInput(value, { maxLength: 240 }).toLowerCase()
+  if (!normalizedInput) return ''
+
+  let candidate = normalizedInput
+  const withProtocol =
+    candidate.startsWith('https://') || candidate.startsWith('http://')
+      ? candidate
+      : `https://${candidate}`
+  try {
+    const parsed = new URL(withProtocol)
+    const host = normalizeTextInput(parsed.hostname, { maxLength: 255 }).toLowerCase()
+    if (host === 'x.com' || host === 'www.x.com' || host === 'twitter.com' || host === 'www.twitter.com') {
+      const pathSegments = parsed.pathname
+        .split('/')
+        .map((segment) => normalizeTextInput(segment, { maxLength: 120 }).toLowerCase())
+        .filter((segment) => Boolean(segment))
+      if (pathSegments.length > 0) {
+        candidate = pathSegments[0]
+      }
+    }
+  } catch {
+    candidate = candidate.replace(/^https?:\/\//, '')
+  }
+
+  return candidate
+    .replace(/^@+/, '')
+    .replace(/^www\./, '')
+    .replace(/^x\.com\//, '')
+    .replace(/^twitter\.com\//, '')
+    .split(/[/?#]/)[0]
+    .replace(/[^a-z0-9_]/g, '')
+    .slice(0, 15)
+}
+
+const isValidXUsername = (value) => /^[a-z0-9_]{1,15}$/.test(normalizeXUsername(value))
+const formatXAccountName = (username) => {
+  const normalizedUsername = normalizeXUsername(username)
+  return normalizedUsername ? `@${normalizedUsername}` : ''
+}
+const resolveXUserIdFromConnection = (account) =>
+  normalizeXUserId(account?.channelId) || normalizeXUserId(account?.userId)
+const resolveXUsernameFromConnection = (account) => {
+  const explicitUsernameRaw = normalizeTextInput(account?.username, { maxLength: 120 })
+  if (/^@?[a-z0-9_]{1,15}$/i.test(explicitUsernameRaw)) {
+    const explicitUsername = normalizeXUsername(explicitUsernameRaw)
+    if (isValidXUsername(explicitUsername)) return explicitUsername
+  }
+  const accountNameRaw = normalizeTextInput(account?.accountName, { maxLength: 180 })
+  if (
+    /^@?[a-z0-9_]{1,15}$/i.test(accountNameRaw)
+    || /^https?:\/\/(www\.)?(x|twitter)\.com\//i.test(accountNameRaw)
+  ) {
+    const accountNameUsername = normalizeXUsername(accountNameRaw)
+    if (isValidXUsername(accountNameUsername)) return accountNameUsername
+  }
+  const channelIdRaw = normalizeTextInput(account?.channelId, { maxLength: 300 })
+  if (
+    /^@?[a-z0-9_]{1,15}$/i.test(channelIdRaw)
+    || /^https?:\/\/(www\.)?(x|twitter)\.com\//i.test(channelIdRaw)
+  ) {
+    const channelIdUsername = normalizeXUsername(channelIdRaw)
+    if (isValidXUsername(channelIdUsername)) return channelIdUsername
+  }
+  return ''
+}
+const resolveXUserIdFromStoredPostsPayload = (value) => {
+  const sourceEntries = Array.isArray(value)
+    ? value
+    : value && typeof value === 'object' && !Array.isArray(value)
+      ? Object.values(value)
+      : []
+  for (const entry of sourceEntries.slice(0, xCollectorMaxPosts)) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue
+    const candidate = normalizeXUserId(
+      entry.userId
+      || entry.user_id
+      || entry.authorId
+      || entry.author_id,
+    )
+    if (candidate) return candidate
+  }
+  return ''
 }
 
 const buildInstagramVaultKey = ({ ownerUserId = '', accountId = '' }) => {
@@ -224,7 +655,14 @@ const buildInstagramVaultKey = ({ ownerUserId = '', accountId = '' }) => {
 const normalizeOrganizationConnectionPlatform = (value) => {
   const normalized = normalizeTextInput(value, { maxLength: 24 }).toLowerCase()
   if (normalized === 'instagram') return ORGANIZATION_CONNECTION_PLATFORM_INSTAGRAM
-  if (normalized === 'x') return ORGANIZATION_CONNECTION_PLATFORM_X
+  if (
+    normalized === 'x'
+    || normalized === 'twitter'
+    || normalized === 'x/twitter'
+    || normalized === 'xtwitter'
+  ) {
+    return ORGANIZATION_CONNECTION_PLATFORM_X
+  }
   return ORGANIZATION_CONNECTION_PLATFORM_YOUTUBE
 }
 
@@ -327,7 +765,11 @@ const normalizeOrganizationConnectedAccounts = (value) => {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue
     const platform = normalizeOrganizationConnectionPlatform(entry.platform)
     const accountName = normalizeTextInput(entry.accountName, { maxLength: 180 })
-    const channelId = normalizeTextInput(entry.channelId, { maxLength: 300 })
+    const rawChannelId = normalizeTextInput(entry.channelId, { maxLength: 300 })
+    const legacyXUserId = platform === ORGANIZATION_CONNECTION_PLATFORM_X
+      ? normalizeXUserId(entry.userId || entry.xUserId || entry.twitterUserId)
+      : ''
+    const channelId = rawChannelId || legacyXUserId
     const ownerUserId = normalizeTextInput(entry.ownerUserId, { maxLength: 80 })
     const connectedAt = normalizeTextInput(entry.connectedAt, { maxLength: 64 })
     const fallbackId = `${platform.toLowerCase()}:${channelId || accountName.toLowerCase().replace(/\s+/g, '-')}`
@@ -364,9 +806,133 @@ const resolveOriginBase = (value) => {
   }
 }
 
+const isLoopbackHostname = (hostname) => {
+  const normalized = normalizeTextInput(hostname, { maxLength: 255 }).toLowerCase()
+  return normalized === 'localhost' || normalized === '127.0.0.1' || normalized === '::1'
+}
+
+const isLoopbackUrl = (value) => {
+  const base = resolveOriginBase(value)
+  if (!base) return false
+  try {
+    const parsed = new URL(base)
+    return isLoopbackHostname(parsed.hostname)
+  } catch {
+    return false
+  }
+}
+
+const resolveInstagramOauthRedirectUri = ({
+  requestOriginBase = '',
+  refererOriginBase = '',
+} = {}) => {
+  const fallback = `${serverBaseUrl}/oauth/instagram/callback`
+  const configured = normalizeTextInput(instagramRedirectUri, { maxLength: 500 }) || fallback
+  let resolved = configured
+  try {
+    const parsedConfigured = new URL(configured)
+    const configuredProtocol = parsedConfigured.protocol.toLowerCase()
+    if (configuredProtocol !== 'https:' && configuredProtocol !== 'http:') {
+      resolved = fallback
+    }
+  } catch {
+    resolved = fallback
+  }
+
+  const inboundBase = requestOriginBase || refererOriginBase
+  if (isLoopbackUrl(resolved) && inboundBase && !isLoopbackUrl(inboundBase)) {
+    return fallback
+  }
+  return resolved
+}
+
+const resolveXOauthRedirectUri = ({
+  requestOriginBase = '',
+  refererOriginBase = '',
+} = {}) => {
+  const fallback = `${serverBaseUrl}/oauth/x/callback`
+  const configured = normalizeTextInput(xOauthRedirectUri, { maxLength: 500 }) || fallback
+  let resolved = configured
+  try {
+    const parsedConfigured = new URL(configured)
+    const configuredProtocol = parsedConfigured.protocol.toLowerCase()
+    if (configuredProtocol !== 'https:' && configuredProtocol !== 'http:') {
+      resolved = fallback
+    }
+  } catch {
+    resolved = fallback
+  }
+
+  const inboundBase = requestOriginBase || refererOriginBase
+  if (isLoopbackUrl(resolved) && inboundBase && !isLoopbackUrl(inboundBase)) {
+    return fallback
+  }
+  return resolved
+}
+
+const resolveXOauthAuthorizeUrl = (rawUrl) => {
+  const fallback = 'https://x.com/i/oauth2/authorize'
+  const normalizedRaw = normalizeTextInput(rawUrl, { maxLength: 500 })
+  if (!normalizedRaw) return fallback
+  try {
+    const parsed = new URL(normalizedRaw)
+    const protocol = parsed.protocol.toLowerCase()
+    if (protocol !== 'https:' && protocol !== 'http:') return fallback
+    const host = parsed.hostname.toLowerCase()
+    if (host !== 'x.com' && host !== 'www.x.com' && host !== 'twitter.com' && host !== 'www.twitter.com') {
+      return fallback
+    }
+    const resolvedPath = parsed.pathname.replace(/\/+$/, '').toLowerCase()
+    if (resolvedPath !== '/i/oauth2/authorize') {
+      return fallback
+    }
+    parsed.search = ''
+    parsed.hash = ''
+    return parsed.toString().replace(/\/$/, '')
+  } catch {
+    return fallback
+  }
+}
+
+const resolveXOauthTokenUrls = () => {
+  const fallbackUrls = ['https://api.x.com/2/oauth2/token', 'https://api.twitter.com/2/oauth2/token']
+  const candidates = [xOauthTokenUrl, xOauthTokenFallbackUrl, ...fallbackUrls]
+  const resolved = []
+  for (const candidate of candidates) {
+    const normalized = normalizeTextInput(candidate, { maxLength: 500 })
+    if (!normalized) continue
+    try {
+      const parsed = new URL(normalized)
+      const protocol = parsed.protocol.toLowerCase()
+      if (protocol !== 'https:' && protocol !== 'http:') continue
+      const host = parsed.hostname.toLowerCase()
+      if (host !== 'api.x.com' && host !== 'api.twitter.com') continue
+      const resolvedPath = parsed.pathname.replace(/\/+$/, '').toLowerCase()
+      if (resolvedPath !== '/2/oauth2/token') continue
+      parsed.search = ''
+      parsed.hash = ''
+      const normalizedUrl = parsed.toString().replace(/\/$/, '')
+      if (!resolved.includes(normalizedUrl)) {
+        resolved.push(normalizedUrl)
+      }
+    } catch {
+      // Skip invalid OAuth token URL candidates.
+    }
+  }
+  return resolved
+}
+
 const trustedRequestOrigins = new Set(
   [resolveOriginBase(appBaseUrl), resolveOriginBase(serverBaseUrl)].filter(Boolean),
 )
+const hasExplicitGoogleRedirectUri = Boolean(
+  normalizeEnvValue(process.env.GOOGLE_REDIRECT_URI)
+  || normalizeEnvValue(process.env.SUPABASE_REDIRECT_URI),
+)
+const preferDynamicGoogleRedirectInDev = getEnv(
+  'GOOGLE_OAUTH_DYNAMIC_REDIRECT_IN_DEV',
+  'true',
+).toLowerCase() !== 'false'
 
 const isTrustedRequestSource = (req) => {
   const originHeader = typeof req.headers?.origin === 'string' ? req.headers.origin : ''
@@ -392,6 +958,44 @@ const resolveAppRedirectBase = (req) => {
   const fromCookie = resolveOriginBase(req.cookies?.[APP_REDIRECT_COOKIE])
   if (fromCookie) return fromCookie
   return appBaseUrl
+}
+
+const resolveGoogleOauthRedirectUri = ({
+  requestOriginBase = '',
+  refererOriginBase = '',
+} = {}) => {
+  const fallback = `${serverBaseUrl}/oauth/google/callback`
+  const configured = normalizeTextInput(redirectUri, { maxLength: 500 }) || fallback
+  const inboundBase = requestOriginBase || refererOriginBase
+
+  const toInboundRedirectUri = () => {
+    if (!inboundBase) return ''
+    if (isProd && !trustedRequestOrigins.has(inboundBase)) return ''
+    return `${inboundBase}/oauth/google/callback`
+  }
+
+  const dynamic = toInboundRedirectUri()
+  if (dynamic) {
+    if (!isProd && preferDynamicGoogleRedirectInDev) {
+      return dynamic
+    }
+    if (!hasExplicitGoogleRedirectUri) {
+      return dynamic
+    }
+  }
+
+  try {
+    const parsed = new URL(configured)
+    const protocol = parsed.protocol.toLowerCase()
+    if (protocol !== 'https:' && protocol !== 'http:') {
+      return fallback
+    }
+    parsed.search = ''
+    parsed.hash = ''
+    return parsed.toString().replace(/\/$/, '')
+  } catch {
+    return fallback
+  }
 }
 
 const isServerlessRuntime = Boolean(process.env.NETLIFY || process.env.AWS_LAMBDA_FUNCTION_NAME)
@@ -490,6 +1094,9 @@ const buildEmptyReportingStore = () => ({
     jobs: {},
     summaries: {},
   },
+  x: {
+    oauthVault: {},
+  },
 })
 
 const ensureInstagramReportingStore = (store) => {
@@ -509,6 +1116,17 @@ const ensureInstagramReportingStore = (store) => {
   return store
 }
 
+const ensureXOauthReportingStore = (store) => {
+  if (!store || typeof store !== 'object') return buildEmptyReportingStore()
+  if (!store.x || typeof store.x !== 'object' || Array.isArray(store.x)) {
+    store.x = { oauthVault: {} }
+  }
+  if (!store.x.oauthVault || typeof store.x.oauthVault !== 'object' || Array.isArray(store.x.oauthVault)) {
+    store.x.oauthVault = {}
+  }
+  return store
+}
+
 const loadReportingStore = async () => {
   if (reportingStore) return reportingStore
   if (!reportingStorePath) {
@@ -518,7 +1136,9 @@ const loadReportingStore = async () => {
   try {
     const raw = await readFile(reportingStorePath, 'utf8')
     const parsed = JSON.parse(raw)
-    reportingStore = parsed && typeof parsed === 'object' ? ensureInstagramReportingStore(parsed) : buildEmptyReportingStore()
+    reportingStore = parsed && typeof parsed === 'object'
+      ? ensureXOauthReportingStore(ensureInstagramReportingStore(parsed))
+      : buildEmptyReportingStore()
   } catch (err) {
     if (err && err.code !== 'ENOENT') {
       reportingStore = buildEmptyReportingStore()
@@ -527,7 +1147,7 @@ const loadReportingStore = async () => {
     }
     await writeFile(reportingStorePath, JSON.stringify(reportingStore, null, 2))
   }
-  ensureInstagramReportingStore(reportingStore)
+  ensureXOauthReportingStore(ensureInstagramReportingStore(reportingStore))
   return reportingStore
 }
 
@@ -935,8 +1555,20 @@ const setSupabaseSessionCookies = (res, payload) => {
   return true
 }
 
-const exchangeGoogleIdTokenForSupabaseSession = async (idToken) => {
-  if (!isSupabaseConfigured || !idToken) return null
+const exchangeGoogleIdTokenForSupabaseSession = async ({
+  idToken,
+  accessToken = '',
+} = {}) => {
+  if (!isSupabaseConfigured || !idToken) {
+    return {
+      ok: false,
+      error: {
+        status: 0,
+        code: 'supabase_not_configured_or_missing_id_token',
+        message: 'Supabase is not configured or Google id_token is missing.',
+      },
+    }
+  }
   try {
     const response = await fetch(`${supabaseUrl}/auth/v1/token?grant_type=id_token`, {
       method: 'POST',
@@ -948,22 +1580,76 @@ const exchangeGoogleIdTokenForSupabaseSession = async (idToken) => {
       body: JSON.stringify({
         provider: 'google',
         id_token: idToken,
+        ...(typeof accessToken === 'string' && accessToken ? { access_token: accessToken } : {}),
       }),
     })
     const payload = await response.json().catch(() => null)
     if (!response.ok || !payload?.access_token) {
+      const code = payload?.code || payload?.error || 'supabase_exchange_failed'
+      const message = payload?.message || payload?.msg || payload?.error_description || payload?.error
       console.error('Supabase id_token exchange failed:', {
         status: response.status,
-        code: payload?.code,
-        message: payload?.message || payload?.msg || payload?.error_description || payload?.error,
+        code,
+        message,
       })
-      return null
+      return {
+        ok: false,
+        error: {
+          status: response.status,
+          code,
+          message,
+        },
+      }
     }
-    return payload
+    return {
+      ok: true,
+      session: payload,
+    }
   } catch (err) {
     console.error('Supabase id_token exchange failed:', err)
-    return null
+    return {
+      ok: false,
+      error: {
+        status: 0,
+        code: 'network_or_runtime_error',
+        message: err instanceof Error ? err.message : 'Unexpected error exchanging id_token.',
+      },
+    }
   }
+}
+
+const isValidPkceCodeVerifier = (value) =>
+  /^[A-Za-z0-9._~-]{43,128}$/.test(normalizeTextInput(value, { maxLength: 200, trim: true }))
+
+const buildPkceCodeVerifier = () => crypto.randomBytes(48).toString('base64url')
+
+const buildPkceCodeChallenge = (verifier) => {
+  const normalizedVerifier = normalizeTextInput(verifier, { maxLength: 200, trim: true })
+  if (!isValidPkceCodeVerifier(normalizedVerifier)) return ''
+  return crypto
+    .createHash('sha256')
+    .update(normalizedVerifier)
+    .digest('base64url')
+}
+
+const buildSupabaseGoogleProviderErrorMessage = (exchangeError) => {
+  const code = normalizeTextInput(exchangeError?.code, { maxLength: 120 }).toLowerCase()
+  const message = normalizeTextInput(exchangeError?.message, { maxLength: 220 })
+  const signal = `${code} ${message}`.toLowerCase()
+
+  if (signal.includes('provider') && signal.includes('enable')) {
+    return 'Supabase rejected Google sign-in because the Google provider is disabled. Enable Google under Supabase Authentication > Providers.'
+  }
+  if (signal.includes('audience') || signal.includes('aud')) {
+    return 'Supabase rejected Google sign-in due to OAuth client mismatch. Ensure Supabase Google provider client ID matches GOOGLE_CLIENT_ID.'
+  }
+  if (signal.includes('nonce')) {
+    return 'Supabase rejected Google sign-in due to nonce validation. Verify nonce settings in Supabase Google provider configuration.'
+  }
+  if (message) {
+    return `Supabase session exchange failed: ${message}`
+  }
+  return 'Supabase session exchange failed. Check Supabase Authentication > Providers > Google settings.'
 }
 
 const refreshSupabaseSession = async (refreshToken) => {
@@ -1336,7 +2022,7 @@ app.use((req, res, next) => {
   res.setHeader('Vary', 'Origin')
   res.setHeader('Access-Control-Allow-Credentials', 'true')
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS')
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,ngrok-skip-browser-warning')
   res.setHeader('X-Content-Type-Options', 'nosniff')
   res.setHeader('X-Frame-Options', 'DENY')
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin')
@@ -2642,7 +3328,17 @@ const resolveAuthedUserContext = async (req, res) => {
   }
 
   const { accessToken, refreshToken } = readSupabaseSessionTokens(req)
-  if (!accessToken) {
+  let resolvedAccessToken = accessToken
+  if (!resolvedAccessToken && refreshToken) {
+    const refreshedSession = await refreshSupabaseSession(refreshToken)
+    if (refreshedSession?.access_token) {
+      setSupabaseSessionCookies(res, refreshedSession)
+      resolvedAccessToken = refreshedSession.access_token
+    } else {
+      clearSupabaseSessionCookies(res)
+    }
+  }
+  if (!resolvedAccessToken) {
     return {
       ok: false,
       status: 401,
@@ -2651,7 +3347,6 @@ const resolveAuthedUserContext = async (req, res) => {
     }
   }
 
-  let resolvedAccessToken = accessToken
   let authUserResult = await fetchSupabaseAuthUser(resolvedAccessToken)
   if (!authUserResult.ok && authUserResult.status === 401 && refreshToken) {
     const refreshedSession = await refreshSupabaseSession(refreshToken)
@@ -3202,23 +3897,27 @@ const listOrganizationRows = async () => {
 
   let lastResult = { ok: false, status: 500, payload: null, rows: [] }
   for (const endpoint of endpoints) {
-    const response = await fetch(endpoint, {
-      headers: {
-        apikey: supabaseSecretKey,
-        Authorization: `Bearer ${supabaseSecretKey}`,
-      },
-    })
-    const payload = await response.json().catch(() => null)
-    const rows = Array.isArray(payload) ? payload : []
-    const result = {
-      ok: response.ok,
-      status: response.status,
-      payload,
-      rows,
+    try {
+      const response = await fetch(endpoint, {
+        headers: {
+          apikey: supabaseSecretKey,
+          Authorization: `Bearer ${supabaseSecretKey}`,
+        },
+      })
+      const payload = await response.json().catch(() => null)
+      const rows = Array.isArray(payload) ? payload : []
+      const result = {
+        ok: response.ok,
+        status: response.status,
+        payload,
+        rows,
+      }
+      if (result.ok) return result
+      lastResult = result
+      if (response.status !== 404) break
+    } catch (_err) {
+      lastResult = { ok: false, status: 500, payload: null, rows: [] }
     }
-    if (result.ok) return result
-    lastResult = result
-    if (response.status !== 404) break
   }
 
   return lastResult
@@ -3662,6 +4361,18 @@ const collectConnectedChannelIdsForOrganization = (row) => {
       if (accountId) {
         connectedChannelIds.add(`instagram:${accountId}`)
       }
+      continue
+    }
+    if (platform === ORGANIZATION_CONNECTION_PLATFORM_X) {
+      const xUserId = resolveXUserIdFromConnection(account)
+      if (xUserId) {
+        connectedChannelIds.add(`x:${xUserId}`)
+        continue
+      }
+      const xUsername = resolveXUsernameFromConnection(account)
+      if (isValidXUsername(xUsername)) {
+        connectedChannelIds.add(`x:${xUsername}`)
+      }
     }
   }
   return connectedChannelIds
@@ -3780,6 +4491,14 @@ const resolveFirstVideoUploadDateFromPosts = (posts) => {
   return firstDates[0] || ''
 }
 
+const resolveFirstVideoUploadDateFromChannels = (channels) => {
+  const firstDates = (Array.isArray(channels) ? channels : [])
+    .map((channel) => normalizeIsoDateOnly(channel?.firstVideoUploadDate))
+    .filter((value) => value)
+    .sort((left, right) => left.localeCompare(right))
+  return firstDates[0] || ''
+}
+
 const scopeCachedSummaryToConnectedChannelIds = (summaryPayload, connectedChannelIds) => {
   const allowedChannelIds = connectedChannelIds instanceof Set ? connectedChannelIds : new Set()
   if (!allowedChannelIds.size) return buildEmptyYouTubeSummary()
@@ -3814,9 +4533,13 @@ const scopeCachedSummaryToConnectedChannelIds = (summaryPayload, connectedChanne
   const ageScoped = aggregateScopedDemographicsByChannel(summaryPayload?.ageDistributionByChannel, allowedChannelIds)
   const genderScoped = aggregateScopedDemographicsByChannel(summaryPayload?.genderDistributionByChannel, allowedChannelIds)
   const geoScoped = aggregateScopedDemographicsByChannel(summaryPayload?.topGeosByChannel, allowedChannelIds)
+  const firstVideoUploadDate =
+    resolveFirstVideoUploadDateFromChannels(channels)
+    || resolveFirstVideoUploadDateFromPosts(topPosts)
+    || normalizeIsoDateOnly(summaryPayload?.firstVideoUploadDate)
 
   return {
-    firstVideoUploadDate: resolveFirstVideoUploadDateFromPosts(topPosts),
+    firstVideoUploadDate,
     channels,
     topPosts,
     timeSeries,
@@ -3933,9 +4656,14 @@ const buildCampaignAvailableContent = async (campaignRow, options = {}) => {
     (account) =>
       normalizeOrganizationConnectionPlatform(account.platform) === ORGANIZATION_CONNECTION_PLATFORM_INSTAGRAM,
   )
+  const xAccounts = connectedAccounts.filter(
+    (account) =>
+      normalizeOrganizationConnectionPlatform(account.platform) === ORGANIZATION_CONNECTION_PLATFORM_X,
+  )
   const youtubeAccountByChannelId = new Map()
   const configuredOwnerByChannelId = new Map()
   const channelIdsByOwnerUserId = new Map()
+  const youtubeConnectionByOwnerChannelKey = new Map()
   for (const account of youtubeAccounts) {
     const channelId = normalizeTextInput(account.channelId, { maxLength: 300 })
     if (!channelId) continue
@@ -3966,6 +4694,14 @@ const buildCampaignAvailableContent = async (campaignRow, options = {}) => {
           normalizeTextInput(row?.updated_at, { maxLength: 64 })
           || normalizeTextInput(row?.connected_at, { maxLength: 64 })
         const updatedAt = Number.isFinite(Date.parse(updatedAtRaw)) ? Date.parse(updatedAtRaw) : 0
+        const connectionKey = `${ownerUserId}:${channelId}`
+        const existingConnectionEntry = youtubeConnectionByOwnerChannelKey.get(connectionKey)
+        if (!existingConnectionEntry || updatedAt >= existingConnectionEntry.updatedAt) {
+          youtubeConnectionByOwnerChannelKey.set(connectionKey, {
+            updatedAt,
+            connection: mapYouTubeConnectionRow(row),
+          })
+        }
         const existingLatest = latestOwnerByChannelId.get(channelId)
         if (!existingLatest || updatedAt >= existingLatest.updatedAt) {
           latestOwnerByChannelId.set(channelId, { ownerUserId, updatedAt })
@@ -4004,6 +4740,54 @@ const buildCampaignAvailableContent = async (campaignRow, options = {}) => {
     existing.add(accountId)
     instagramAccountIdsByOwnerUserId.set(ownerUserId, existing)
   }
+  const xAccountByUserId = new Map()
+  const xAccountByUsername = new Map()
+  const unresolvedXAccountsByUsername = new Map()
+  for (const account of xAccounts) {
+    const connectionUsername = resolveXUsernameFromConnection(account)
+    if (isValidXUsername(connectionUsername) && !xAccountByUsername.has(connectionUsername)) {
+      xAccountByUsername.set(connectionUsername, account)
+    }
+    const xUserId = resolveXUserIdFromConnection(account)
+    if (!xUserId) {
+      const username = resolveXUsernameFromConnection(account)
+      if (isValidXUsername(username) && !unresolvedXAccountsByUsername.has(username)) {
+        unresolvedXAccountsByUsername.set(username, account)
+      }
+      continue
+    }
+    if (!xAccountByUserId.has(xUserId)) {
+      xAccountByUserId.set(xUserId, account)
+    }
+  }
+  if (unresolvedXAccountsByUsername.size > 0) {
+    const xRowsByUsernameResult = await listXRowsByUsernames([...unresolvedXAccountsByUsername.keys()])
+    if (xRowsByUsernameResult.ok) {
+      for (const row of xRowsByUsernameResult.rows) {
+        const xUserId = resolveXUserIdFromStoredPostsPayload(row?.posts) || normalizeXUserId(row?.user_id)
+        const username = normalizeXUsername(row?.username)
+        if (!xUserId || !username || xAccountByUserId.has(xUserId)) continue
+        const fallbackAccount = unresolvedXAccountsByUsername.get(username)
+        if (!fallbackAccount) continue
+        xAccountByUserId.set(xUserId, fallbackAccount)
+        if (!xAccountByUsername.has(username)) {
+          xAccountByUsername.set(username, fallbackAccount)
+        }
+        unresolvedXAccountsByUsername.delete(username)
+      }
+    }
+    for (const [username, fallbackAccount] of unresolvedXAccountsByUsername.entries()) {
+      const lookupResult = await fetchXUserByUsername(username)
+      if (!lookupResult.ok || !lookupResult.user) continue
+      const xUserId = normalizeXUserId(lookupResult.user.userId)
+      if (!xUserId || xAccountByUserId.has(xUserId)) continue
+      xAccountByUserId.set(xUserId, fallbackAccount)
+      if (!xAccountByUsername.has(username)) {
+        xAccountByUsername.set(username, fallbackAccount)
+      }
+      unresolvedXAccountsByUsername.delete(username)
+    }
+  }
 
   const channelOptions = [
     ...[...youtubeAccountByChannelId.entries()].map(([channelId, account]) => ({
@@ -4012,6 +4796,14 @@ const buildCampaignAvailableContent = async (campaignRow, options = {}) => {
     })),
     ...[...instagramAccountById.entries()].map(([accountId, account]) => ({
       id: `instagram:${accountId}`,
+      label: formatOrganizationConnectedAccountLabel(account),
+    })),
+    ...[...xAccountByUserId.entries()].map(([xUserId, account]) => ({
+      id: `x:${xUserId}`,
+      label: formatOrganizationConnectedAccountLabel(account),
+    })),
+    ...[...unresolvedXAccountsByUsername.entries()].map(([username, account]) => ({
+      id: `x:${username}`,
       label: formatOrganizationConnectedAccountLabel(account),
     })),
   ]
@@ -4048,6 +4840,42 @@ const buildCampaignAvailableContent = async (campaignRow, options = {}) => {
     }
   }
 
+  for (const [ownerUserId, channelIdSet] of channelIdsByOwnerUserId.entries()) {
+    for (const channelId of channelIdSet.values()) {
+      const connectionKey = `${ownerUserId}:${channelId}`
+      const connectionEntry = youtubeConnectionByOwnerChannelKey.get(connectionKey)
+      const account = youtubeAccountByChannelId.get(channelId)
+      if (!connectionEntry?.connection || !account) continue
+      try {
+        const { accessToken } = await ensureValidAccessTokenForUser(ownerUserId, connectionEntry.connection)
+        if (!accessToken) continue
+        const channelVideos = await fetchAllYouTubeVideosForChannel(accessToken, channelId)
+        for (const video of channelVideos) {
+          const postId = normalizeTextInput(video?.id, { maxLength: 300 })
+          if (!postId) continue
+          const views = Math.max(0, toNumber(video?.views))
+          const likes = Math.max(0, toNumber(video?.likes))
+          const comments = Math.max(0, toNumber(video?.comments))
+          postsById.set(postId, {
+            id: postId,
+            title: normalizeTextInput(video?.title, { maxLength: 300 }) || 'Untitled video',
+            platform: ORGANIZATION_CONNECTION_PLATFORM_YOUTUBE,
+            channelId,
+            channelName: formatOrganizationConnectedAccountLabel(account),
+            views,
+            engagementRate: views > 0 ? ((likes + comments) / views) * 100 : 0,
+          })
+        }
+      } catch (error) {
+        console.error('Unable to fetch full channel videos for campaign post management:', {
+          ownerUserId,
+          channelId,
+          message: error instanceof Error ? error.message : 'unknown_error',
+        })
+      }
+    }
+  }
+
   for (const [ownerUserId, accountIdSet] of instagramAccountIdsByOwnerUserId.entries()) {
     const scopedAccountIds = new Set([...accountIdSet.values()])
     const cachedResult = await getCachedInstagramSummaryByUserId(ownerUserId)
@@ -4076,25 +4904,41 @@ const buildCampaignAvailableContent = async (campaignRow, options = {}) => {
     }
   }
 
+  const xRowsResult = await listXRowsByUserIds([...xAccountByUserId.keys()])
+  if (xRowsResult.ok) {
+    for (const row of xRowsResult.rows) {
+      const xUserId = resolveXUserIdFromStoredPostsPayload(row?.posts) || normalizeXUserId(row?.user_id)
+      const xUsername = normalizeXUsername(row?.username)
+      const account = (xUserId ? xAccountByUserId.get(xUserId) : null) || (xUsername ? xAccountByUsername.get(xUsername) : null)
+      if (!account) continue
+      const resolvedChannelUserId = resolveXUserIdFromConnection(account) || xUserId
+      if (!resolvedChannelUserId) continue
+      const posts = normalizeXStoredPosts(row?.posts, {
+        userId: resolvedChannelUserId,
+        username: xUsername || resolveXUsernameFromConnection(account),
+      })
+      for (const post of posts) {
+        const postKey = `x:${post.id}`
+        if (postsById.has(postKey)) continue
+        postsById.set(postKey, {
+          id: postKey,
+          title: post.title,
+          platform: ORGANIZATION_CONNECTION_PLATFORM_X,
+          channelId: `x:${resolvedChannelUserId}`,
+          channelName: formatOrganizationConnectedAccountLabel(account),
+          views: Math.max(0, toNumber(post.views)),
+          engagementRate: Math.max(0, toNumber(post.engagementRate)),
+        })
+      }
+    }
+  }
+
   const posts = [...postsById.values()].sort((left, right) => right.views - left.views)
   return {
     accountLabels,
     channels: channelOptions,
     posts,
   }
-}
-
-const resolveCampaignAllowedYouTubeChannelIds = async (campaignRow, viewerUserId = '') => {
-  const allowedOrganizationIds = await resolveCampaignAllowedOrganizationIds(campaignRow)
-  if (!allowedOrganizationIds.length) return new Set()
-  const organizationRows = await fetchOrganizationsByIds(allowedOrganizationIds)
-  const normalizedViewerUserId = normalizeTextInput(viewerUserId, { maxLength: 80 })
-  const hasViewerScope = isUuid(normalizedViewerUserId)
-  const scopedOrganizationRows = hasViewerScope
-    ? organizationRows.filter((row) => canUserAccessOrganizationChannels(row, normalizedViewerUserId))
-    : organizationRows
-  const accountsByChannelId = collectYouTubeAccountsByChannelId(scopedOrganizationRows)
-  return new Set(accountsByChannelId.keys())
 }
 
 app.get('/api/campaigns', async (req, res) => {
@@ -5130,11 +5974,11 @@ app.post('/api/campaigns/:campaignId/posts', async (req, res) => {
     return
   }
 
-  const allowedChannelIds = await resolveCampaignAllowedYouTubeChannelIds(campaignRow, viewer.userId)
+  const allowedChannelIds = await resolveVisibleCampaignChannelIdsForViewer(campaignRow, viewer.userId)
   if (selectedPostIds.length && !allowedChannelIds.size) {
     res.status(400).json({
       error: 'invalid_campaign_posts_payload',
-      message: 'No connected YouTube accounts are available for this campaign.',
+      message: 'No connected accounts are available for this campaign.',
     })
     return
   }
@@ -6120,13 +6964,7 @@ app.post('/api/organizations/:organizationId/connections', async (req, res) => {
   const payload = req.body ?? {}
   const platform = normalizeOrganizationConnectionPlatform(payload.platform)
   const accountName = normalizeTextInput(payload.accountName, { maxLength: 180 })
-  if (!accountName) {
-    res.status(400).json({
-      error: 'invalid_organization_connection_payload',
-      message: 'accountName is required.',
-    })
-    return
-  }
+  const requestedUsername = normalizeXUsername(payload.username || payload.accountName)
 
   if (platform === ORGANIZATION_CONNECTION_PLATFORM_YOUTUBE) {
     res.status(400).json({
@@ -6135,20 +6973,74 @@ app.post('/api/organizations/:organizationId/connections', async (req, res) => {
     })
     return
   }
+  if (platform === ORGANIZATION_CONNECTION_PLATFORM_INSTAGRAM) {
+    res.status(400).json({
+      error: 'instagram_oauth_required',
+      message: 'Connect Instagram accounts using OAuth from the Manage Connections dialog.',
+    })
+    return
+  }
+  if (platform !== ORGANIZATION_CONNECTION_PLATFORM_X) {
+    res.status(400).json({
+      error: 'invalid_organization_connection_payload',
+      message: 'Unsupported organization connection platform.',
+    })
+    return
+  }
+  if (!xCollectionEnabled || !xBearerToken) {
+    res.status(503).json({
+      error: 'x_not_configured',
+      message: 'X integration is not configured on the server.',
+    })
+    return
+  }
+  if (!isValidXUsername(requestedUsername)) {
+    res.status(400).json({
+      error: 'invalid_x_username',
+      message: 'Enter a valid X username (letters, numbers, underscores; max 15 chars).',
+    })
+    return
+  }
+
+  const xUserLookup = await fetchXUserByUsername(requestedUsername)
+  if (!xUserLookup.ok || !xUserLookup.user) {
+    res.status(xUserLookup.status || 502).json({
+      error: xUserLookup.error || 'x_user_lookup_failed',
+      message: 'Unable to resolve X username to user ID.',
+      details: xUserLookup.payload ?? null,
+    })
+    return
+  }
+  const resolvedXUserId = xUserLookup.user.userId
+  const resolvedXUsername = xUserLookup.user.username
+  const resolvedAccountName = formatXAccountName(resolvedXUsername) || accountName || requestedUsername
 
   const currentAccounts = normalizeOrganizationConnectedAccounts(organizationRow?.connected_accounts)
   const existing = currentAccounts.find(
-    (account) =>
-      normalizeOrganizationConnectionPlatform(account.platform) === platform
-      && normalizeChannelName(account.accountName) === normalizeChannelName(accountName),
+    (account) => {
+      if (normalizeOrganizationConnectionPlatform(account.platform) !== platform) return false
+      const existingXUserId = resolveXUserIdFromConnection(account)
+      if (existingXUserId && resolvedXUserId) {
+        return existingXUserId === resolvedXUserId
+      }
+      return normalizeXUsername(account.accountName) === resolvedXUsername
+    },
   )
   const connectedAt = new Date().toISOString()
   const nextConnection = existing
-    ? { ...existing, accountName, connectedAt }
+    ? {
+        ...existing,
+        accountName: resolvedAccountName,
+        channelId: resolvedXUserId,
+        ownerUserId: viewer.userId,
+        connectedAt,
+      }
     : {
         id: buildOrganizationConnectionId(platform),
         platform,
-        accountName,
+        accountName: resolvedAccountName,
+        channelId: resolvedXUserId,
+        ownerUserId: viewer.userId,
         connectedAt,
       }
   const nextAccounts = existing
@@ -6166,7 +7058,16 @@ app.post('/api/organizations/:organizationId/connections', async (req, res) => {
   }
 
   const organization = await mapOrganizationForClientWithResolvedUsers(updateResult.row)
-  res.json({ organization })
+  const xSyncResult = await refreshAndPersistXAccount({
+    userId: resolvedXUserId,
+    username: resolvedXUsername,
+    fallbackFollowerCount: xUserLookup.user.followerCount,
+    ownerUserId: viewer.userId,
+  })
+  const connectionWarning = !xSyncResult.ok
+    ? 'Connected account. Initial post sync failed; run Refresh to pull X posts and metrics.'
+    : ''
+  res.json({ organization, warning: connectionWarning })
 })
 
 app.delete('/api/organizations/:organizationId/connections/:connectionId', async (req, res) => {
@@ -6260,7 +7161,6 @@ app.delete('/api/organizations/:organizationId/connections/:connectionId', async
       await deleteCachedYouTubeSummaryByUserId(ownerUserId)
     }
   }
-
   const nextAccounts = currentAccounts.filter((account) => account.id !== connectionId)
   const updateResult = await updateOrganizationConnectedAccounts(organizationId, nextAccounts)
   if (!updateResult.ok || !updateResult.row) {
@@ -6276,9 +7176,37 @@ app.delete('/api/organizations/:organizationId/connections/:connectionId', async
   res.json({ organization })
 })
 
-app.get('/oauth/google', (_req, res) => {
-  if (!clientId || !clientSecret || !redirectUri) {
-    res.redirect(buildAppRedirect({ status: 'error', message: 'Google OAuth not configured.' }))
+app.get('/oauth/google', (req, res) => {
+  const requestedOrigin =
+    typeof req.query?.app_origin === 'string' ? req.query.app_origin : ''
+  const refererOrigin = typeof req.headers.referer === 'string' ? req.headers.referer : ''
+  const requestedOriginBase = resolveOriginBase(requestedOrigin)
+  const refererOriginBase = resolveOriginBase(refererOrigin)
+  const appOriginCandidate = requestedOriginBase || refererOriginBase
+  const appOrigin =
+    appOriginCandidate && (!isProd || trustedRequestOrigins.has(appOriginCandidate))
+      ? appOriginCandidate
+      : ''
+  if (appOrigin) {
+    res.cookie(APP_REDIRECT_COOKIE, appOrigin, {
+      httpOnly: true,
+      sameSite: cookieSameSite,
+      secure: cookieSecure,
+      maxAge: 10 * 60 * 1000,
+    })
+  }
+  const redirectBase = appOrigin || resolveAppRedirectBase(req)
+  const oauthRedirectUri = resolveGoogleOauthRedirectUri({
+    requestOriginBase: requestedOriginBase,
+    refererOriginBase,
+  })
+
+  if (!clientId || !clientSecret || !oauthRedirectUri) {
+    res.redirect(buildAppRedirect({
+      status: 'error',
+      message: 'Google OAuth not configured.',
+      baseUrl: redirectBase,
+    }))
     return
   }
 
@@ -6289,10 +7217,16 @@ app.get('/oauth/google', (_req, res) => {
     secure: cookieSecure,
     maxAge: 10 * 60 * 1000,
   })
+  res.cookie(GOOGLE_OAUTH_CONTEXT_COOKIE, JSON.stringify({ redirectUri: oauthRedirectUri }), {
+    httpOnly: true,
+    sameSite: cookieSameSite,
+    secure: cookieSecure,
+    maxAge: 10 * 60 * 1000,
+  })
 
   const params = new URLSearchParams({
     client_id: clientId,
-    redirect_uri: redirectUri,
+    redirect_uri: oauthRedirectUri,
     response_type: 'code',
     scope,
     state,
@@ -6306,25 +7240,63 @@ app.get('/oauth/google', (_req, res) => {
 
 app.get('/oauth/google/callback', async (req, res) => {
   const { code, state, error, error_description: errorDescription } = req.query
+  const redirectBase = resolveAppRedirectBase(req)
   const expectedState = req.cookies.google_oauth_state
+  const rawContext = req.cookies?.[GOOGLE_OAUTH_CONTEXT_COOKIE]
+  let oauthContext = { redirectUri: '' }
+  if (typeof rawContext === 'string' && rawContext.trim()) {
+    try {
+      const parsed = JSON.parse(rawContext)
+      if (parsed && typeof parsed === 'object') {
+        oauthContext = {
+          redirectUri: normalizeTextInput(parsed.redirectUri, { maxLength: 500 }),
+        }
+      }
+    } catch {
+      oauthContext = { redirectUri: '' }
+    }
+  }
+  const oauthRedirectUri = resolveGoogleOauthRedirectUri({
+    requestOriginBase: redirectBase,
+  })
+  const redirectUriForExchange =
+    normalizeTextInput(oauthContext.redirectUri, { maxLength: 500 }) || oauthRedirectUri
+
+  const clearGoogleOauthCookies = () => {
+    res.clearCookie('google_oauth_state')
+    res.clearCookie(GOOGLE_OAUTH_CONTEXT_COOKIE)
+    res.clearCookie(APP_REDIRECT_COOKIE)
+  }
 
   if (error) {
+    clearGoogleOauthCookies()
     res.redirect(
       buildAppRedirect({
         status: 'error',
         message: typeof errorDescription === 'string' ? errorDescription : 'Google login failed.',
+        baseUrl: redirectBase,
       }),
     )
     return
   }
 
   if (!state || !expectedState || state !== expectedState) {
-    res.redirect(buildAppRedirect({ status: 'error', message: 'Google login state mismatch.' }))
+    clearGoogleOauthCookies()
+    res.redirect(buildAppRedirect({
+      status: 'error',
+      message: 'Google login state mismatch.',
+      baseUrl: redirectBase,
+    }))
     return
   }
 
   if (!code || typeof code !== 'string') {
-    res.redirect(buildAppRedirect({ status: 'error', message: 'Missing authorization code.' }))
+    clearGoogleOauthCookies()
+    res.redirect(buildAppRedirect({
+      status: 'error',
+      message: 'Missing authorization code.',
+      baseUrl: redirectBase,
+    }))
     return
   }
 
@@ -6334,7 +7306,7 @@ app.get('/oauth/google/callback', async (req, res) => {
       client_secret: clientSecret,
       code,
       grant_type: 'authorization_code',
-      redirect_uri: redirectUri,
+      redirect_uri: redirectUriForExchange,
     })
 
     const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
@@ -6352,29 +7324,38 @@ app.get('/oauth/google/callback', async (req, res) => {
         tokenPayload?.error_description ||
         tokenPayload?.error ||
         'Google token exchange failed.'
-      res.redirect(buildAppRedirect({ status: 'error', message }))
+      clearGoogleOauthCookies()
+      res.redirect(buildAppRedirect({ status: 'error', message, baseUrl: redirectBase }))
       return
     }
 
     if (isSupabaseConfigured) {
       if (typeof idToken !== 'string' || !idToken) {
         clearSupabaseSessionCookies(res)
+        clearGoogleOauthCookies()
         res.redirect(
           buildAppRedirect({
             status: 'error',
             message: 'Google did not return an ID token for Supabase sign-in.',
+            baseUrl: redirectBase,
           }),
         )
         return
       }
 
-      const supabaseSession = await exchangeGoogleIdTokenForSupabaseSession(idToken)
+      const supabaseExchange = await exchangeGoogleIdTokenForSupabaseSession({
+        idToken,
+        accessToken: typeof accessToken === 'string' ? accessToken : '',
+      })
+      const supabaseSession = supabaseExchange.ok ? supabaseExchange.session : null
       if (!supabaseSession?.access_token) {
         clearSupabaseSessionCookies(res)
+        clearGoogleOauthCookies()
         res.redirect(
           buildAppRedirect({
             status: 'error',
-            message: 'Supabase session exchange failed. Check Supabase Google provider settings.',
+            message: buildSupabaseGoogleProviderErrorMessage(supabaseExchange.error),
+            baseUrl: redirectBase,
           }),
         )
         return
@@ -6383,10 +7364,12 @@ app.get('/oauth/google/callback', async (req, res) => {
       const ensuredRow = await ensureSupabaseUserRow(supabaseSession)
       if (!ensuredRow.ok) {
         clearSupabaseSessionCookies(res)
+        clearGoogleOauthCookies()
         res.redirect(
           buildAppRedirect({
             status: 'error',
             message: `Unable to initialize your account (${ensuredRow.reason}). Please try again.`,
+            baseUrl: redirectBase,
           }),
         )
         return
@@ -6394,10 +7377,12 @@ app.get('/oauth/google/callback', async (req, res) => {
 
       if (!setSupabaseSessionCookies(res, supabaseSession)) {
         clearSupabaseSessionCookies(res)
+        clearGoogleOauthCookies()
         res.redirect(
           buildAppRedirect({
             status: 'error',
             message: 'Unable to persist Supabase session cookies.',
+            baseUrl: redirectBase,
           }),
         )
         return
@@ -6405,10 +7390,1186 @@ app.get('/oauth/google/callback', async (req, res) => {
     } else {
       clearSupabaseSessionCookies(res)
     }
-    res.clearCookie('google_oauth_state')
-    res.redirect(buildAppRedirect({ status: 'success' }))
+    clearGoogleOauthCookies()
+    res.redirect(buildAppRedirect({ status: 'success', baseUrl: redirectBase }))
   } catch (_err) {
-    res.redirect(buildAppRedirect({ status: 'error', message: 'Google login failed.' }))
+    clearGoogleOauthCookies()
+    res.redirect(buildAppRedirect({
+      status: 'error',
+      message: 'Google login failed.',
+      baseUrl: redirectBase,
+    }))
+  }
+})
+
+const buildInstagramAppSecretProof = (accessToken) => {
+  const normalizedAccessToken = normalizeTextInput(accessToken, { maxLength: 2000, trim: true })
+  if (!normalizedAccessToken || !instagramAppSecret) return ''
+  return crypto
+    .createHmac('sha256', instagramAppSecret)
+    .update(normalizedAccessToken)
+    .digest('hex')
+}
+
+const readInstagramGraphErrorMessage = (payload, fallback) => {
+  const errorMessage = normalizeTextInput(payload?.error?.message, { maxLength: 240 })
+  if (errorMessage) return errorMessage
+  return normalizeTextInput(payload?.message, { maxLength: 240 }) || fallback
+}
+
+const requestInstagramGraph = async ({
+  base = 'facebook',
+  path = '/',
+  query = {},
+  accessToken = instagramAccessToken,
+  timeoutMs = 15_000,
+} = {}) => {
+  const normalizedAccessToken = normalizeTextInput(accessToken, { maxLength: 4000 })
+  if (!normalizedAccessToken) {
+    return {
+      ok: false,
+      status: 500,
+      error: 'missing_instagram_access_token',
+      message: 'INSTAGRAM_ACCESS_TOKEN is not configured.',
+      payload: null,
+    }
+  }
+
+  const normalizedVersion = normalizeTextInput(instagramGraphApiVersion, { maxLength: 24 }).toLowerCase()
+  const parsedVersion = normalizedVersion.replace(/^v/, '')
+  const safeVersion = /^\d+(?:\.\d+)?$/.test(parsedVersion) ? `v${parsedVersion}` : 'v22.0'
+  const normalizedPath = normalizeTextInput(path, { maxLength: 240 }) || '/'
+  const pathWithSlash = normalizedPath.startsWith('/') ? normalizedPath : `/${normalizedPath}`
+  const baseUrl = base === 'instagram'
+    ? 'https://graph.instagram.com'
+    : `https://graph.facebook.com/${safeVersion}`
+
+  const abortController = new AbortController()
+  const safeTimeoutMs = Math.max(3000, Math.min(60_000, toNumber(timeoutMs) || 15_000))
+  const timeoutId = setTimeout(() => abortController.abort(), safeTimeoutMs)
+  const performRequest = async ({ includeAppSecretProof = true } = {}) => {
+    const params = new URLSearchParams()
+    Object.entries(query).forEach(([key, value]) => {
+      const normalizedKey = normalizeTextInput(key, { maxLength: 120 })
+      if (!normalizedKey) return
+      const normalizedValue = normalizeTextInput(String(value ?? ''), { maxLength: 4000 })
+      if (!normalizedValue) return
+      params.set(normalizedKey, normalizedValue)
+    })
+    params.set('access_token', normalizedAccessToken)
+    if (base === 'facebook') {
+      if (includeAppSecretProof) {
+        const appsecretProof = buildInstagramAppSecretProof(normalizedAccessToken)
+        if (appsecretProof) {
+          params.set('appsecret_proof', appsecretProof)
+        }
+      }
+      if (instagramClientToken) {
+        params.set('client_token', instagramClientToken)
+      }
+    }
+    const response = await fetch(`${baseUrl}${pathWithSlash}?${params.toString()}`, {
+      signal: abortController.signal,
+    })
+    const payload = await response.json().catch(() => null)
+    return { response, payload }
+  }
+  try {
+    let { response, payload } = await performRequest({ includeAppSecretProof: true })
+    if (!response.ok && base === 'facebook') {
+      const initialMessage = readInstagramGraphErrorMessage(payload, '').toLowerCase()
+      const shouldRetryWithoutProof =
+        initialMessage.includes('appsecret_proof')
+        || initialMessage.includes('invalid appsecret')
+      if (shouldRetryWithoutProof) {
+        ;({ response, payload } = await performRequest({ includeAppSecretProof: false }))
+      }
+    }
+    if (!response.ok) {
+      return {
+        ok: false,
+        status: response.status,
+        error: 'instagram_graph_request_failed',
+        message: readInstagramGraphErrorMessage(payload, 'Instagram Graph request failed.'),
+        payload,
+      }
+    }
+    return {
+      ok: true,
+      status: response.status,
+      payload,
+    }
+  } catch (error) {
+    const isAbort = error instanceof Error && error.name === 'AbortError'
+    return {
+      ok: false,
+      status: 502,
+      error: isAbort ? 'instagram_graph_timeout' : 'instagram_graph_request_failed',
+      message: isAbort ? 'Instagram Graph request timed out.' : 'Unable to reach Instagram Graph.',
+      payload: null,
+    }
+  } finally {
+    clearTimeout(timeoutId)
+  }
+}
+
+const normalizeInstagramGraphConnectionCandidate = (value) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const graphUserId = normalizeTextInput(value.graphUserId || value.id, { maxLength: 120 })
+  const username = normalizeInstagramHandle(value.username)
+  const fallbackId = graphUserId ? graphUserId.toLowerCase() : ''
+  const accountId = username || fallbackId
+  if (!accountId) return null
+  const accountName =
+    normalizeTextInput(value.accountName || value.name, { maxLength: 180 })
+    || username
+    || accountId
+  return {
+    accountId,
+    accountName,
+    graphUserId,
+    username,
+    followers: Math.max(0, toNumber(value.followers)),
+    postsCount: Math.max(0, toNumber(value.postsCount)),
+    source: normalizeTextInput(value.source, { maxLength: 40 }) || 'graph',
+  }
+}
+
+const listInstagramGraphConnectionCandidates = async (options = {}) => {
+  const forceRefresh = options.force === true
+  const enableBasicDisplayProbe = options.enableBasicDisplayProbe !== false
+  const requestedPageId = normalizeTextInput(options.pageId, { maxLength: 120 }) || instagramFacebookPageId
+  const requestedToken = normalizeTextInput(options.accessToken, { maxLength: 4000 }) || instagramAccessToken
+  if (!requestedToken) {
+    return {
+      ok: false,
+      status: 500,
+      error: 'missing_instagram_access_token',
+      message: 'INSTAGRAM_ACCESS_TOKEN is not configured.',
+      candidates: [],
+    }
+  }
+  const nowMs = Date.now()
+  const normalizedToken = requestedToken
+  if (
+    !forceRefresh
+    && instagramGraphConnectionCandidateCache.token === normalizedToken
+    && instagramGraphConnectionCandidateCache.expiresAtMs > nowMs
+    && Array.isArray(instagramGraphConnectionCandidateCache.candidates)
+    && instagramGraphConnectionCandidateCache.candidates.length
+  ) {
+    return {
+      ok: true,
+      status: 200,
+      candidates: instagramGraphConnectionCandidateCache.candidates,
+    }
+  }
+
+  const candidatesById = new Map()
+  let lastErrorMessage = ''
+  const addCandidatesFromPage = (page, source = 'facebook_pages') => {
+    if (!page || typeof page !== 'object') return
+    const pageInstagramAccounts = [
+      page?.instagram_business_account,
+      page?.connected_instagram_account,
+    ]
+    pageInstagramAccounts.forEach((igAccount) => {
+      if (!igAccount || typeof igAccount !== 'object') return
+      const candidate = normalizeInstagramGraphConnectionCandidate({
+        id: igAccount.id,
+        graphUserId: igAccount.id,
+        username: igAccount.username,
+        accountName: igAccount.name || igAccount.username || page?.name,
+        followers: igAccount.followers_count,
+        postsCount: igAccount.media_count,
+        source,
+      })
+      if (!candidate) return
+      candidatesById.set(candidate.accountId, candidate)
+    })
+  }
+
+  if (requestedPageId) {
+    const pageResult = await requestInstagramGraph({
+      base: 'facebook',
+      path: `/${encodeURIComponent(requestedPageId)}`,
+      query: {
+        fields: 'id,name,instagram_business_account{id,username,name,followers_count,media_count},connected_instagram_account{id,username,name,followers_count,media_count}',
+      },
+      accessToken: normalizedToken,
+    })
+    if (pageResult.ok) {
+      addCandidatesFromPage(pageResult.payload, 'facebook_page_id')
+    } else {
+      lastErrorMessage = pageResult.message || lastErrorMessage
+    }
+  }
+
+  const businessResult = await requestInstagramGraph({
+    base: 'facebook',
+    path: '/me/accounts',
+    query: {
+      fields: 'id,name,instagram_business_account{id,username,name,followers_count,media_count},connected_instagram_account{id,username,name,followers_count,media_count}',
+      limit: '50',
+    },
+    accessToken: normalizedToken,
+  })
+  if (businessResult.ok) {
+    const pages = Array.isArray(businessResult.payload?.data) ? businessResult.payload.data : []
+    pages.forEach((page) => {
+      addCandidatesFromPage(page, 'facebook_pages')
+    })
+  } else {
+    lastErrorMessage = businessResult.message || lastErrorMessage
+  }
+
+  if (enableBasicDisplayProbe) {
+    const basicProfileResult = await requestInstagramGraph({
+      base: 'instagram',
+      path: '/me',
+      query: {
+        fields: 'id,username,account_type,media_count',
+      },
+      accessToken: normalizedToken,
+    })
+    if (basicProfileResult.ok) {
+      const candidate = normalizeInstagramGraphConnectionCandidate({
+        id: basicProfileResult.payload?.id,
+        graphUserId: basicProfileResult.payload?.id,
+        username: basicProfileResult.payload?.username,
+        accountName: basicProfileResult.payload?.username,
+        postsCount: basicProfileResult.payload?.media_count,
+        source: 'basic_display',
+      })
+      if (candidate) {
+        candidatesById.set(candidate.accountId, candidate)
+      }
+    } else if (!lastErrorMessage) {
+      const normalizedProbeError = normalizeTextInput(basicProfileResult.message, { maxLength: 240 }).toLowerCase()
+      const isNonBlockingTokenError =
+        normalizedProbeError.includes('invalid oauth access token')
+        || normalizedProbeError.includes('cannot parse access token')
+      if (!isNonBlockingTokenError) {
+        lastErrorMessage = basicProfileResult.message || ''
+      }
+    }
+  }
+
+  const candidates = [...candidatesById.values()]
+  if (!candidates.length) {
+    const noAccountsMessage = enableBasicDisplayProbe
+      ? 'Unable to find Instagram accounts for the configured token.'
+      : 'No linked Instagram professional account was found. Link the Instagram account to a Facebook Page.'
+    return {
+      ok: false,
+      status: 502,
+      error: 'instagram_accounts_not_found',
+      message: lastErrorMessage || noAccountsMessage,
+      candidates: [],
+    }
+  }
+
+  instagramGraphConnectionCandidateCache.token = normalizedToken
+  instagramGraphConnectionCandidateCache.expiresAtMs = nowMs + 60_000
+  instagramGraphConnectionCandidateCache.candidates = candidates
+
+  return {
+    ok: true,
+    status: 200,
+    candidates,
+  }
+}
+
+const resolveInstagramGraphCandidateForConnection = (connection, candidates = []) => {
+  const normalizedCandidates = Array.isArray(candidates) ? candidates : []
+  if (!normalizedCandidates.length) return null
+  const requestedAccountId = resolveInstagramAccountId(connection)
+  const requestedAccountName = normalizeInstagramHandle(connection?.accountName)
+
+  const byExactId = normalizedCandidates.find((candidate) => candidate.accountId === requestedAccountId)
+  if (byExactId) return byExactId
+  const byGraphId = normalizedCandidates.find((candidate) => {
+    const graphUserId = normalizeTextInput(candidate.graphUserId, { maxLength: 120 }).toLowerCase()
+    return graphUserId && graphUserId === requestedAccountId
+  })
+  if (byGraphId) return byGraphId
+  const byName = normalizedCandidates.find((candidate) => candidate.username === requestedAccountName)
+  if (byName) return byName
+  return null
+}
+
+app.get('/oauth/instagram', async (req, res) => {
+  const requestedOrigin =
+    typeof req.query?.app_origin === 'string' ? req.query.app_origin : ''
+  const requestedPath = normalizeTextInput(req.query?.path, { maxLength: 64 })
+  const requestedOrganizationId = normalizeTextInput(req.query?.organization_id, { maxLength: 80 })
+  const refererOrigin = typeof req.headers.referer === 'string' ? req.headers.referer : ''
+  const requestedOriginBase = resolveOriginBase(requestedOrigin)
+  const refererOriginBase = resolveOriginBase(refererOrigin)
+  const appOriginCandidate = requestedOriginBase || refererOriginBase
+  const appOrigin =
+    appOriginCandidate && trustedRequestOrigins.has(appOriginCandidate)
+      ? appOriginCandidate
+      : ''
+  if (appOrigin) {
+    res.cookie(APP_REDIRECT_COOKIE, appOrigin, {
+      httpOnly: true,
+      sameSite: cookieSameSite,
+      secure: cookieSecure,
+      maxAge: 10 * 60 * 1000,
+    })
+  }
+  const redirectBase = appOrigin || resolveAppRedirectBase(req)
+  const redirectPath = requestedPath === '/organizations' ? '/organizations' : '/settings'
+  const oauthRedirectUri = resolveInstagramOauthRedirectUri({
+    requestOriginBase: requestedOriginBase,
+    refererOriginBase,
+  })
+
+  const viewer = await resolveAuthedUserContext(req, res)
+  if (!viewer.ok) {
+    res.redirect(
+      buildAppRedirect({
+        status: 'error',
+        provider: 'instagram',
+        message: 'You must be signed in to connect Instagram.',
+        path: redirectPath,
+        baseUrl: redirectBase,
+      }),
+    )
+    return
+  }
+
+  if (!requestedOrganizationId) {
+    res.redirect(
+      buildAppRedirect({
+        status: 'error',
+        provider: 'instagram',
+        message: 'Select an organization before connecting Instagram.',
+        path: '/organizations',
+        baseUrl: redirectBase,
+      }),
+    )
+    return
+  }
+  if (!isUuid(requestedOrganizationId)) {
+    res.redirect(
+      buildAppRedirect({
+        status: 'error',
+        provider: 'instagram',
+        message: 'Organization id must be a valid UUID.',
+        path: '/organizations',
+        baseUrl: redirectBase,
+      }),
+    )
+    return
+  }
+
+  const organizationResult = await fetchOrganizationRowById(requestedOrganizationId)
+  if (!organizationResult.ok || !organizationResult.row) {
+    res.redirect(
+      buildAppRedirect({
+        status: 'error',
+        provider: 'instagram',
+        message: 'Unable to load organization for Instagram connection.',
+        path: '/organizations',
+        baseUrl: redirectBase,
+      }),
+    )
+    return
+  }
+  if (!canUserSeeOrganization(organizationResult.row, viewer.userId, viewer.appRole)) {
+    res.redirect(
+      buildAppRedirect({
+        status: 'error',
+        provider: 'instagram',
+        message: 'You do not have access to this organization.',
+        path: '/organizations',
+        baseUrl: redirectBase,
+      }),
+    )
+    return
+  }
+  if (!canUserManageOrganizationConnections(organizationResult.row, viewer.userId)) {
+    res.redirect(
+      buildAppRedirect({
+        status: 'error',
+        provider: 'instagram',
+        message: 'Brand viewers may view connected accounts but cannot edit them.',
+        path: '/organizations',
+        baseUrl: redirectBase,
+      }),
+    )
+    return
+  }
+
+  if (!instagramAppId || !instagramAppSecret || !oauthRedirectUri) {
+    const missing = []
+    if (!instagramAppId) missing.push('INSTAGRAM_APP_ID')
+    if (!oauthRedirectUri) missing.push('INSTAGRAM_REDIRECT_URI')
+    if (!instagramAppSecret) missing.push('INSTAGRAM_APP_SECRET')
+    res.redirect(
+      buildAppRedirect({
+        status: 'error',
+        provider: 'instagram',
+        message: `Instagram OAuth is not configured. Missing: ${missing.join(', ')}.`,
+        path: '/organizations',
+        baseUrl: redirectBase,
+      }),
+    )
+    return
+  }
+
+  const state = buildInstagramOauthStateToken({
+    userId: viewer.userId,
+    organizationId: requestedOrganizationId,
+    redirectUri: oauthRedirectUri,
+  }) || crypto.randomBytes(16).toString('hex')
+  res.cookie(INSTAGRAM_OAUTH_STATE_COOKIE, state, {
+    httpOnly: true,
+    sameSite: cookieSameSite,
+    secure: cookieSecure,
+    maxAge: INSTAGRAM_OAUTH_STATE_TTL_MS,
+  })
+  res.cookie(INSTAGRAM_OAUTH_CONTEXT_COOKIE, JSON.stringify({
+    organizationId: requestedOrganizationId,
+    path: '/organizations',
+    redirectUri: oauthRedirectUri,
+  }), {
+    httpOnly: true,
+    sameSite: cookieSameSite,
+    secure: cookieSecure,
+    maxAge: INSTAGRAM_OAUTH_STATE_TTL_MS,
+  })
+
+  const params = new URLSearchParams({
+    client_id: instagramAppId,
+    redirect_uri: oauthRedirectUri,
+    response_type: 'code',
+    scope: instagramOauthScope,
+    state,
+  })
+  void instagramOauthEnableFbLogin
+  void instagramOauthForceAuthentication
+  const authorizeUrl = resolveInstagramOauthAuthorizeUrl(instagramOauthAuthorizeUrl, instagramOauthScope)
+  res.redirect(`${authorizeUrl}?${params.toString()}`)
+})
+
+app.get('/oauth/instagram/callback', async (req, res) => {
+  const { code, state, error, error_description: errorDescription } = req.query
+  const receivedState = normalizeTextInput(state, { maxLength: 4000, trim: true })
+  const expectedState = normalizeTextInput(req.cookies?.[INSTAGRAM_OAUTH_STATE_COOKIE], {
+    maxLength: 4000,
+    trim: true,
+  })
+  const redirectBase = resolveAppRedirectBase(req)
+  const rawContext = req.cookies?.[INSTAGRAM_OAUTH_CONTEXT_COOKIE]
+  let oauthContext = { organizationId: '', path: '/organizations', redirectUri: '' }
+  if (typeof rawContext === 'string' && rawContext.trim()) {
+    try {
+      const parsed = JSON.parse(rawContext)
+      if (parsed && typeof parsed === 'object') {
+        const parsedOrganizationId = normalizeTextInput(parsed.organizationId, { maxLength: 80 })
+        const parsedRedirectUri = normalizeTextInput(parsed.redirectUri, { maxLength: 500 })
+        oauthContext = {
+          organizationId: isUuid(parsedOrganizationId) ? parsedOrganizationId : '',
+          path: '/organizations',
+          redirectUri: parsedRedirectUri,
+        }
+      }
+    } catch {
+      oauthContext = { organizationId: '', path: '/organizations', redirectUri: '' }
+    }
+  }
+  const oauthRedirectUri = resolveInstagramOauthRedirectUri({
+    requestOriginBase: redirectBase,
+  })
+  const stateTokenVerification = verifyInstagramOauthStateToken(receivedState)
+  const stateTokenPayload = stateTokenVerification.ok ? stateTokenVerification.payload : null
+  if (!oauthContext.organizationId && stateTokenPayload?.organizationId) {
+    oauthContext.organizationId = stateTokenPayload.organizationId
+  }
+  if (!oauthContext.redirectUri && stateTokenPayload?.redirectUri) {
+    oauthContext.redirectUri = stateTokenPayload.redirectUri
+  }
+  const redirectUriForExchange = normalizeTextInput(oauthContext.redirectUri, { maxLength: 500 }) || oauthRedirectUri
+
+  const clearInstagramOauthCookies = () => {
+    res.clearCookie(INSTAGRAM_OAUTH_STATE_COOKIE)
+    res.clearCookie(INSTAGRAM_OAUTH_CONTEXT_COOKIE)
+    res.clearCookie(APP_REDIRECT_COOKIE)
+  }
+
+  if (error) {
+    clearInstagramOauthCookies()
+    res.redirect(
+      buildAppRedirect({
+        status: 'error',
+        provider: 'instagram',
+        message: normalizeTextInput(errorDescription, { maxLength: 240 }) || 'Instagram authorization failed.',
+        path: '/organizations',
+        baseUrl: redirectBase,
+      }),
+    )
+    return
+  }
+
+  const stateMatchesCookie = Boolean(
+    receivedState
+    && expectedState
+    && safeTimingEqual(receivedState, expectedState),
+  )
+  if (!stateMatchesCookie && !stateTokenVerification.ok) {
+    clearInstagramOauthCookies()
+    res.redirect(
+      buildAppRedirect({
+        status: 'error',
+        provider: 'instagram',
+        message: 'Instagram connection state mismatch.',
+        path: '/organizations',
+        baseUrl: redirectBase,
+      }),
+    )
+    return
+  }
+
+  const normalizedCodeRaw = normalizeTextInput(code, { maxLength: 2000, trim: true })
+  const normalizedCode = normalizedCodeRaw.replace(/#_$/, '')
+  if (!normalizedCode) {
+    clearInstagramOauthCookies()
+    res.redirect(
+      buildAppRedirect({
+        status: 'error',
+        provider: 'instagram',
+        message: 'Missing authorization code.',
+        path: '/organizations',
+        baseUrl: redirectBase,
+      }),
+    )
+    return
+  }
+
+  if (!oauthContext.organizationId) {
+    clearInstagramOauthCookies()
+    res.redirect(
+      buildAppRedirect({
+        status: 'error',
+        provider: 'instagram',
+        message: 'Missing organization context for Instagram connection.',
+        path: '/organizations',
+        baseUrl: redirectBase,
+      }),
+    )
+    return
+  }
+
+  try {
+    const viewer = await resolveAuthedUserContext(req, res)
+    if (!viewer.ok) {
+      throw new Error('You must be signed in before connecting Instagram.')
+    }
+    if (stateTokenPayload?.userId && stateTokenPayload.userId !== viewer.userId) {
+      throw new Error('Instagram OAuth state does not match the signed-in user.')
+    }
+
+    const organizationResult = await fetchOrganizationRowById(oauthContext.organizationId)
+    if (!organizationResult.ok || !organizationResult.row) {
+      throw new Error('Unable to load organization for Instagram connection.')
+    }
+    if (!canUserSeeOrganization(organizationResult.row, viewer.userId, viewer.appRole)) {
+      throw new Error('You do not have access to this organization.')
+    }
+    if (!canUserManageOrganizationConnections(organizationResult.row, viewer.userId)) {
+      throw new Error('Brand viewers may view connected accounts but cannot edit them.')
+    }
+    if (!instagramAppId || !redirectUriForExchange || !instagramAppSecret) {
+      const missing = []
+      if (!instagramAppId) missing.push('INSTAGRAM_APP_ID')
+      if (!redirectUriForExchange) missing.push('INSTAGRAM_REDIRECT_URI')
+      if (!instagramAppSecret) missing.push('INSTAGRAM_APP_SECRET')
+      throw new Error(`Instagram OAuth is not configured on the server. Missing: ${missing.join(', ')}`)
+    }
+
+    const tokenParams = new URLSearchParams({
+      client_id: instagramAppId,
+      client_secret: instagramAppSecret,
+      grant_type: 'authorization_code',
+      redirect_uri: redirectUriForExchange,
+      code: normalizedCode,
+    })
+    const tokenResponse = await fetch(resolveFacebookGraphOauthTokenUrl(), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: tokenParams.toString(),
+    })
+    const tokenPayload = await tokenResponse.json().catch(() => ({}))
+    const shortLivedAccessToken = normalizeTextInput(tokenPayload?.access_token, { maxLength: 4000 })
+    if (!tokenResponse.ok || !shortLivedAccessToken) {
+      const tokenErrorMessage =
+        normalizeTextInput(tokenPayload?.error_message, { maxLength: 240 })
+        || normalizeTextInput(tokenPayload?.error?.message, { maxLength: 240 })
+        || normalizeTextInput(tokenPayload?.error_description, { maxLength: 240 })
+        || 'Instagram token exchange failed.'
+      if (tokenErrorMessage.toLowerCase().includes('error validating client secret')) {
+        throw new Error(
+          'Error validating client secret. This server uses INSTAGRAM_APP_SECRET for OAuth. Verify INSTAGRAM_APP_ID and INSTAGRAM_APP_SECRET belong to the same Meta app and restart the server.',
+        )
+      }
+      throw new Error(tokenErrorMessage)
+    }
+
+    const candidatesResult = await listInstagramGraphConnectionCandidates({
+      accessToken: shortLivedAccessToken,
+      force: true,
+      enableBasicDisplayProbe: instagramOauthEnableBasicDisplayProbe,
+    })
+    if (!candidatesResult.ok || !Array.isArray(candidatesResult.candidates) || !candidatesResult.candidates.length) {
+      throw new Error(candidatesResult.message || 'Unable to find a linked Instagram business account.')
+    }
+    const selectedCandidate = selectPreferredInstagramConnectionCandidate(candidatesResult.candidates)
+      || candidatesResult.candidates[0]
+    const accountId = normalizeInstagramHandle(selectedCandidate?.accountId)
+      || normalizeTextInput(selectedCandidate?.graphUserId, { maxLength: 120 }).toLowerCase()
+    if (!accountId) {
+      throw new Error('Instagram account resolution did not return a valid account id.')
+    }
+    const accountName =
+      normalizeTextInput(selectedCandidate?.accountName, { maxLength: 180 })
+      || normalizeTextInput(selectedCandidate?.username, { maxLength: 180 })
+      || accountId
+
+    const currentAccounts = normalizeOrganizationConnectedAccounts(organizationResult.row.connected_accounts)
+    const connectedAt = new Date().toISOString()
+    const nextAccount = {
+      id: `instagram:${accountId}`,
+      platform: ORGANIZATION_CONNECTION_PLATFORM_INSTAGRAM,
+      accountName,
+      channelId: accountId,
+      ownerUserId: viewer.userId,
+      connectedAt,
+    }
+    const existing = currentAccounts.find((account) =>
+      normalizeOrganizationConnectionPlatform(account.platform) === ORGANIZATION_CONNECTION_PLATFORM_INSTAGRAM
+      && (
+        account.id === nextAccount.id
+        || resolveInstagramAccountId(account) === accountId
+      ))
+    const nextAccounts = existing
+      ? currentAccounts.map((account) => (account.id === existing.id ? {
+        ...(account.instagramOps ? { instagramOps: account.instagramOps } : {}),
+        ...nextAccount,
+      } : account))
+      : [...currentAccounts, nextAccount]
+
+    const updateResult = await updateOrganizationConnectedAccounts(oauthContext.organizationId, nextAccounts)
+    if (!updateResult.ok) {
+      throw new Error('Unable to save organization connected accounts.')
+    }
+
+    const connectionKey = buildInstagramVaultKey({
+      ownerUserId: viewer.userId,
+      accountId,
+    })
+    if (connectionKey && shortLivedAccessToken) {
+      instagramGraphAccessTokenByConnectionKey.set(connectionKey, {
+        accessToken: shortLivedAccessToken,
+        updatedAt: Date.now(),
+      })
+    }
+
+    await deleteCachedInstagramSummaryByUserId(viewer.userId)
+    if (instagramCollectionEnabled) {
+      await createAndStartInstagramRefreshJob(viewer.userId, {
+        trigger: 'oauth_connect',
+        reuseRunning: true,
+        minIntervalMs: 0,
+      })
+    }
+
+    clearInstagramOauthCookies()
+    res.redirect(
+      buildAppRedirect({
+        status: 'success',
+        provider: 'instagram',
+        path: '/organizations',
+        baseUrl: redirectBase,
+        extraParams: {
+          organizationId: oauthContext.organizationId,
+          instagram_account_name: accountName,
+        },
+      }),
+    )
+  } catch (err) {
+    clearInstagramOauthCookies()
+    res.redirect(
+      buildAppRedirect({
+        status: 'error',
+        provider: 'instagram',
+        message: err instanceof Error && err.message ? err.message : 'Instagram connection failed.',
+        path: '/organizations',
+        baseUrl: redirectBase,
+      }),
+    )
+  }
+})
+
+app.get('/oauth/x', async (req, res) => {
+  const requestedOrigin =
+    typeof req.query?.app_origin === 'string' ? req.query.app_origin : ''
+  const requestedOrganizationId = normalizeTextInput(req.query?.organization_id, { maxLength: 80 })
+  const refererOrigin = typeof req.headers.referer === 'string' ? req.headers.referer : ''
+  const requestedOriginBase = resolveOriginBase(requestedOrigin)
+  const refererOriginBase = resolveOriginBase(refererOrigin)
+  const appOriginCandidate = requestedOriginBase || refererOriginBase
+  const appOrigin =
+    appOriginCandidate && trustedRequestOrigins.has(appOriginCandidate)
+      ? appOriginCandidate
+      : ''
+  if (appOrigin) {
+    res.cookie(APP_REDIRECT_COOKIE, appOrigin, {
+      httpOnly: true,
+      sameSite: cookieSameSite,
+      secure: cookieSecure,
+      maxAge: 10 * 60 * 1000,
+    })
+  }
+  const redirectBase = appOrigin || resolveAppRedirectBase(req)
+  const oauthRedirectUri = resolveXOauthRedirectUri({
+    requestOriginBase: requestedOriginBase,
+    refererOriginBase,
+  })
+  const authorizeUrl = resolveXOauthAuthorizeUrl(xOauthAuthorizeUrl)
+
+  const viewer = await resolveAuthedUserContext(req, res)
+  if (!viewer.ok) {
+    res.redirect(
+      buildAppRedirect({
+        status: 'error',
+        provider: 'x',
+        message: 'You must be signed in to connect X.',
+        path: '/organizations',
+        baseUrl: redirectBase,
+      }),
+    )
+    return
+  }
+
+  if (!requestedOrganizationId) {
+    res.redirect(
+      buildAppRedirect({
+        status: 'error',
+        provider: 'x',
+        message: 'Select an organization before connecting X.',
+        path: '/organizations',
+        baseUrl: redirectBase,
+      }),
+    )
+    return
+  }
+  if (!isUuid(requestedOrganizationId)) {
+    res.redirect(
+      buildAppRedirect({
+        status: 'error',
+        provider: 'x',
+        message: 'Organization id must be a valid UUID.',
+        path: '/organizations',
+        baseUrl: redirectBase,
+      }),
+    )
+    return
+  }
+
+  const organizationResult = await fetchOrganizationRowById(requestedOrganizationId)
+  if (!organizationResult.ok || !organizationResult.row) {
+    res.redirect(
+      buildAppRedirect({
+        status: 'error',
+        provider: 'x',
+        message: 'Unable to load organization for X connection.',
+        path: '/organizations',
+        baseUrl: redirectBase,
+      }),
+    )
+    return
+  }
+  if (!canUserSeeOrganization(organizationResult.row, viewer.userId, viewer.appRole)) {
+    res.redirect(
+      buildAppRedirect({
+        status: 'error',
+        provider: 'x',
+        message: 'You do not have access to this organization.',
+        path: '/organizations',
+        baseUrl: redirectBase,
+      }),
+    )
+    return
+  }
+  if (!canUserManageOrganizationConnections(organizationResult.row, viewer.userId)) {
+    res.redirect(
+      buildAppRedirect({
+        status: 'error',
+        provider: 'x',
+        message: 'Brand viewers may view connected accounts but cannot edit them.',
+        path: '/organizations',
+        baseUrl: redirectBase,
+      }),
+    )
+    return
+  }
+
+  if (!xOauthClientId || !oauthRedirectUri) {
+    const missing = []
+    if (!xOauthClientId) missing.push('X_CLIENT_ID')
+    if (!oauthRedirectUri) missing.push('X_REDIRECT_URI')
+    res.redirect(
+      buildAppRedirect({
+        status: 'error',
+        provider: 'x',
+        message: `X OAuth is not configured. Missing: ${missing.join(', ')}.`,
+        path: '/organizations',
+        baseUrl: redirectBase,
+      }),
+    )
+    return
+  }
+
+  const state = crypto.randomBytes(16).toString('hex')
+  const codeVerifier = buildPkceCodeVerifier()
+  const codeChallenge = buildPkceCodeChallenge(codeVerifier)
+  if (!isValidPkceCodeVerifier(codeVerifier) || !codeChallenge) {
+    res.redirect(
+      buildAppRedirect({
+        status: 'error',
+        provider: 'x',
+        message: 'Unable to initialize X OAuth security state.',
+        path: '/organizations',
+        baseUrl: redirectBase,
+      }),
+    )
+    return
+  }
+  res.cookie(X_OAUTH_STATE_COOKIE, state, {
+    httpOnly: true,
+    sameSite: cookieSameSite,
+    secure: cookieSecure,
+    maxAge: X_OAUTH_STATE_TTL_MS,
+  })
+  res.cookie(X_OAUTH_CONTEXT_COOKIE, JSON.stringify({
+    organizationId: requestedOrganizationId,
+    path: '/organizations',
+    redirectUri: oauthRedirectUri,
+    codeVerifier,
+  }), {
+    httpOnly: true,
+    sameSite: cookieSameSite,
+    secure: cookieSecure,
+    maxAge: X_OAUTH_STATE_TTL_MS,
+  })
+
+  const params = new URLSearchParams({
+    response_type: 'code',
+    client_id: xOauthClientId,
+    redirect_uri: oauthRedirectUri,
+    scope: xOauthScope,
+    state,
+    code_challenge: codeChallenge,
+    code_challenge_method: 'S256',
+  })
+  res.redirect(`${authorizeUrl}?${params.toString()}`)
+})
+
+app.get('/oauth/x/callback', async (req, res) => {
+  const { code, state, error, error_description: errorDescription } = req.query
+  const expectedState = normalizeTextInput(req.cookies?.[X_OAUTH_STATE_COOKIE], { maxLength: 4000, trim: true })
+  const receivedState = normalizeTextInput(state, { maxLength: 4000, trim: true })
+  const redirectBase = resolveAppRedirectBase(req)
+  const rawContext = req.cookies?.[X_OAUTH_CONTEXT_COOKIE]
+  let oauthContext = { organizationId: '', path: '/organizations', redirectUri: '', codeVerifier: '' }
+  if (typeof rawContext === 'string' && rawContext.trim()) {
+    try {
+      const parsed = JSON.parse(rawContext)
+      if (parsed && typeof parsed === 'object') {
+        const parsedOrganizationId = normalizeTextInput(parsed.organizationId, { maxLength: 80 })
+        const parsedRedirectUri = normalizeTextInput(parsed.redirectUri, { maxLength: 500 })
+        const parsedCodeVerifier = normalizeTextInput(parsed.codeVerifier, { maxLength: 200, trim: true })
+        oauthContext = {
+          organizationId: isUuid(parsedOrganizationId) ? parsedOrganizationId : '',
+          path: '/organizations',
+          redirectUri: parsedRedirectUri,
+          codeVerifier: isValidPkceCodeVerifier(parsedCodeVerifier) ? parsedCodeVerifier : '',
+        }
+      }
+    } catch {
+      oauthContext = { organizationId: '', path: '/organizations', redirectUri: '', codeVerifier: '' }
+    }
+  }
+  const oauthRedirectUri = resolveXOauthRedirectUri({
+    requestOriginBase: redirectBase,
+  })
+  const redirectUriForExchange = normalizeTextInput(oauthContext.redirectUri, { maxLength: 500 }) || oauthRedirectUri
+
+  const clearXOauthCookies = () => {
+    res.clearCookie(X_OAUTH_STATE_COOKIE)
+    res.clearCookie(X_OAUTH_CONTEXT_COOKIE)
+    res.clearCookie(APP_REDIRECT_COOKIE)
+  }
+
+  if (error) {
+    clearXOauthCookies()
+    res.redirect(
+      buildAppRedirect({
+        status: 'error',
+        provider: 'x',
+        message: normalizeTextInput(errorDescription, { maxLength: 240 }) || 'X authorization failed.',
+        path: '/organizations',
+        baseUrl: redirectBase,
+      }),
+    )
+    return
+  }
+
+  if (!receivedState || !expectedState || !safeTimingEqual(receivedState, expectedState)) {
+    clearXOauthCookies()
+    res.redirect(
+      buildAppRedirect({
+        status: 'error',
+        provider: 'x',
+        message: 'X connection state mismatch.',
+        path: '/organizations',
+        baseUrl: redirectBase,
+      }),
+    )
+    return
+  }
+
+  const normalizedCode = normalizeTextInput(code, { maxLength: 2000, trim: true }).replace(/#_$/, '')
+  if (!normalizedCode) {
+    clearXOauthCookies()
+    res.redirect(
+      buildAppRedirect({
+        status: 'error',
+        provider: 'x',
+        message: 'Missing authorization code.',
+        path: '/organizations',
+        baseUrl: redirectBase,
+      }),
+    )
+    return
+  }
+
+  if (!oauthContext.organizationId) {
+    clearXOauthCookies()
+    res.redirect(
+      buildAppRedirect({
+        status: 'error',
+        provider: 'x',
+        message: 'Missing organization context for X connection.',
+        path: '/organizations',
+        baseUrl: redirectBase,
+      }),
+    )
+    return
+  }
+
+  if (!oauthContext.codeVerifier || !isValidPkceCodeVerifier(oauthContext.codeVerifier)) {
+    clearXOauthCookies()
+    res.redirect(
+      buildAppRedirect({
+        status: 'error',
+        provider: 'x',
+        message: 'Missing OAuth PKCE verifier for X connection.',
+        path: '/organizations',
+        baseUrl: redirectBase,
+      }),
+    )
+    return
+  }
+
+  try {
+    const viewer = await resolveAuthedUserContext(req, res)
+    if (!viewer.ok) {
+      throw new Error('You must be signed in before connecting X.')
+    }
+
+    const organizationResult = await fetchOrganizationRowById(oauthContext.organizationId)
+    if (!organizationResult.ok || !organizationResult.row) {
+      throw new Error('Unable to load organization for X connection.')
+    }
+    if (!canUserSeeOrganization(organizationResult.row, viewer.userId, viewer.appRole)) {
+      throw new Error('You do not have access to this organization.')
+    }
+    if (!canUserManageOrganizationConnections(organizationResult.row, viewer.userId)) {
+      throw new Error('Brand viewers may view connected accounts but cannot edit them.')
+    }
+    if (!xOauthClientId || !redirectUriForExchange) {
+      const missing = []
+      if (!xOauthClientId) missing.push('X_CLIENT_ID')
+      if (!redirectUriForExchange) missing.push('X_REDIRECT_URI')
+      throw new Error(`X OAuth is not configured on the server. Missing: ${missing.join(', ')}`)
+    }
+
+    const tokenRequestUrls = resolveXOauthTokenUrls()
+    if (!tokenRequestUrls.length) {
+      throw new Error('X OAuth token endpoint is not configured correctly.')
+    }
+
+    const tokenParams = new URLSearchParams({
+      grant_type: 'authorization_code',
+      code: normalizedCode,
+      redirect_uri: redirectUriForExchange,
+      code_verifier: oauthContext.codeVerifier,
+      client_id: xOauthClientId,
+    })
+    const tokenHeaders = {
+      'Content-Type': 'application/x-www-form-urlencoded',
+    }
+    if (xOauthClientSecret) {
+      tokenHeaders.Authorization = `Basic ${Buffer.from(`${xOauthClientId}:${xOauthClientSecret}`).toString('base64')}`
+    }
+    let accessToken = ''
+    let refreshToken = ''
+    let tokenExpiresAt = 0
+    let tokenScope = ''
+    let tokenType = ''
+    let tokenErrorMessage = ''
+    for (const tokenUrl of tokenRequestUrls) {
+      try {
+        const tokenResponse = await fetch(tokenUrl, {
+          method: 'POST',
+          headers: tokenHeaders,
+          body: tokenParams.toString(),
+        })
+        const tokenPayload = await tokenResponse.json().catch(() => ({}))
+        const candidateAccessToken = normalizeTextInput(tokenPayload?.access_token, { maxLength: 6000, trim: false })
+        if (tokenResponse.ok && candidateAccessToken) {
+          accessToken = candidateAccessToken
+          refreshToken = normalizeTextInput(tokenPayload?.refresh_token, { maxLength: 6000, trim: false })
+          const expiresInSeconds = Math.max(0, toNumber(tokenPayload?.expires_in))
+          tokenExpiresAt = expiresInSeconds > 0 ? Date.now() + expiresInSeconds * 1000 : 0
+          tokenScope = normalizeTextInput(tokenPayload?.scope, { maxLength: 500 })
+          tokenType = normalizeTextInput(tokenPayload?.token_type, { maxLength: 120 }).toLowerCase()
+          break
+        }
+        const candidateError =
+          normalizeTextInput(tokenPayload?.error_description, { maxLength: 240 })
+          || normalizeTextInput(tokenPayload?.error, { maxLength: 240 })
+          || normalizeTextInput(tokenPayload?.detail, { maxLength: 240 })
+        if (candidateError) tokenErrorMessage = candidateError
+      } catch (tokenRequestError) {
+        const normalizedErrorMessage = tokenRequestError instanceof Error
+          ? normalizeTextInput(tokenRequestError.message, { maxLength: 240 })
+          : ''
+        if (normalizedErrorMessage) {
+          tokenErrorMessage = normalizedErrorMessage
+        }
+      }
+    }
+    if (!accessToken) {
+      throw new Error(tokenErrorMessage || 'X token exchange failed.')
+    }
+    if (tokenScope && !hasRequiredXOauthScopes(tokenScope, ['users.read', 'tweet.read'])) {
+      throw new Error('X OAuth token is missing required scopes (users.read and tweet.read). Reconnect and grant access.')
+    }
+
+    const xProfileResult = await fetchXAuthenticatedUser(accessToken)
+    if (!xProfileResult.ok || !xProfileResult.user) {
+      throw new Error('Unable to load profile details for the connected X account.')
+    }
+    const resolvedXUserId = xProfileResult.user.userId
+    const resolvedXUsername = xProfileResult.user.username
+    const resolvedAccountName = formatXAccountName(resolvedXUsername) || `X Account ${resolvedXUserId}`
+
+    const xOauthUpsertResult = await upsertXOauthTokenVaultEntry({
+      ownerUserId: viewer.userId,
+      userId: resolvedXUserId,
+      username: resolvedXUsername,
+      accessToken,
+      refreshToken,
+      expiresAt: tokenExpiresAt,
+      scope: tokenScope || xOauthScope,
+      tokenType: tokenType || 'bearer',
+    })
+    if (!xOauthUpsertResult.ok) {
+      throw new Error('Unable to securely store X OAuth token for this connected account.')
+    }
+
+    const currentAccounts = normalizeOrganizationConnectedAccounts(organizationResult.row.connected_accounts)
+    const existing = currentAccounts.find((account) => {
+      if (normalizeOrganizationConnectionPlatform(account.platform) !== ORGANIZATION_CONNECTION_PLATFORM_X) {
+        return false
+      }
+      const existingXUserId = resolveXUserIdFromConnection(account)
+      if (existingXUserId && resolvedXUserId) {
+        return existingXUserId === resolvedXUserId
+      }
+      return normalizeXUsername(account.accountName) === resolvedXUsername
+    })
+    const connectedAt = new Date().toISOString()
+    const nextConnection = existing
+      ? {
+          ...existing,
+          accountName: resolvedAccountName,
+          channelId: resolvedXUserId,
+          ownerUserId: viewer.userId,
+          connectedAt,
+        }
+      : {
+          id: buildOrganizationConnectionId(ORGANIZATION_CONNECTION_PLATFORM_X),
+          platform: ORGANIZATION_CONNECTION_PLATFORM_X,
+          accountName: resolvedAccountName,
+          channelId: resolvedXUserId,
+          ownerUserId: viewer.userId,
+          connectedAt,
+        }
+    const nextAccounts = existing
+      ? currentAccounts.map((account) => (account.id === existing.id ? nextConnection : account))
+      : [...currentAccounts, nextConnection]
+
+    const updateResult = await updateOrganizationConnectedAccounts(oauthContext.organizationId, nextAccounts)
+    if (!updateResult.ok) {
+      throw new Error('Unable to save organization connected accounts.')
+    }
+
+    let successMessage = ''
+    if (xCollectionEnabled) {
+      const syncResult = await refreshAndPersistXAccount({
+        userId: resolvedXUserId,
+        username: resolvedXUsername,
+        fallbackFollowerCount: xProfileResult.user.followerCount,
+        ownerUserId: viewer.userId,
+        accessToken,
+      })
+      if (!syncResult.ok) {
+        successMessage = normalizeTextInput(syncResult.message, { maxLength: 240 })
+          || 'Connected account. Initial post sync failed; run Refresh to pull X posts and metrics.'
+      }
+    }
+
+    clearXOauthCookies()
+    res.redirect(
+      buildAppRedirect({
+        status: 'success',
+        provider: 'x',
+        message: successMessage,
+        path: '/organizations',
+        baseUrl: redirectBase,
+        extraParams: {
+          organizationId: oauthContext.organizationId,
+          x_account_name: resolvedAccountName,
+        },
+      }),
+    )
+  } catch (err) {
+    clearXOauthCookies()
+    res.redirect(
+      buildAppRedirect({
+        status: 'error',
+        provider: 'x',
+        message: err instanceof Error && err.message ? err.message : 'X connection failed.',
+        path: '/organizations',
+        baseUrl: redirectBase,
+      }),
+    )
   }
 })
 
@@ -6861,6 +9022,90 @@ const fetchYouTubeVideos = async (accessToken, videoIds) => {
   }
 }
 
+const isUsableYouTubePlaylistVideoItem = (item) => {
+  const privacyStatus =
+    typeof item?.status?.privacyStatus === 'string'
+      ? item.status.privacyStatus.trim().toLowerCase()
+      : ''
+  if (privacyStatus !== 'public') return false
+  const title =
+    typeof item?.snippet?.title === 'string'
+      ? item.snippet.title.trim().toLowerCase()
+      : ''
+  if (title === 'private video' || title === 'deleted video') return false
+  return true
+}
+
+const fetchYouTubeUploadVideoIds = async (accessToken, uploadsPlaylistId) => {
+  if (!uploadsPlaylistId) return []
+  const videoIds = []
+  const seenVideoIds = new Set()
+  let nextPageToken = ''
+  let pageCount = 0
+
+  while (pageCount < 200) {
+    const params = new URLSearchParams({
+      part: 'contentDetails,snippet,status',
+      playlistId: uploadsPlaylistId,
+      maxResults: '50',
+    })
+    if (nextPageToken) {
+      params.set('pageToken', nextPageToken)
+    }
+
+    try {
+      const response = await fetch(`https://www.googleapis.com/youtube/v3/playlistItems?${params.toString()}`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      })
+      if (!response.ok) break
+
+      const payload = await response.json().catch(() => ({}))
+      const items = Array.isArray(payload?.items) ? payload.items : []
+      items.forEach((item) => {
+        if (!isUsableYouTubePlaylistVideoItem(item)) return
+        const videoId = normalizeTextInput(
+          typeof item?.contentDetails?.videoId === 'string'
+            ? item.contentDetails.videoId
+            : item?.snippet?.resourceId?.videoId,
+          { maxLength: 300 },
+        )
+        if (!videoId || seenVideoIds.has(videoId)) return
+        seenVideoIds.add(videoId)
+        videoIds.push(videoId)
+      })
+
+      const token =
+        typeof payload?.nextPageToken === 'string' ? payload.nextPageToken.trim() : ''
+      if (!token) break
+      nextPageToken = token
+      pageCount += 1
+    } catch {
+      break
+    }
+  }
+
+  return videoIds
+}
+
+const fetchAllYouTubeVideosForChannel = async (accessToken, channelId) => {
+  const normalizedChannelId = normalizeTextInput(channelId, { maxLength: 300 })
+  if (!normalizedChannelId) return []
+  const channelInfo = await fetchYouTubeChannelInfo(accessToken, normalizedChannelId)
+  const uploadsPlaylistId = normalizeTextInput(channelInfo?.uploadsPlaylistId, { maxLength: 300 })
+  if (!uploadsPlaylistId) return []
+  const allVideoIds = await fetchYouTubeUploadVideoIds(accessToken, uploadsPlaylistId)
+  if (!allVideoIds.length) return []
+
+  const videos = []
+  const chunkSize = 50
+  for (let index = 0; index < allVideoIds.length; index += chunkSize) {
+    const chunk = allVideoIds.slice(index, index + chunkSize)
+    const chunkVideos = await fetchYouTubeVideos(accessToken, chunk)
+    videos.push(...chunkVideos)
+  }
+  return videos
+}
+
 const normalizeIsoDateOnly = (value) => {
   if (typeof value !== 'string' || !value.trim()) return ''
   const parsed = Date.parse(value)
@@ -6894,16 +9139,7 @@ const fetchOldestUploadedVideoDate = async (accessToken, uploadsPlaylistId) => {
       const payload = await response.json().catch(() => ({}))
       const items = Array.isArray(payload?.items) ? payload.items : []
       items.forEach((item) => {
-        const privacyStatus =
-          typeof item?.status?.privacyStatus === 'string'
-            ? item.status.privacyStatus.trim().toLowerCase()
-            : ''
-        if (privacyStatus !== 'public') return
-        const title =
-          typeof item?.snippet?.title === 'string'
-            ? item.snippet.title.trim().toLowerCase()
-            : ''
-        if (title === 'private video' || title === 'deleted video') return
+        if (!isUsableYouTubePlaylistVideoItem(item)) return
         const uploadDate = normalizeIsoDateOnly(
           typeof item?.contentDetails?.videoPublishedAt === 'string'
             ? item.contentDetails.videoPublishedAt
@@ -6981,6 +9217,85 @@ const buildTimeSeries = (videos) => {
     watchTimeHours: point.watchTimeHours,
     followersNetChange: point.followersNetChange,
   }))
+}
+
+const buildTimeSeriesByChannel = (videos) => {
+  const buckets = new Map()
+  videos.forEach((video) => {
+    const channelId = normalizeTextInput(video?.channelId, { maxLength: 300 })
+    if (!channelId || !video?.publishedAt) return
+    const isoDate = normalizeIsoDateOnly(video.publishedAt)
+    if (!isoDate) return
+    const key = `${channelId}:${isoDate}`
+    const current = buckets.get(key) ?? createTimeSeriesByChannelAccumulator(channelId, isoDate)
+    current.views += toNumber(video?.views)
+    current.engagements += toNumber(video?.likes) + toNumber(video?.comments)
+    current.posts += 1
+    buckets.set(key, current)
+  })
+  return [...buckets.values()]
+    .sort((left, right) => {
+      const channelOrder = left.channelId.localeCompare(right.channelId)
+      if (channelOrder !== 0) return channelOrder
+      return left.date.localeCompare(right.date)
+    })
+    .map((point) => ({
+      channelId: point.channelId,
+      date: point.date,
+      views: point.views,
+      engagements: point.engagements,
+      posts: point.posts,
+      watchTimeHours: point.watchTimeHours,
+      followersNetChange: point.followersNetChange,
+    }))
+}
+
+const hydratePostCountsByDate = (series, ...postSources) => {
+  if (!Array.isArray(series) || !series.length) return Array.isArray(series) ? series : []
+  const postsByDate = new Map()
+  for (const source of postSources) {
+    if (!Array.isArray(source)) continue
+    for (const row of source) {
+      const date = normalizeIsoDateOnly(row?.date)
+      if (!date || postsByDate.has(date)) continue
+      const posts = Math.max(0, toNumber(row?.posts))
+      if (posts <= 0) continue
+      postsByDate.set(date, posts)
+    }
+  }
+  return series.map((row) => {
+    const date = normalizeIsoDateOnly(row?.date)
+    if (!date || Math.max(0, toNumber(row?.posts)) > 0) return row
+    const posts = postsByDate.get(date)
+    if (!posts) return row
+    return { ...row, posts }
+  })
+}
+
+const hydratePostCountsByChannelDate = (series, ...postSources) => {
+  if (!Array.isArray(series) || !series.length) return Array.isArray(series) ? series : []
+  const postsByKey = new Map()
+  for (const source of postSources) {
+    if (!Array.isArray(source)) continue
+    for (const row of source) {
+      const channelId = normalizeTextInput(row?.channelId, { maxLength: 300 })
+      const date = normalizeIsoDateOnly(row?.date)
+      if (!channelId || !date) continue
+      const key = `${channelId}:${date}`
+      if (postsByKey.has(key)) continue
+      const posts = Math.max(0, toNumber(row?.posts))
+      if (posts <= 0) continue
+      postsByKey.set(key, posts)
+    }
+  }
+  return series.map((row) => {
+    const channelId = normalizeTextInput(row?.channelId, { maxLength: 300 })
+    const date = normalizeIsoDateOnly(row?.date)
+    if (!channelId || !date || Math.max(0, toNumber(row?.posts)) > 0) return row
+    const posts = postsByKey.get(`${channelId}:${date}`)
+    if (!posts) return row
+    return { ...row, posts }
+  })
 }
 
 const buildAnalyticsDateRange = (days) => {
@@ -7902,18 +10217,44 @@ const buildReportingSummary = async (sessionId, connections, options = {}) => {
     })
   }
 
+  const incrementPostCount = (day, channelId, count = 1) => {
+    if (!day || count <= 0) return
+    const current = timeSeriesMap.get(day) ?? createTimeSeriesAccumulator(day)
+    current.posts += count
+    timeSeriesMap.set(day, current)
+    if (!channelId) return
+    const key = `${channelId}::${day}`
+    const currentByChannel =
+      timeSeriesByChannelMap.get(key)
+      ?? createTimeSeriesByChannelAccumulator(channelId, day)
+    currentByChannel.posts += count
+    timeSeriesByChannelMap.set(key, currentByChannel)
+  }
+
+  const firstSeenDayByVideo = new Map()
+  const postRowsMissingVideoIdByDay = new Map()
   videoRows.forEach((row) => {
-    const current = timeSeriesMap.get(row.day) ?? createTimeSeriesAccumulator(row.day)
-    current.posts += 1
-    timeSeriesMap.set(row.day, current)
-    if (row.channelId) {
-      const key = `${row.channelId}::${row.day}`
-      const currentByChannel =
-        timeSeriesByChannelMap.get(key)
-        ?? createTimeSeriesByChannelAccumulator(row.channelId, row.day)
-      currentByChannel.posts += 1
-      timeSeriesByChannelMap.set(key, currentByChannel)
+    const day = normalizeIsoDateOnly(row?.day)
+    if (!day) return
+    const channelId = normalizeTextInput(row?.channelId, { maxLength: 300 })
+    const videoId = normalizeTextInput(row?.videoId, { maxLength: 300 })
+    if (!videoId) {
+      const key = `${channelId}::${day}`
+      postRowsMissingVideoIdByDay.set(key, (postRowsMissingVideoIdByDay.get(key) ?? 0) + 1)
+      return
     }
+    const key = `${channelId}::${videoId}`
+    const existing = firstSeenDayByVideo.get(key)
+    if (!existing || day < existing.day) {
+      firstSeenDayByVideo.set(key, { channelId, day })
+    }
+  })
+  firstSeenDayByVideo.forEach(({ channelId, day }) => {
+    incrementPostCount(day, channelId, 1)
+  })
+  postRowsMissingVideoIdByDay.forEach((count, key) => {
+    const [channelId = '', day = ''] = key.split('::')
+    incrementPostCount(day, channelId, count)
   })
 
   const orderedSeries = [...timeSeriesMap.values()]
@@ -8175,6 +10516,7 @@ const buildLiveYouTubeSummary = async ({
       views,
       engagementRate,
       followers,
+      videoCount: Math.max(0, toNumber(channelInfo?.statistics?.videoCount)),
       firstVideoUploadDate: channelFirstUploadDate || '',
       status: 'Connected',
     })
@@ -8195,6 +10537,7 @@ const buildLiveYouTubeSummary = async ({
     }))
 
   const fallbackTimeSeries = buildTimeSeries(recentVideos)
+  const fallbackTimeSeriesByChannel = buildTimeSeriesByChannel(recentVideos)
   let reportingSummary = {
     timeSeries: [],
     timeSeriesByChannel: [],
@@ -8280,7 +10623,23 @@ const buildLiveYouTubeSummary = async ({
     ? analyticsSummary.timeSeriesByChannel
     : hasNonZeroSeriesByChannel(reportingSummary.timeSeriesByChannel)
       ? reportingSummary.timeSeriesByChannel
-      : []
+      : hasNonZeroSeriesByChannel(fallbackTimeSeriesByChannel)
+        ? fallbackTimeSeriesByChannel
+        : analyticsSummary.timeSeriesByChannel.length
+          ? analyticsSummary.timeSeriesByChannel
+          : reportingSummary.timeSeriesByChannel.length
+            ? reportingSummary.timeSeriesByChannel
+            : fallbackTimeSeriesByChannel
+  const resolvedTimeSeriesWithHydratedPosts = hydratePostCountsByDate(
+    resolvedTimeSeries,
+    reportingSummary.timeSeries,
+    fallbackTimeSeries,
+  )
+  const resolvedTimeSeriesByChannelWithHydratedPosts = hydratePostCountsByChannelDate(
+    resolvedTimeSeriesByChannel,
+    reportingSummary.timeSeriesByChannel,
+    fallbackTimeSeriesByChannel,
+  )
   const ageDistributionByChannel =
     analyticsSummary.ageDistributionByChannel
     && Object.keys(analyticsSummary.ageDistributionByChannel).length
@@ -8300,8 +10659,8 @@ const buildLiveYouTubeSummary = async ({
     firstVideoUploadDate,
     channels: hydratedChannels,
     topPosts: reportingSummary.topPosts.length ? reportingSummary.topPosts : fallbackTopPosts,
-    timeSeries: resolvedTimeSeries,
-    timeSeriesByChannel: resolvedTimeSeriesByChannel,
+    timeSeries: resolvedTimeSeriesWithHydratedPosts,
+    timeSeriesByChannel: resolvedTimeSeriesByChannelWithHydratedPosts,
     ageDistribution: analyticsSummary.ageDistribution.length
       ? analyticsSummary.ageDistribution
       : reportingSummary.ageDistribution,
@@ -8391,6 +10750,8 @@ const mergeYouTubeSummaryParts = (parts) => {
       const channelId = normalizeTextInput(channel?.id, { maxLength: 300 })
       const platform = normalizeTextInput(channel?.platform, { maxLength: 40 }) || 'YouTube'
       if (!channelId) continue
+      const channelFirstDate = normalizeIsoDateOnly(channel?.firstVideoUploadDate)
+      if (channelFirstDate) firstDates.push(channelFirstDate)
       channelByKey.set(`${platform}:${channelId}`, channel)
     }
 
@@ -8656,7 +11017,8 @@ const recordInstagramAlert = (type, payload = {}) => {
   }
   instagramOpsState.alerts.push(alert)
   trimInstagramOpsState()
-  console.error('Instagram guardrail alert:', {
+  const log = alert.type === 'instagram_failure_rate_threshold' ? console.warn : console.error
+  log('Instagram guardrail alert:', {
     type: alert.type,
     createdAt: alert.createdAt,
     payload: alert.payload,
@@ -8705,7 +11067,14 @@ const updateInstagramFailureStreak = (userId, status, details = {}) => {
 }
 
 const maybeAlertInstagramFailureRate = () => {
-  const failureRatePct = getInstagramFailureRatePct()
+  trimInstagramOpsState()
+  const nowMs = Date.now()
+  const recentRuns = instagramOpsState.runs.filter(
+    (entry) => nowMs - toNumber(entry.finishedAtMs || entry.startedAtMs) <= instagramOpsRunWindowMs,
+  )
+  if (recentRuns.length < instagramAlertFailureRateMinRuns) return
+  const failedRuns = recentRuns.filter((entry) => entry.status !== 'succeeded').length
+  const failureRatePct = (failedRuns / recentRuns.length) * 100
   if (failureRatePct < instagramAlertFailureRateThresholdPct) return
   const existingRecentAlert = instagramOpsState.alerts.find((entry) =>
     entry.type === 'instagram_failure_rate_threshold'
@@ -8715,6 +11084,8 @@ const maybeAlertInstagramFailureRate = () => {
   recordInstagramAlert('instagram_failure_rate_threshold', {
     failureRatePct: Number(failureRatePct.toFixed(2)),
     thresholdPct: instagramAlertFailureRateThresholdPct,
+    runCount: recentRuns.length,
+    minRuns: instagramAlertFailureRateMinRuns,
     windowMs: instagramOpsRunWindowMs,
   })
 }
@@ -8942,6 +11313,268 @@ const deleteInstagramSessionVaultEntries = async (predicate) => {
   return removed
 }
 
+const xOauthEncryptionKeyBuffer = xOauthEncryptionKey
+  ? crypto.createHash('sha256').update(xOauthEncryptionKey).digest()
+  : null
+const X_OAUTH_ACCESS_TOKEN_EXPIRY_SKEW_MS = 60_000
+
+const encryptXOauthTokenPayload = (payload) => {
+  if (!xOauthEncryptionKeyBuffer) return ''
+  const iv = crypto.randomBytes(12)
+  const cipher = crypto.createCipheriv('aes-256-gcm', xOauthEncryptionKeyBuffer, iv)
+  const serialized = JSON.stringify(payload ?? {})
+  const ciphertext = Buffer.concat([cipher.update(serialized, 'utf8'), cipher.final()])
+  const tag = cipher.getAuthTag()
+  return `v1:${iv.toString('base64')}:${tag.toString('base64')}:${ciphertext.toString('base64')}`
+}
+
+const decryptXOauthTokenPayload = (value) => {
+  if (!xOauthEncryptionKeyBuffer || typeof value !== 'string') return null
+  const parts = value.split(':')
+  if (parts.length !== 4 || parts[0] !== 'v1') return null
+  try {
+    const iv = Buffer.from(parts[1], 'base64')
+    const tag = Buffer.from(parts[2], 'base64')
+    const ciphertext = Buffer.from(parts[3], 'base64')
+    const decipher = crypto.createDecipheriv('aes-256-gcm', xOauthEncryptionKeyBuffer, iv)
+    decipher.setAuthTag(tag)
+    const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8')
+    const parsed = JSON.parse(plaintext)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+const buildXOauthVaultKey = ({ ownerUserId = '', userId = '' }) => {
+  const normalizedOwnerUserId = normalizeTextInput(ownerUserId, { maxLength: 80 })
+  const normalizedUserId = normalizeXUserId(userId)
+  if (!isUuid(normalizedOwnerUserId) || !normalizedUserId) return ''
+  return `${normalizedOwnerUserId}:${normalizedUserId}`
+}
+
+const normalizeXOauthTokenRecord = (value = {}) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const accessToken = normalizeTextInput(value.accessToken, { maxLength: 6000, trim: false })
+  const refreshToken = normalizeTextInput(value.refreshToken, { maxLength: 6000, trim: false })
+  const expiresAt = Math.max(0, toNumber(value.expiresAt))
+  const scope = normalizeTextInput(value.scope, { maxLength: 500 })
+  const tokenType = normalizeTextInput(value.tokenType, { maxLength: 120 }).toLowerCase()
+  const username = normalizeXUsername(value.username)
+  const userId = normalizeXUserId(value.userId)
+  if (!accessToken && !refreshToken) return null
+  return {
+    accessToken,
+    refreshToken,
+    expiresAt,
+    scope,
+    tokenType,
+    username,
+    userId,
+  }
+}
+
+const getXOauthStore = async () => {
+  const store = await loadReportingStore()
+  ensureXOauthReportingStore(store)
+  return store.x
+}
+
+const upsertXOauthTokenVaultEntry = async ({
+  ownerUserId,
+  userId,
+  username = '',
+  accessToken = '',
+  refreshToken = '',
+  expiresAt = 0,
+  scope = '',
+  tokenType = '',
+}) => {
+  const vaultKey = buildXOauthVaultKey({ ownerUserId, userId })
+  if (!vaultKey) return { ok: false, status: 400, error: 'invalid_x_oauth_vault_key' }
+  const normalizedPayload = normalizeXOauthTokenRecord({
+    userId,
+    username,
+    accessToken,
+    refreshToken,
+    expiresAt,
+    scope,
+    tokenType,
+  })
+  if (!normalizedPayload) return { ok: false, status: 400, error: 'invalid_x_oauth_token_payload' }
+  const encryptedToken = encryptXOauthTokenPayload(normalizedPayload)
+  if (!encryptedToken) return { ok: false, status: 500, error: 'x_oauth_token_encryption_not_configured' }
+
+  const xStore = await getXOauthStore()
+  xStore.oauthVault[vaultKey] = {
+    ownerUserId: normalizeTextInput(ownerUserId, { maxLength: 80 }),
+    userId: normalizeXUserId(userId),
+    username: normalizeXUsername(username),
+    encryptedToken,
+    updatedAt: new Date().toISOString(),
+  }
+  await persistReportingStore()
+  return { ok: true, status: 200, token: normalizedPayload }
+}
+
+const getXOauthTokenVaultEntry = async ({ ownerUserId, userId }) => {
+  const vaultKey = buildXOauthVaultKey({ ownerUserId, userId })
+  if (!vaultKey) return null
+  const xStore = await getXOauthStore()
+  const row = xStore.oauthVault[vaultKey]
+  if (!row || typeof row !== 'object') return null
+  const decrypted = decryptXOauthTokenPayload(row.encryptedToken)
+  return normalizeXOauthTokenRecord({
+    ...(decrypted || {}),
+    userId: normalizeXUserId(decrypted?.userId || row.userId || userId),
+    username: normalizeXUsername(decrypted?.username || row.username),
+  })
+}
+
+const deleteXOauthTokenVaultEntries = async (predicate) => {
+  const xStore = await getXOauthStore()
+  const keys = Object.keys(xStore.oauthVault || {})
+  let removed = 0
+  for (const key of keys) {
+    const entry = xStore.oauthVault[key]
+    if (!entry || typeof entry !== 'object') continue
+    if (typeof predicate === 'function' && !predicate(entry, key)) continue
+    delete xStore.oauthVault[key]
+    removed += 1
+  }
+  if (removed > 0) {
+    await persistReportingStore()
+  }
+  return removed
+}
+
+const refreshXOauthAccessToken = async ({
+  refreshToken = '',
+  fallbackScope = '',
+} = {}) => {
+  const normalizedRefreshToken = normalizeTextInput(refreshToken, { maxLength: 6000, trim: false })
+  if (!normalizedRefreshToken) {
+    return { ok: false, status: 400, error: 'x_oauth_refresh_token_missing', message: 'Missing X OAuth refresh token.' }
+  }
+  if (!xOauthClientId) {
+    return { ok: false, status: 503, error: 'x_oauth_client_not_configured', message: 'X OAuth client is not configured.' }
+  }
+  const tokenRequestUrls = resolveXOauthTokenUrls()
+  if (!tokenRequestUrls.length) {
+    return { ok: false, status: 500, error: 'x_oauth_token_endpoint_not_configured', message: 'X OAuth token endpoint is not configured.' }
+  }
+
+  const tokenParams = new URLSearchParams({
+    grant_type: 'refresh_token',
+    refresh_token: normalizedRefreshToken,
+    client_id: xOauthClientId,
+  })
+  const tokenHeaders = {
+    'Content-Type': 'application/x-www-form-urlencoded',
+  }
+  if (xOauthClientSecret) {
+    tokenHeaders.Authorization = `Basic ${Buffer.from(`${xOauthClientId}:${xOauthClientSecret}`).toString('base64')}`
+  }
+
+  let tokenErrorMessage = ''
+  for (const tokenUrl of tokenRequestUrls) {
+    try {
+      const tokenResponse = await fetch(tokenUrl, {
+        method: 'POST',
+        headers: tokenHeaders,
+        body: tokenParams.toString(),
+      })
+      const tokenPayload = await tokenResponse.json().catch(() => ({}))
+      const accessToken = normalizeTextInput(tokenPayload?.access_token, { maxLength: 6000, trim: false })
+      if (tokenResponse.ok && accessToken) {
+        const nextRefreshToken = normalizeTextInput(tokenPayload?.refresh_token, { maxLength: 6000, trim: false })
+          || normalizedRefreshToken
+        const expiresInSeconds = Math.max(0, toNumber(tokenPayload?.expires_in))
+        const expiresAt = expiresInSeconds > 0 ? Date.now() + expiresInSeconds * 1000 : 0
+        const scope = normalizeTextInput(tokenPayload?.scope, { maxLength: 500 }) || normalizeTextInput(fallbackScope, { maxLength: 500 })
+        const tokenType = normalizeTextInput(tokenPayload?.token_type, { maxLength: 120 }).toLowerCase()
+        return {
+          ok: true,
+          status: 200,
+          accessToken,
+          refreshToken: nextRefreshToken,
+          expiresAt,
+          scope,
+          tokenType,
+        }
+      }
+      tokenErrorMessage =
+        normalizeTextInput(tokenPayload?.error_description, { maxLength: 240 })
+        || normalizeTextInput(tokenPayload?.error, { maxLength: 240 })
+        || normalizeTextInput(tokenPayload?.detail, { maxLength: 240 })
+        || tokenErrorMessage
+    } catch (error) {
+      tokenErrorMessage = error instanceof Error ? normalizeTextInput(error.message, { maxLength: 240 }) : tokenErrorMessage
+    }
+  }
+  return {
+    ok: false,
+    status: 401,
+    error: 'x_oauth_refresh_failed',
+    message: tokenErrorMessage || 'Unable to refresh X OAuth token.',
+  }
+}
+
+const ensureValidXOauthAccessToken = async ({ ownerUserId = '', userId = '' } = {}) => {
+  const normalizedOwnerUserId = normalizeTextInput(ownerUserId, { maxLength: 80 })
+  const normalizedUserId = normalizeXUserId(userId)
+  if (!isUuid(normalizedOwnerUserId) || !normalizedUserId) {
+    return { ok: false, status: 400, error: 'invalid_x_oauth_token_lookup', message: 'Missing X OAuth token identity.' }
+  }
+
+  const existing = await getXOauthTokenVaultEntry({
+    ownerUserId: normalizedOwnerUserId,
+    userId: normalizedUserId,
+  })
+  if (!existing) {
+    return { ok: false, status: 404, error: 'x_oauth_token_not_found', message: 'No stored X OAuth token for this account.' }
+  }
+
+  const shouldRefresh =
+    !existing.accessToken
+    || (existing.expiresAt && Date.now() >= existing.expiresAt - X_OAUTH_ACCESS_TOKEN_EXPIRY_SKEW_MS)
+  if (!shouldRefresh && existing.accessToken) {
+    return { ok: true, status: 200, accessToken: existing.accessToken, token: existing }
+  }
+  if (!existing.refreshToken) {
+    return { ok: false, status: 401, error: 'x_oauth_refresh_token_missing', message: 'X OAuth token expired and cannot be refreshed.' }
+  }
+
+  const refreshed = await refreshXOauthAccessToken({
+    refreshToken: existing.refreshToken,
+    fallbackScope: existing.scope,
+  })
+  if (!refreshed.ok || !refreshed.accessToken) {
+    return {
+      ok: false,
+      status: refreshed.status || 401,
+      error: refreshed.error || 'x_oauth_refresh_failed',
+      message: refreshed.message || 'Unable to refresh X OAuth token.',
+    }
+  }
+
+  const upsertResult = await upsertXOauthTokenVaultEntry({
+    ownerUserId: normalizedOwnerUserId,
+    userId: normalizedUserId,
+    username: existing.username,
+    accessToken: refreshed.accessToken,
+    refreshToken: refreshed.refreshToken || existing.refreshToken,
+    expiresAt: refreshed.expiresAt,
+    scope: refreshed.scope || existing.scope,
+    tokenType: refreshed.tokenType || existing.tokenType,
+  })
+  if (!upsertResult.ok || !upsertResult.token?.accessToken) {
+    return { ok: false, status: 500, error: 'x_oauth_token_store_failed', message: 'Unable to persist refreshed X OAuth token.' }
+  }
+
+  return { ok: true, status: 200, accessToken: upsertResult.token.accessToken, token: upsertResult.token }
+}
+
 const getCachedInstagramSummaryByUserId = async (userId) => {
   const normalizedUserId = normalizeTextInput(userId, { maxLength: 80 })
   if (!isUuid(normalizedUserId)) return { ok: false, status: 400, row: null, payload: null }
@@ -9109,6 +11742,868 @@ const listAccessibleInstagramConnectionsByUserId = async (userId) => {
     }
   }
   return { ok: true, status: 200, connections: [...connectionByKey.values()] }
+}
+
+const listAccessibleXConnectionsByUserId = async (userId) => {
+  const normalizedUserId = normalizeTextInput(userId, { maxLength: 80 })
+  if (!isUuid(normalizedUserId)) return { ok: false, status: 400, connections: [] }
+  const organizationsResult = await listOrganizationRows()
+  if (!organizationsResult.ok) {
+    return {
+      ok: false,
+      status: organizationsResult.status || 500,
+      error: 'organizations_read_failed',
+      connections: [],
+    }
+  }
+  const connectionByUserId = new Map()
+  const unresolvedConnectionsByUsername = new Map()
+  for (const row of organizationsResult.rows) {
+    if (!canUserAccessOrganizationChannels(row, normalizedUserId)) continue
+    const organizationId = normalizeTextInput(row?.id, { maxLength: 80 })
+    const fallbackOwnerUserId = normalizeTextInput(row?.creator, { maxLength: 80 })
+    const accounts = normalizeOrganizationConnectedAccounts(row?.connected_accounts)
+    for (const account of accounts) {
+      if (normalizeOrganizationConnectionPlatform(account.platform) !== ORGANIZATION_CONNECTION_PLATFORM_X) continue
+      const xUserId = resolveXUserIdFromConnection(account)
+      const ownerUserIdRaw = normalizeTextInput(account.ownerUserId, { maxLength: 80 })
+      const ownerUserId =
+        isUuid(ownerUserIdRaw) ? ownerUserIdRaw : isUuid(fallbackOwnerUserId) ? fallbackOwnerUserId : ''
+      if (!isUuid(ownerUserId)) continue
+      const accountName =
+        normalizeTextInput(account.accountName, { maxLength: 180 }) || (xUserId ? `X Account ${xUserId}` : 'X Account')
+      if (xUserId) {
+        if (connectionByUserId.has(xUserId)) continue
+        connectionByUserId.set(xUserId, {
+          userId: xUserId,
+          accountName,
+          ownerUserId,
+          organizationId: isUuid(organizationId) ? organizationId : undefined,
+        })
+        continue
+      }
+      const connectionUsername = resolveXUsernameFromConnection(account)
+      if (!isValidXUsername(connectionUsername) || unresolvedConnectionsByUsername.has(connectionUsername)) continue
+      unresolvedConnectionsByUsername.set(connectionUsername, {
+        username: connectionUsername,
+        accountName,
+        ownerUserId,
+        organizationId: isUuid(organizationId) ? organizationId : undefined,
+      })
+    }
+  }
+  if (unresolvedConnectionsByUsername.size > 0) {
+    const xRowsResult = await listXRowsByUsernames([...unresolvedConnectionsByUsername.keys()])
+    if (xRowsResult.ok) {
+      for (const row of xRowsResult.rows) {
+        const xUserId = resolveXUserIdFromStoredPostsPayload(row?.posts) || normalizeXUserId(row?.user_id)
+        const username = normalizeXUsername(row?.username)
+        if (!xUserId || !username || connectionByUserId.has(xUserId)) continue
+        const unresolved = unresolvedConnectionsByUsername.get(username)
+        if (!unresolved) continue
+        connectionByUserId.set(xUserId, {
+          userId: xUserId,
+          accountName: unresolved.accountName || formatXAccountName(username) || `X Account ${xUserId}`,
+          ownerUserId: unresolved.ownerUserId,
+          organizationId: unresolved.organizationId,
+        })
+        unresolvedConnectionsByUsername.delete(username)
+      }
+    }
+    for (const [username, unresolved] of unresolvedConnectionsByUsername.entries()) {
+      const lookupResult = await fetchXUserByUsername(username)
+      if (!lookupResult.ok || !lookupResult.user) continue
+      const xUserId = normalizeXUserId(lookupResult.user.userId)
+      const resolvedUsername = normalizeXUsername(lookupResult.user.username) || username
+      if (!xUserId || connectionByUserId.has(xUserId)) continue
+      connectionByUserId.set(xUserId, {
+        userId: xUserId,
+        accountName:
+          unresolved.accountName || formatXAccountName(resolvedUsername) || `X Account ${xUserId}`,
+        ownerUserId: unresolved.ownerUserId,
+        organizationId: unresolved.organizationId,
+      })
+      unresolvedConnectionsByUsername.delete(username)
+    }
+  }
+  return { ok: true, status: 200, connections: [...connectionByUserId.values()] }
+}
+
+const buildXApiEndpoints = (pathWithQuery = '') => {
+  const normalizedPathInput = normalizeTextInput(pathWithQuery, { maxLength: 2000, trim: false })
+  const normalizedPath = normalizedPathInput.startsWith('/') ? normalizedPathInput : `/${normalizedPathInput}`
+  const endpoints = []
+  if (xApiBaseUrl) endpoints.push(`${xApiBaseUrl}${normalizedPath}`)
+  if (xApiFallbackBaseUrl && xApiFallbackBaseUrl !== xApiBaseUrl) {
+    endpoints.push(`${xApiFallbackBaseUrl}${normalizedPath}`)
+  }
+  return endpoints
+}
+
+const extractXApiErrorMessage = (payload) => {
+  const detail = normalizeTextInput(payload?.detail, { maxLength: 240 })
+  if (detail) return detail
+  const title = normalizeTextInput(payload?.title, { maxLength: 240 })
+  if (title) return title
+  const rawError = normalizeTextInput(payload?.error, { maxLength: 240 })
+  if (rawError) return rawError
+  if (Array.isArray(payload?.errors)) {
+    for (const entry of payload.errors) {
+      const message = normalizeTextInput(entry?.message, { maxLength: 240 })
+      if (message) return message
+    }
+  }
+  return ''
+}
+
+const requestXApi = async (pathWithQuery, options = {}) => {
+  if (!xCollectionEnabled || !xBearerToken) {
+    return {
+      ok: false,
+      status: 503,
+      payload: null,
+      error: 'x_not_configured',
+      message: 'X integration is not configured.',
+    }
+  }
+  const method = normalizeTextInput(options.method, { maxLength: 12 }).toUpperCase() || 'GET'
+  const endpoints = buildXApiEndpoints(pathWithQuery)
+  if (!endpoints.length) {
+    return {
+      ok: false,
+      status: 500,
+      payload: null,
+      error: 'x_endpoint_not_configured',
+    }
+  }
+  let lastFailure = {
+    ok: false,
+    status: 500,
+    payload: null,
+    error: 'x_request_failed',
+    message: '',
+  }
+  for (const endpoint of endpoints) {
+    try {
+      const response = await fetch(endpoint, {
+        method,
+        headers: {
+          Authorization: `Bearer ${xBearerToken}`,
+          'Content-Type': 'application/json',
+        },
+      })
+      const payload = await response.json().catch(() => null)
+      if (response.ok) {
+        return {
+          ok: true,
+          status: response.status,
+          payload,
+        }
+      }
+      lastFailure = {
+        ok: false,
+        status: response.status,
+        payload,
+        error: 'x_api_request_failed',
+        message: extractXApiErrorMessage(payload),
+      }
+    } catch (error) {
+      lastFailure = {
+        ok: false,
+        status: 500,
+        payload: null,
+        error: 'x_api_request_failed',
+        message: error instanceof Error ? normalizeTextInput(error.message, { maxLength: 240 }) : '',
+      }
+    }
+  }
+  return lastFailure
+}
+
+const requestXApiWithAccessToken = async (pathWithQuery, accessToken, options = {}) => {
+  const normalizedAccessToken = normalizeTextInput(accessToken, { maxLength: 5000, trim: true })
+  if (!normalizedAccessToken) {
+    return {
+      ok: false,
+      status: 401,
+      payload: null,
+      error: 'x_access_token_missing',
+      message: 'Missing X OAuth access token.',
+    }
+  }
+  const method = normalizeTextInput(options.method, { maxLength: 12 }).toUpperCase() || 'GET'
+  const endpoints = buildXApiEndpoints(pathWithQuery)
+  if (!endpoints.length) {
+    return {
+      ok: false,
+      status: 500,
+      payload: null,
+      error: 'x_endpoint_not_configured',
+    }
+  }
+  let lastFailure = {
+    ok: false,
+    status: 500,
+    payload: null,
+    error: 'x_request_failed',
+    message: '',
+  }
+  for (const endpoint of endpoints) {
+    try {
+      const response = await fetch(endpoint, {
+        method,
+        headers: {
+          Authorization: `Bearer ${normalizedAccessToken}`,
+          'Content-Type': 'application/json',
+        },
+      })
+      const payload = await response.json().catch(() => null)
+      if (response.ok) {
+        return {
+          ok: true,
+          status: response.status,
+          payload,
+        }
+      }
+      lastFailure = {
+        ok: false,
+        status: response.status,
+        payload,
+        error: 'x_api_request_failed',
+        message: extractXApiErrorMessage(payload),
+      }
+    } catch (error) {
+      lastFailure = {
+        ok: false,
+        status: 500,
+        payload: null,
+        error: 'x_api_request_failed',
+        message: error instanceof Error ? normalizeTextInput(error.message, { maxLength: 240 }) : '',
+      }
+    }
+  }
+  return lastFailure
+}
+
+const fetchXAuthenticatedUser = async (accessToken) => {
+  const userFields = encodeURIComponent('public_metrics,username,name')
+  const result = await requestXApiWithAccessToken(`/users/me?user.fields=${userFields}`, accessToken)
+  if (!result.ok) {
+    return {
+      ...result,
+      user: null,
+    }
+  }
+  const data = result.payload?.data
+  const userId = normalizeXUserId(data?.id)
+  const username = normalizeXUsername(data?.username)
+  const followerCount = Math.max(0, toNumber(data?.public_metrics?.followers_count))
+  if (!userId || !username) {
+    return {
+      ok: false,
+      status: 502,
+      error: 'x_user_lookup_invalid_response',
+      payload: result.payload,
+      user: null,
+    }
+  }
+  return {
+    ok: true,
+    status: 200,
+    payload: result.payload,
+    user: {
+      userId,
+      username,
+      followerCount,
+    },
+  }
+}
+
+const fetchXUserByUsername = async (usernameInput) => {
+  const normalizedUsername = normalizeXUsername(usernameInput)
+  if (!isValidXUsername(normalizedUsername)) {
+    return {
+      ok: false,
+      status: 400,
+      error: 'invalid_x_username',
+      payload: null,
+      user: null,
+    }
+  }
+  const fields = encodeURIComponent('public_metrics,username')
+  const usernameFilter = encodeURIComponent(normalizedUsername)
+  const path = `/users/by/username/${usernameFilter}?user.fields=${fields}`
+  const result = await requestXApi(path)
+  if (!result.ok) {
+    return {
+      ...result,
+      user: null,
+    }
+  }
+  const data = result.payload?.data
+  const userId = normalizeXUserId(data?.id)
+  const username = normalizeXUsername(data?.username) || normalizedUsername
+  const followerCount = Math.max(0, toNumber(data?.public_metrics?.followers_count))
+  if (!userId || !username) {
+    return {
+      ok: false,
+      status: 502,
+      error: 'x_user_lookup_invalid_response',
+      payload: result.payload,
+      user: null,
+    }
+  }
+  return {
+    ok: true,
+    status: 200,
+    payload: result.payload,
+    user: {
+      userId,
+      username,
+      followerCount,
+    },
+  }
+}
+
+const fetchXUserById = async (userIdInput, options = {}) => {
+  const userId = normalizeXUserId(userIdInput)
+  if (!userId) {
+    return {
+      ok: false,
+      status: 400,
+      error: 'invalid_x_user_id',
+      payload: null,
+      user: null,
+    }
+  }
+  const fields = encodeURIComponent('public_metrics,username')
+  const userFilter = encodeURIComponent(userId)
+  const path = `/users/${userFilter}?user.fields=${fields}`
+  const accessToken = normalizeTextInput(options.accessToken, { maxLength: 6000, trim: false })
+  const result = accessToken
+    ? await requestXApiWithAccessToken(path, accessToken)
+    : await requestXApi(path)
+  if (!result.ok) {
+    return {
+      ...result,
+      user: null,
+    }
+  }
+  const data = result.payload?.data
+  const username = normalizeXUsername(data?.username)
+  const followerCount = Math.max(0, toNumber(data?.public_metrics?.followers_count))
+  if (!username) {
+    return {
+      ok: false,
+      status: 502,
+      error: 'x_user_lookup_invalid_response',
+      payload: result.payload,
+      user: null,
+    }
+  }
+  return {
+    ok: true,
+    status: 200,
+    payload: result.payload,
+    user: {
+      userId,
+      username,
+      followerCount,
+    },
+  }
+}
+
+const normalizeXStoredPost = (value, options = {}) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const source = value
+  const fallbackId = normalizeTextInput(options.fallbackId, { maxLength: 300 })
+  const id = (
+    normalizeTextInput(source.id, { maxLength: 300 })
+    || normalizeTextInput(source.postId, { maxLength: 300 })
+    || normalizeTextInput(source.post_id, { maxLength: 300 })
+    || normalizeTextInput(source.tweetId, { maxLength: 300 })
+    || normalizeTextInput(source.tweet_id, { maxLength: 300 })
+    || fallbackId
+  )
+    .replace(/^x:/i, '')
+    .replace(/[^0-9A-Za-z_-]/g, '')
+  if (!id) return null
+  const userId = normalizeXUserId(source.userId || options.userId)
+  const username = normalizeXUsername(source.username || options.username)
+  const title = normalizeTextInput(source.title ?? source.text, { maxLength: 300, trim: false }) || 'Untitled X post'
+  const text = normalizeTextInput(source.text ?? source.title, { maxLength: 2000, trim: false })
+  const createdAt = normalizeTextInput(
+    source.createdAt ?? source.created_at ?? source.publishedAt,
+    { maxLength: 64 },
+  )
+  const publicMetrics = source.publicMetrics && typeof source.publicMetrics === 'object' && !Array.isArray(source.publicMetrics)
+    ? source.publicMetrics
+    : source.public_metrics && typeof source.public_metrics === 'object' && !Array.isArray(source.public_metrics)
+      ? source.public_metrics
+      : {}
+  const nonPublicMetrics = source.nonPublicMetrics && typeof source.nonPublicMetrics === 'object' && !Array.isArray(source.nonPublicMetrics)
+    ? source.nonPublicMetrics
+    : source.non_public_metrics && typeof source.non_public_metrics === 'object' && !Array.isArray(source.non_public_metrics)
+      ? source.non_public_metrics
+      : {}
+  const likes = Math.max(0, toNumber(source.likes ?? publicMetrics.like_count))
+  const replies = Math.max(0, toNumber(source.replies ?? source.comments ?? publicMetrics.reply_count))
+  const retweets = Math.max(0, toNumber(source.retweets ?? source.reposts ?? source.shares ?? publicMetrics.retweet_count))
+  const quotes = Math.max(0, toNumber(source.quotes ?? publicMetrics.quote_count))
+  const bookmarks = Math.max(0, toNumber(source.bookmarks ?? publicMetrics.bookmark_count))
+  const views = Math.max(
+    0,
+    toNumber(
+      source.views
+      ?? source.impressionCount
+      ?? nonPublicMetrics.impression_count
+      ?? publicMetrics.impression_count,
+    ),
+  )
+  const engagements = Math.max(
+    0,
+    toNumber(source.engagements ?? likes + replies + retweets + quotes + bookmarks),
+  )
+  const engagementRate = views > 0
+    ? (engagements / views) * 100
+    : Math.max(0, toNumber(source.engagementRate))
+  const url = normalizeTextInput(source.url, { maxLength: 500 })
+    || (username ? `https://x.com/${username}/status/${id}` : '')
+
+  return {
+    id,
+    userId,
+    username,
+    title,
+    text,
+    createdAt,
+    url,
+    views,
+    likes,
+    replies,
+    retweets,
+    quotes,
+    bookmarks,
+    engagements,
+    engagementRate,
+    publicMetrics: {
+      likeCount: likes,
+      replyCount: replies,
+      retweetCount: retweets,
+      quoteCount: quotes,
+      bookmarkCount: bookmarks,
+      impressionCount: Math.max(0, toNumber(publicMetrics.impression_count)),
+    },
+    nonPublicMetrics: {
+      impressionCount: Math.max(0, toNumber(nonPublicMetrics.impression_count)),
+      userProfileClicks: Math.max(0, toNumber(nonPublicMetrics.user_profile_clicks)),
+      urlLinkClicks: Math.max(0, toNumber(nonPublicMetrics.url_link_clicks)),
+    },
+  }
+}
+
+const normalizeXStoredPosts = (value, options = {}) => {
+  const sourceEntries = Array.isArray(value)
+    ? value.map((entry) => ({ entry, fallbackId: '' }))
+    : value && typeof value === 'object' && !Array.isArray(value)
+      ? Object.entries(value).map(([key, entry]) => ({ entry, fallbackId: key }))
+      : []
+  if (!sourceEntries.length) return []
+  const postsById = new Map()
+  for (const sourceEntry of sourceEntries.slice(0, xCollectorMaxPosts)) {
+    const normalized = normalizeXStoredPost(sourceEntry.entry, {
+      ...options,
+      fallbackId: sourceEntry.fallbackId,
+    })
+    if (!normalized) continue
+    postsById.set(normalized.id, normalized)
+  }
+  return [...postsById.values()]
+}
+
+const buildXStoredPostsObject = (value, options = {}) => {
+  const normalizedPosts = normalizeXStoredPosts(value, options)
+  const postsById = {}
+  for (const post of normalizedPosts) {
+    postsById[post.id] = post
+  }
+  return postsById
+}
+
+const fetchXPostsByUserId = async (
+  userIdInput,
+  { maxResults = xCollectorMaxPosts, username = '', accessToken = '' } = {},
+) => {
+  const userId = normalizeXUserId(userIdInput)
+  if (!userId) {
+    return {
+      ok: false,
+      status: 400,
+      error: 'invalid_x_user_id',
+      payload: null,
+      posts: [],
+    }
+  }
+  const safeMaxResults = Math.max(5, Math.min(100, Number(maxResults) || xCollectorMaxPosts))
+  const userFilter = encodeURIComponent(userId)
+  const buildBaseParams = () => new URLSearchParams({
+    max_results: String(safeMaxResults),
+    exclude: 'retweets,replies',
+  })
+  const attempts = []
+  const postsParams = buildBaseParams()
+  postsParams.set('post.fields', 'created_at,public_metrics,text')
+  attempts.push(`/users/${userFilter}/posts?${postsParams.toString()}`)
+  const tweetsParams = buildBaseParams()
+  tweetsParams.set('tweet.fields', 'created_at,public_metrics,text')
+  attempts.push(`/users/${userFilter}/tweets?${tweetsParams.toString()}`)
+
+  let result = { ok: false, status: 500, payload: null, error: 'x_posts_lookup_failed' }
+  const normalizedAccessToken = normalizeTextInput(accessToken, { maxLength: 6000, trim: false })
+  for (const path of attempts) {
+    result = normalizedAccessToken
+      ? await requestXApiWithAccessToken(path, normalizedAccessToken)
+      : await requestXApi(path)
+    if (result.ok) break
+  }
+  if (!result.ok) {
+    return {
+      ...result,
+      posts: [],
+    }
+  }
+  const rows = Array.isArray(result.payload?.data) ? result.payload.data : []
+  const normalizedPosts = normalizeXStoredPosts(rows, { userId, username })
+  return {
+    ok: true,
+    status: 200,
+    payload: result.payload,
+    posts: normalizedPosts,
+  }
+}
+
+const listXRowsByUserIds = async (userIds = []) => {
+  const normalizedUserIds = uniqueValues(
+    (Array.isArray(userIds) ? userIds : [])
+      .map((entry) => normalizeXUserId(entry))
+      .filter((entry) => Boolean(entry)),
+  )
+  if (!normalizedUserIds.length) {
+    return { ok: true, status: 200, payload: [], rows: [] }
+  }
+  const selectFields = encodeURIComponent('id,created_at,user_id,username,follower_count,posts')
+  const idsFilter = encodeURIComponent(`in.(${normalizedUserIds.join(',')})`)
+  const query = `select=${selectFields}&user_id=${idsFilter}`
+  const result = await requestSupabaseTable('x', { query })
+  return {
+    ...result,
+    rows: Array.isArray(result.payload) ? result.payload : [],
+  }
+}
+
+const listXRowsByUsernames = async (usernames = []) => {
+  const normalizedUsernames = uniqueValues(
+    (Array.isArray(usernames) ? usernames : [])
+      .map((entry) => normalizeXUsername(entry))
+      .filter((entry) => Boolean(entry)),
+  )
+  if (!normalizedUsernames.length) {
+    return { ok: true, status: 200, payload: [], rows: [] }
+  }
+  const selectFields = encodeURIComponent('id,created_at,user_id,username,follower_count,posts')
+  const usernamesFilter = encodeURIComponent(`in.(${normalizedUsernames.join(',')})`)
+  const query = `select=${selectFields}&username=${usernamesFilter}`
+  const result = await requestSupabaseTable('x', { query })
+  return {
+    ...result,
+    rows: Array.isArray(result.payload) ? result.payload : [],
+  }
+}
+
+const upsertXRow = async ({ userId, username, followerCount, posts }) => {
+  const normalizedUserId = normalizeXUserId(userId)
+  const normalizedUsername = normalizeXUsername(username)
+  if (!normalizedUserId || !normalizedUsername) {
+    return { ok: false, status: 400, payload: null, row: null }
+  }
+  const normalizedPosts = buildXStoredPostsObject(posts, {
+    userId: normalizedUserId,
+    username: normalizedUsername,
+  })
+  const result = await requestSupabaseTable('x', {
+    method: 'POST',
+    query: 'on_conflict=user_id',
+    body: [
+      {
+        user_id: normalizedUserId,
+        username: normalizedUsername,
+        follower_count: Math.max(0, toNumber(followerCount)),
+        posts: normalizedPosts,
+      },
+    ],
+    prefer: 'resolution=merge-duplicates,return=representation',
+  })
+  return {
+    ...result,
+    row: Array.isArray(result.payload) ? result.payload[0] ?? null : null,
+  }
+}
+
+const refreshAndPersistXAccount = async ({
+  userId,
+  username = '',
+  fallbackFollowerCount = 0,
+  ownerUserId = '',
+  accessToken = '',
+}) => {
+  if (!xCollectionEnabled) {
+    return {
+      ok: false,
+      status: 410,
+      error: 'x_collection_disabled',
+      payload: null,
+      message: 'X collection is disabled.',
+    }
+  }
+  if (!isSupabaseConfigured) {
+    return {
+      ok: false,
+      status: 503,
+      error: 'x_storage_not_configured',
+      payload: null,
+      message: 'X storage is not configured.',
+    }
+  }
+  const normalizedUserId = normalizeXUserId(userId)
+  if (!normalizedUserId) {
+    return {
+      ok: false,
+      status: 400,
+      error: 'invalid_x_user_id',
+      payload: null,
+      message: 'X user id is invalid.',
+    }
+  }
+
+  const normalizedOwnerUserId = normalizeTextInput(ownerUserId, { maxLength: 80 })
+  const hasOwnerUserId = isUuid(normalizedOwnerUserId)
+  let oauthAccessToken = normalizeTextInput(accessToken, { maxLength: 6000, trim: false })
+  if (!oauthAccessToken && hasOwnerUserId) {
+    const oauthTokenResult = await ensureValidXOauthAccessToken({
+      ownerUserId: normalizedOwnerUserId,
+      userId: normalizedUserId,
+    })
+    if (oauthTokenResult.ok && oauthTokenResult.accessToken) {
+      oauthAccessToken = oauthTokenResult.accessToken
+    } else if (!xBearerToken) {
+      return {
+        ok: false,
+        status: oauthTokenResult.status || 401,
+        error: oauthTokenResult.error || 'x_oauth_token_not_found',
+        payload: null,
+        message: oauthTokenResult.message || 'No valid OAuth token found for this X account.',
+      }
+    }
+  }
+
+  const maybeRefreshOAuthTokenOnUnauthorized = async (currentAccessToken = '') => {
+    if (!hasOwnerUserId) return currentAccessToken
+    const existing = await getXOauthTokenVaultEntry({
+      ownerUserId: normalizedOwnerUserId,
+      userId: normalizedUserId,
+    })
+    if (!existing?.refreshToken) return currentAccessToken
+    const refreshed = await refreshXOauthAccessToken({
+      refreshToken: existing.refreshToken,
+      fallbackScope: existing.scope,
+    })
+    if (!refreshed.ok || !refreshed.accessToken) return currentAccessToken
+    const upsertResult = await upsertXOauthTokenVaultEntry({
+      ownerUserId: normalizedOwnerUserId,
+      userId: normalizedUserId,
+      username: existing.username || normalizeXUsername(username),
+      accessToken: refreshed.accessToken,
+      refreshToken: refreshed.refreshToken || existing.refreshToken,
+      expiresAt: refreshed.expiresAt,
+      scope: refreshed.scope || existing.scope,
+      tokenType: refreshed.tokenType || existing.tokenType,
+    })
+    if (!upsertResult.ok || !upsertResult.token?.accessToken) return currentAccessToken
+    return upsertResult.token.accessToken
+  }
+
+  const normalizedFallbackUsername = normalizeXUsername(username)
+  let userResult = await fetchXUserById(normalizedUserId, { accessToken: oauthAccessToken })
+  if (!userResult.ok && oauthAccessToken && userResult.status === 401) {
+    oauthAccessToken = await maybeRefreshOAuthTokenOnUnauthorized(oauthAccessToken)
+    userResult = await fetchXUserById(normalizedUserId, { accessToken: oauthAccessToken })
+  }
+  if (!userResult.ok && !oauthAccessToken && xBearerToken) {
+    userResult = await fetchXUserById(normalizedUserId)
+  }
+
+  const resolvedUsername = userResult.ok && userResult.user?.username
+    ? userResult.user.username
+    : normalizedFallbackUsername
+  const resolvedFollowerCount = userResult.ok && userResult.user
+    ? userResult.user.followerCount
+    : Math.max(0, toNumber(fallbackFollowerCount))
+  if (!resolvedUsername) {
+    const isUnauthorizedLookup = Number(userResult.status) === 401 || Number(userResult.status) === 403
+    return {
+      ok: false,
+      status: 502,
+      error: 'x_user_lookup_failed',
+      payload: userResult.payload ?? null,
+      message: isUnauthorizedLookup
+        ? 'Unauthorized while reading X profile. Reconnect this X account to grant users.read.'
+        : normalizeTextInput(userResult.message, { maxLength: 240 }) || 'Unable to resolve X user profile.',
+    }
+  }
+
+  let postsResult = await fetchXPostsByUserId(normalizedUserId, {
+    maxResults: xCollectorMaxPosts,
+    username: resolvedUsername,
+    accessToken: oauthAccessToken,
+  })
+  if (!postsResult.ok && oauthAccessToken && postsResult.status === 401) {
+    oauthAccessToken = await maybeRefreshOAuthTokenOnUnauthorized(oauthAccessToken)
+    postsResult = await fetchXPostsByUserId(normalizedUserId, {
+      maxResults: xCollectorMaxPosts,
+      username: resolvedUsername,
+      accessToken: oauthAccessToken,
+    })
+  }
+  if (!postsResult.ok && !oauthAccessToken && xBearerToken) {
+    postsResult = await fetchXPostsByUserId(normalizedUserId, {
+      maxResults: xCollectorMaxPosts,
+      username: resolvedUsername,
+    })
+  }
+  if (!postsResult.ok) {
+    const isUnauthorizedPostsLookup = Number(postsResult.status) === 401 || Number(postsResult.status) === 403
+    return {
+      ok: false,
+      status: postsResult.status || 502,
+      error: postsResult.error || 'x_posts_lookup_failed',
+      payload: postsResult.payload ?? null,
+      message: isUnauthorizedPostsLookup
+        ? 'Unauthorized while reading X posts. Reconnect this X account to grant tweet.read.'
+        : normalizeTextInput(postsResult.message, { maxLength: 240 }) || 'Unable to load X posts.',
+    }
+  }
+
+  const upsertResult = await upsertXRow({
+    userId: normalizedUserId,
+    username: resolvedUsername,
+    followerCount: resolvedFollowerCount,
+    posts: postsResult.posts,
+  })
+  if (!upsertResult.ok) {
+    return {
+      ok: false,
+      status: upsertResult.status || 500,
+      error: 'x_row_upsert_failed',
+      payload: upsertResult.payload ?? null,
+      message: 'Unable to store X data in Supabase.',
+    }
+  }
+
+  return {
+    ok: true,
+    status: 200,
+    row: upsertResult.row ?? null,
+    username: resolvedUsername,
+    followerCount: resolvedFollowerCount,
+    postCount: postsResult.posts.length,
+  }
+}
+
+const mapXRowToSummaryPart = (row, { accountNameByUserId = new Map() } = {}) => {
+  const xUserId = resolveXUserIdFromStoredPostsPayload(row?.posts) || normalizeXUserId(row?.user_id)
+  if (!xUserId) return buildEmptyInstagramSummary()
+  const username = normalizeXUsername(row?.username)
+  const channelId = `x:${xUserId}`
+  const channelName =
+    normalizeTextInput(accountNameByUserId.get(xUserId), { maxLength: 180 })
+    || formatXAccountName(username)
+    || `X Account ${xUserId}`
+  const followerCount = Math.max(0, toNumber(row?.follower_count))
+  const normalizedPosts = normalizeXStoredPosts(row?.posts, {
+    userId: xUserId,
+    username,
+  })
+  const posts = normalizedPosts
+    .map((post) => ({
+      id: `x:${post.id}`,
+      title: post.title || 'Untitled X post',
+      platform: ORGANIZATION_CONNECTION_PLATFORM_X,
+      channelId,
+      channelName,
+      views: Math.max(0, toNumber(post.views)),
+      engagementRate: Math.max(0, toNumber(post.engagementRate)),
+      publishedAt: normalizeTextInput(post.createdAt, { maxLength: 64 }),
+      url: normalizeTextInput(post.url, { maxLength: 500 }),
+      likes: Math.max(0, toNumber(post.likes)),
+      comments: Math.max(0, toNumber(post.replies)),
+      shares: Math.max(0, toNumber(post.retweets)),
+      reposts: Math.max(0, toNumber(post.retweets)),
+      engagements: Math.max(0, toNumber(post.engagements)),
+    }))
+    .sort((left, right) => Math.max(0, toNumber(right.views)) - Math.max(0, toNumber(left.views)))
+
+  const seriesByDate = new Map()
+  for (const post of normalizedPosts) {
+    const date = normalizeIsoDateOnly(post.createdAt)
+    if (!date) continue
+    const current = seriesByDate.get(date) ?? {
+      date,
+      views: 0,
+      engagements: 0,
+      posts: 0,
+      watchTimeHours: 0,
+      followersNetChange: 0,
+    }
+    seriesByDate.set(date, {
+      date,
+      views: current.views + Math.max(0, toNumber(post.views)),
+      engagements: current.engagements + Math.max(0, toNumber(post.engagements)),
+      posts: current.posts + 1,
+      watchTimeHours: 0,
+      followersNetChange: 0,
+    })
+  }
+  const timeSeries = [...seriesByDate.values()].sort((left, right) => left.date.localeCompare(right.date))
+  const totalViews = timeSeries.reduce((sum, point) => sum + Math.max(0, toNumber(point.views)), 0)
+  const totalEngagements = timeSeries.reduce((sum, point) => sum + Math.max(0, toNumber(point.engagements)), 0)
+  const postsCount = timeSeries.reduce((sum, point) => sum + Math.max(0, toNumber(point.posts)), 0)
+  const engagementRate = totalViews > 0 ? (totalEngagements / totalViews) * 100 : 0
+  const firstVideoUploadDate = timeSeries[0]?.date || ''
+
+  return {
+    firstVideoUploadDate,
+    channels: [{
+      id: channelId,
+      name: channelName,
+      platform: ORGANIZATION_CONNECTION_PLATFORM_X,
+      views: totalViews,
+      engagementRate,
+      followers: followerCount,
+      status: 'Connected',
+    }],
+    topPosts: posts,
+    timeSeries,
+    timeSeriesByChannel: timeSeries.map((point) => ({
+      channelId,
+      ...point,
+    })),
+    ageDistribution: [],
+    ageDistributionByChannel: {},
+    genderDistribution: [],
+    genderDistributionByChannel: {},
+    topGeos: [],
+    topGeosByChannel: {},
+  }
 }
 
 const mergeInstagramOpsRunEntries = (currentEntries, nextEntry) => {
@@ -9483,6 +12978,8 @@ const classifyInstagramCollectionError = (error) => {
   if (code.includes('rate_limited')) return 'rate_limited'
   if (code.includes('ui_changed')) return 'ui_changed'
   if (code.includes('timeout')) return 'timeout'
+  if (code.includes('graph_timeout')) return 'timeout'
+  if (code.includes('instagram_graph') || code.includes('missing_instagram_access_token')) return 'auth_required'
   if (code.includes('temporary_network')) return 'temporary_network'
   if (code.includes('collector_unavailable') || code.includes('playwright_not_installed')) return 'collector_unavailable'
 
@@ -9493,6 +12990,7 @@ const classifyInstagramCollectionError = (error) => {
   if (message.includes('rate') || message.includes('too many')) return 'rate_limited'
   if (message.includes('selector') || message.includes('ui')) return 'ui_changed'
   if (message.includes('timeout')) return 'timeout'
+  if (message.includes('token') || message.includes('permission') || message.includes('graph')) return 'auth_required'
   if (message.includes('net::') || message.includes('network')) return 'temporary_network'
   if (message.includes('playwright_not_installed')) return 'collector_unavailable'
   return 'collection_failed'
@@ -9509,6 +13007,477 @@ const getInstagramRetryDelayMs = (attempt) => {
   return cappedDelay + jitter
 }
 
+const parseInstagramInsightMetricValue = (value) => {
+  if (typeof value === 'number') return Math.max(0, value)
+  if (typeof value === 'string') return Math.max(0, toNumber(value))
+  if (Array.isArray(value)) {
+    return value.reduce((sum, entry) => sum + parseInstagramInsightMetricValue(entry), 0)
+  }
+  if (value && typeof value === 'object') {
+    if (Object.prototype.hasOwnProperty.call(value, 'value')) {
+      return parseInstagramInsightMetricValue(value.value)
+    }
+    return Object.values(value).reduce((sum, entry) => sum + parseInstagramInsightMetricValue(entry), 0)
+  }
+  return 0
+}
+
+const parseInstagramInsightsMetricMap = (payload) => {
+  const metrics = {}
+  const rows = Array.isArray(payload?.data) ? payload.data : []
+  for (const row of rows) {
+    const name = normalizeTextInput(row?.name, { maxLength: 80 }).toLowerCase()
+    if (!name) continue
+    const values = Array.isArray(row?.values) ? row.values : []
+    const rawValue = values.length ? values[0]?.value : row?.value
+    metrics[name] = Math.max(0, Number(parseInstagramInsightMetricValue(rawValue)) || 0)
+  }
+  return metrics
+}
+
+const fetchInstagramInsightsForMedia = async ({
+  mediaId,
+  mediaType = '',
+  accessToken = instagramAccessToken,
+} = {}) => {
+  const normalizedMediaId = normalizeTextInput(mediaId, { maxLength: 300 })
+  if (!normalizedMediaId) {
+    return {
+      ok: false,
+      status: 400,
+      error: 'invalid_instagram_media_id',
+      message: 'Instagram media id is required to load insights.',
+      metrics: {},
+    }
+  }
+
+  const normalizedMediaType = normalizeTextInput(mediaType, { maxLength: 60 }).toLowerCase()
+  const baseMetricSets = [
+    ['impressions', 'reach', 'saved', 'shares', 'total_interactions'],
+    ['impressions', 'reach', 'saved', 'shares'],
+    ['impressions', 'reach'],
+  ]
+  if (normalizedMediaType.includes('video') || normalizedMediaType.includes('reel')) {
+    baseMetricSets.unshift(['impressions', 'reach', 'saved', 'shares', 'video_views', 'total_interactions'])
+  }
+
+  let lastFailure = null
+  for (const metricSet of baseMetricSets) {
+    const metrics = [...new Set(metricSet)]
+    const insightsResult = await requestInstagramGraph({
+      base: 'facebook',
+      path: `/${encodeURIComponent(normalizedMediaId)}/insights`,
+      query: { metric: metrics.join(',') },
+      accessToken,
+    })
+    if (insightsResult.ok) {
+      return {
+        ok: true,
+        status: 200,
+        metrics: parseInstagramInsightsMetricMap(insightsResult.payload),
+      }
+    }
+
+    lastFailure = insightsResult
+    const failureMessage = normalizeTextInput(insightsResult.message, { maxLength: 240 }).toLowerCase()
+    const isMetricValidationError =
+      failureMessage.includes('metric')
+      || failureMessage.includes('not available')
+      || failureMessage.includes('unsupported')
+      || failureMessage.includes('does not support')
+    if (!isMetricValidationError) {
+      break
+    }
+  }
+
+  return {
+    ok: false,
+    status: lastFailure?.status || 502,
+    error: lastFailure?.error || 'instagram_insights_fetch_failed',
+    message: lastFailure?.message || 'Unable to load Instagram media insights.',
+    metrics: {},
+  }
+}
+
+const resolveInstagramBusinessDiscoveryAnchor = async ({ accessToken = instagramAccessToken } = {}) => {
+  const result = await requestInstagramGraph({
+    base: 'facebook',
+    path: '/me/accounts',
+    query: {
+      fields: 'id,name,instagram_business_account{id,username}',
+      limit: '25',
+    },
+    accessToken,
+  })
+  if (!result.ok) {
+    return {
+      ok: false,
+      status: result.status || 502,
+      error: result.error || 'instagram_business_discovery_anchor_failed',
+      message: result.message || 'Unable to load Facebook pages linked to Instagram business accounts.',
+    }
+  }
+  const pages = Array.isArray(result.payload?.data) ? result.payload.data : []
+  for (const page of pages) {
+    const instagramBusinessAccount =
+      page?.instagram_business_account && typeof page.instagram_business_account === 'object'
+        ? page.instagram_business_account
+        : null
+    if (!instagramBusinessAccount) continue
+    const graphUserId = normalizeTextInput(instagramBusinessAccount.id, { maxLength: 120 })
+    if (!graphUserId) continue
+    return {
+      ok: true,
+      status: 200,
+      graphUserId,
+      username: normalizeInstagramHandle(instagramBusinessAccount.username),
+    }
+  }
+  return {
+    ok: false,
+    status: 400,
+    error: 'instagram_business_discovery_anchor_missing',
+    message: 'Configured token is not linked to an Instagram business account.',
+  }
+}
+
+const collectInstagramBusinessDiscoveryMetrics = async ({
+  username,
+  accessToken = instagramAccessToken,
+  maxPosts = instagramCollectorMaxPosts,
+} = {}) => {
+  const normalizedUsername = normalizeInstagramHandle(username)
+  if (!normalizedUsername) {
+    return {
+      ok: false,
+      status: 400,
+      error: 'invalid_instagram_username',
+      message: 'Instagram username is required.',
+      collected: null,
+    }
+  }
+
+  const anchorResult = await resolveInstagramBusinessDiscoveryAnchor({ accessToken })
+  if (!anchorResult.ok) {
+    return {
+      ok: false,
+      status: anchorResult.status || 502,
+      error: anchorResult.error || 'instagram_business_discovery_anchor_failed',
+      message: anchorResult.message || 'Unable to resolve Instagram business discovery anchor account.',
+      collected: null,
+    }
+  }
+
+  const safeMaxPosts = Math.max(1, Math.min(50, toNumber(maxPosts) || instagramCollectorMaxPosts))
+  const fields =
+    `business_discovery.username(${normalizedUsername}){`
+    + 'id,username,name,followers_count,media_count,'
+    + `media.limit(${safeMaxPosts}){`
+    + 'id,caption,media_type,media_product_type,permalink,timestamp,thumbnail_url,like_count,comments_count'
+    + '}}'
+  const discoveryResult = await requestInstagramGraph({
+    base: 'facebook',
+    path: `/${encodeURIComponent(anchorResult.graphUserId)}`,
+    query: { fields },
+    accessToken,
+  })
+  if (!discoveryResult.ok) {
+    return {
+      ok: false,
+      status: discoveryResult.status || 502,
+      error: discoveryResult.error || 'instagram_business_discovery_failed',
+      message: discoveryResult.message || `Unable to find Instagram account @${normalizedUsername}.`,
+      collected: null,
+    }
+  }
+
+  const discoveryProfile =
+    discoveryResult.payload?.business_discovery && typeof discoveryResult.payload.business_discovery === 'object'
+      ? discoveryResult.payload.business_discovery
+      : null
+  if (!discoveryProfile) {
+    return {
+      ok: false,
+      status: 404,
+      error: 'instagram_business_discovery_not_found',
+      message: `Unable to find Instagram account @${normalizedUsername}.`,
+      collected: null,
+    }
+  }
+
+  const mediaRows = Array.isArray(discoveryProfile.media?.data) ? discoveryProfile.media.data : []
+  const posts = []
+  for (const row of mediaRows.slice(0, safeMaxPosts)) {
+    const postId = normalizeTextInput(row?.id, { maxLength: 300 })
+    if (!postId) continue
+    const mediaType = normalizeTextInput(row?.media_type, { maxLength: 60 })
+    const caption = normalizeTextInput(row?.caption, { maxLength: 600, allowNewLines: true })
+    const fallbackTitle = mediaType.toLowerCase().includes('video') ? 'Instagram reel' : 'Instagram post'
+    const title = normalizeTextInput(caption.split('\n')[0], { maxLength: 300 }) || fallbackTitle
+    const likes = Math.max(0, toNumber(row?.like_count))
+    const comments = Math.max(0, toNumber(row?.comments_count))
+
+    const insightResult = await fetchInstagramInsightsForMedia({
+      mediaId: postId,
+      mediaType,
+      accessToken,
+    })
+    const insightMetrics = insightResult.ok ? insightResult.metrics : {}
+
+    const saves = Math.max(0, toNumber(insightMetrics.saved))
+    const shares = Math.max(0, toNumber(insightMetrics.shares))
+    const impressions = Math.max(0, toNumber(insightMetrics.impressions))
+    const reach = Math.max(0, toNumber(insightMetrics.reach))
+    const videoViews = Math.max(0, toNumber(insightMetrics.video_views))
+    const engagements = likes + comments + saves + shares
+    const views = Math.max(videoViews, impressions, reach, engagements, likes, comments)
+    const permalink = normalizeTextInput(row?.permalink, { maxLength: 500 })
+    posts.push({
+      id: postId,
+      url: permalink || '',
+      title,
+      publishedAt: normalizeTextInput(row?.timestamp, { maxLength: 64 }),
+      views,
+      likes,
+      comments,
+      saves,
+      shares,
+      reposts: 0,
+      engagements,
+    })
+  }
+
+  const accountId =
+    normalizeInstagramHandle(discoveryProfile.username)
+    || normalizeTextInput(discoveryProfile.id, { maxLength: 120 }).toLowerCase()
+    || normalizedUsername
+  const accountName =
+    normalizeTextInput(discoveryProfile.name, { maxLength: 180 })
+    || normalizeTextInput(discoveryProfile.username, { maxLength: 180 })
+    || accountId
+  return {
+    ok: true,
+    status: 200,
+    collected: {
+      account: {
+        accountId,
+        accountName,
+        followers: Math.max(0, toNumber(discoveryProfile.followers_count)),
+        postsCount: Math.max(0, toNumber(discoveryProfile.media_count || posts.length)),
+        reach: 0,
+        impressions: 0,
+      },
+      posts,
+      collectedAt: new Date().toISOString(),
+      selectorVersion: 'graph-api-v2-business-discovery',
+    },
+  }
+}
+
+const listInstagramGraphMediaByCandidate = async (candidate, options = {}) => {
+  const normalizedCandidate = candidate && typeof candidate === 'object' ? candidate : {}
+  const normalizedGraphUserId = normalizeTextInput(normalizedCandidate.graphUserId, { maxLength: 120 })
+  const normalizedSource = normalizeTextInput(normalizedCandidate.source, { maxLength: 40 }).toLowerCase()
+  const accessToken = normalizeTextInput(options.accessToken, { maxLength: 4000 }) || instagramAccessToken
+  const safeMaxPosts = Math.max(1, Math.min(50, toNumber(options.maxPosts) || instagramCollectorMaxPosts))
+  const isBasicDisplay = normalizedSource === 'basic_display'
+  const fields = isBasicDisplay
+    ? 'id,caption,media_type,media_url,permalink,timestamp,thumbnail_url'
+    : 'id,caption,media_type,media_product_type,media_url,permalink,timestamp,thumbnail_url,like_count,comments_count'
+  const path = isBasicDisplay || !normalizedGraphUserId
+    ? '/me/media'
+    : `/${encodeURIComponent(normalizedGraphUserId)}/media`
+  const mediaResult = await requestInstagramGraph({
+    base: isBasicDisplay ? 'instagram' : 'facebook',
+    path,
+    query: {
+      fields,
+      limit: String(safeMaxPosts),
+    },
+    accessToken,
+  })
+  if (!mediaResult.ok) {
+    return {
+      ok: false,
+      status: mediaResult.status || 502,
+      error: mediaResult.error || 'instagram_graph_media_fetch_failed',
+      message: mediaResult.message || 'Unable to load Instagram media.',
+      posts: [],
+    }
+  }
+
+  const mediaRows = Array.isArray(mediaResult.payload?.data) ? mediaResult.payload.data : []
+  const posts = []
+  for (const row of mediaRows) {
+    const postId = normalizeTextInput(row?.id, { maxLength: 300 })
+    if (!postId) continue
+    const caption = normalizeTextInput(row?.caption, { maxLength: 600, allowNewLines: true })
+    const mediaType = normalizeTextInput(row?.media_type, { maxLength: 80 })
+    const fallbackTitle = mediaType.toLowerCase().includes('video')
+      ? 'Instagram reel'
+      : 'Instagram post'
+    const title = normalizeTextInput(caption.split('\n')[0], { maxLength: 300 }) || fallbackTitle
+    const likes = Math.max(0, toNumber(row?.like_count))
+    const comments = Math.max(0, toNumber(row?.comments_count))
+    let shares = Math.max(0, toNumber(row?.share_count))
+    let saves = Math.max(0, toNumber(row?.saved))
+    const reposts = Math.max(0, toNumber(row?.repost_count))
+    let views = Math.max(
+      0,
+      toNumber(row?.video_views),
+      toNumber(row?.plays),
+      toNumber(row?.impressions),
+      toNumber(row?.reach),
+    )
+    if (!isBasicDisplay) {
+      const insightResult = await fetchInstagramInsightsForMedia({
+        mediaId: postId,
+        mediaType,
+        accessToken,
+      })
+      if (insightResult.ok) {
+        const metrics = insightResult.metrics
+        saves = Math.max(saves, Math.max(0, toNumber(metrics.saved)))
+        shares = Math.max(shares, Math.max(0, toNumber(metrics.shares)))
+        views = Math.max(
+          views,
+          Math.max(0, toNumber(metrics.video_views)),
+          Math.max(0, toNumber(metrics.impressions)),
+          Math.max(0, toNumber(metrics.reach)),
+        )
+      }
+    }
+    const engagements = likes + comments + shares + saves + reposts
+    const permalink = normalizeTextInput(row?.permalink, { maxLength: 500 })
+    posts.push({
+      id: postId,
+      url: permalink || '',
+      title,
+      publishedAt: normalizeTextInput(row?.timestamp, { maxLength: 64 }),
+      views: views > 0 ? views : Math.max(engagements, likes, comments),
+      likes,
+      comments,
+      saves,
+      shares,
+      reposts,
+      engagements,
+    })
+  }
+
+  return {
+    ok: true,
+    status: 200,
+    posts: posts.slice(0, safeMaxPosts),
+  }
+}
+
+const collectInstagramMetricsWithGraph = async (connection) => {
+  const connectionAccountId = resolveInstagramAccountId(connection)
+  const connectionKey = buildInstagramVaultKey({
+    ownerUserId: connection?.ownerUserId,
+    accountId: connectionAccountId,
+  })
+  const tokenEntry = connectionKey ? instagramGraphAccessTokenByConnectionKey.get(connectionKey) : null
+  const scopedAccessToken = normalizeTextInput(tokenEntry?.accessToken, { maxLength: 4000 })
+  const globalAccessToken = normalizeTextInput(instagramAccessToken, { maxLength: 4000 })
+  const requestedUsername =
+    normalizeInstagramHandle(connection?.accountName)
+    || normalizeInstagramHandle(connectionAccountId)
+
+  const isInvalidAccessTokenMessage = (value) => {
+    const normalized = normalizeTextInput(value, { maxLength: 240 }).toLowerCase()
+    return normalized.includes('invalid oauth access token')
+      || normalized.includes('cannot parse access token')
+      || normalized.includes('error validating access token')
+      || normalized.includes('access token could not be decrypted')
+      || normalized.includes('session has expired')
+  }
+
+  const collectWithToken = async (accessToken) => {
+    const normalizedToken = normalizeTextInput(accessToken, { maxLength: 4000 })
+    if (!normalizedToken) {
+      throw new Error('INSTAGRAM_ACCESS_TOKEN is not configured.')
+    }
+
+    if (requestedUsername) {
+      const discoveryResult = await collectInstagramBusinessDiscoveryMetrics({
+        username: requestedUsername,
+        accessToken: normalizedToken,
+        maxPosts: instagramCollectorMaxPosts,
+      })
+      if (discoveryResult.ok && discoveryResult.collected) {
+        return discoveryResult.collected
+      }
+    }
+
+    const candidatesResult = await listInstagramGraphConnectionCandidates({
+      accessToken: normalizedToken,
+    })
+    if (!candidatesResult.ok || !candidatesResult.candidates.length) {
+      throw new Error(
+        candidatesResult.message
+        || `Unable to find Instagram account metadata for ${requestedUsername ? `@${requestedUsername}` : 'the configured account'}.`,
+      )
+    }
+    const candidate = resolveInstagramGraphCandidateForConnection(connection, candidatesResult.candidates)
+    if (!candidate) {
+      throw new Error(
+        requestedUsername
+          ? `Instagram account @${requestedUsername} was not found in Graph API responses.`
+          : 'Configured Instagram token did not return a matching account.',
+      )
+    }
+    const mediaResult = await listInstagramGraphMediaByCandidate(candidate, {
+      maxPosts: instagramCollectorMaxPosts,
+      accessToken: normalizedToken,
+    })
+    if (!mediaResult.ok) {
+      throw new Error(mediaResult.message || 'Unable to fetch Instagram media from Graph API.')
+    }
+    const accountId = normalizeInstagramHandle(candidate.accountId || candidate.username)
+      || resolveInstagramAccountId(connection)
+      || 'instagram'
+    const accountName =
+      normalizeTextInput(candidate.accountName, { maxLength: 180 })
+      || normalizeTextInput(connection?.accountName, { maxLength: 180 })
+      || accountId
+
+    return {
+      account: {
+        accountId,
+        accountName,
+        followers: Math.max(0, toNumber(candidate.followers)),
+        postsCount: Math.max(0, toNumber(candidate.postsCount || mediaResult.posts.length)),
+        reach: 0,
+        impressions: 0,
+      },
+      posts: mediaResult.posts,
+      collectedAt: new Date().toISOString(),
+      selectorVersion: 'graph-api-v1-legacy',
+    }
+  }
+
+  const primaryToken = scopedAccessToken || globalAccessToken
+  try {
+    return await collectWithToken(primaryToken)
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : ''
+    const canRetryWithGlobalToken = Boolean(
+      scopedAccessToken
+      && globalAccessToken
+      && scopedAccessToken !== globalAccessToken
+      && isInvalidAccessTokenMessage(errorMessage),
+    )
+    if (!canRetryWithGlobalToken) {
+      throw error
+    }
+    if (connectionKey) {
+      instagramGraphAccessTokenByConnectionKey.delete(connectionKey)
+    }
+    return collectWithToken(globalAccessToken)
+  }
+}
+
 const collectInstagramMetricsForConnection = async (connection) => {
   if (instagramCollectorMode === 'disabled') {
     return {
@@ -9516,10 +13485,33 @@ const collectInstagramMetricsForConnection = async (connection) => {
       collectionMode: 'disabled',
     }
   }
+  if (instagramCollectorMode === 'graph') {
+    const collected = await collectInstagramMetricsWithGraph(connection)
+    return {
+      ...collected,
+      collectionMode: 'graph',
+    }
+  }
+  if (
+    instagramCollectorMode === 'playwright'
+    && !instagramUsername
+    && !instagramPassword
+    && instagramAccessToken
+  ) {
+    const collected = await collectInstagramMetricsWithGraph(connection)
+    return {
+      ...collected,
+      collectionMode: 'graph',
+    }
+  }
   const cookies = await getInstagramSessionVaultCookies({
     ownerUserId: connection.ownerUserId,
     accountId: connection.accountId,
   })
+  const instagramCredentials =
+    instagramUsername && instagramPassword
+      ? { username: instagramUsername, password: instagramPassword }
+      : null
   if (instagramCollectorMode === 'mock') {
     return {
       ...buildDeterministicInstagramFallback(connection),
@@ -9535,6 +13527,7 @@ const collectInstagramMetricsForConnection = async (connection) => {
         accountHandle: connection.accountId,
         accountName: connection.accountName,
         cookies,
+        credentials: instagramCredentials,
         maxPosts: instagramCollectorMaxPosts,
         timeoutMs: instagramCollectorTimeoutMs,
       })
@@ -9780,6 +13773,14 @@ const createAndStartInstagramRefreshJob = async (
   userId,
   options = {},
 ) => {
+  if (!instagramCollectionEnabled) {
+    return {
+      ok: false,
+      status: 410,
+      error: 'instagram_collection_disabled',
+      payload: null,
+    }
+  }
   const trigger = typeof options.trigger === 'string' ? options.trigger : 'manual'
   const reuseRunning = options.reuseRunning !== false
   const minIntervalMs = Number.isFinite(options.minIntervalMs) ? Number(options.minIntervalMs) : 0
@@ -9876,6 +13877,7 @@ const createAndStartInstagramRefreshJob = async (
 }
 
 const maybeQueueAutoInstagramRefresh = async ({ userId, hasConnections, generatedAt }) => {
+  if (!instagramCollectionEnabled) return { queued: false }
   if (!userId || !hasConnections) return { queued: false }
   const generatedAtMs = parseIsoTime(generatedAt)
   const isStale =
@@ -9897,6 +13899,7 @@ const maybeQueueAutoInstagramRefresh = async ({ userId, hasConnections, generate
 }
 
 const runInstagramRefreshJob = async (jobId, userId) => {
+  if (!instagramCollectionEnabled) return
   if (!jobId || !userId) return
   if (instagramRefreshRunningUsers.has(userId)) {
     return
@@ -9961,7 +13964,7 @@ const runInstagramRefreshJob = async (jobId, userId) => {
       return
     }
 
-    const parts = []
+    const collectedParts = []
     const failures = []
     const failureByAccountKey = new Map()
     const collectionModes = new Set()
@@ -9978,7 +13981,10 @@ const runInstagramRefreshJob = async (jobId, userId) => {
           const collected = await collectInstagramMetricsForConnection(connection)
           const part = mapInstagramCollectionToSummaryPart(connection, collected)
           if (part.channels.length || part.topPosts.length || part.timeSeries.length) {
-            parts.push(part)
+            collectedParts.push({
+              ownerUserId: normalizeTextInput(connection.ownerUserId, { maxLength: 80 }),
+              part,
+            })
           }
           const collectionModeValue = normalizeTextInput(part.collectionMeta?.collectionMode, { maxLength: 32 })
           if (collectionModeValue) collectionModes.add(collectionModeValue)
@@ -10024,6 +14030,7 @@ const runInstagramRefreshJob = async (jobId, userId) => {
       }
     })
 
+    const parts = collectedParts.map((entry) => entry.part)
     const summary = mergeInstagramSummaryParts(parts)
     if (!summary.channels.length && failures.length) {
       const dominantFailureCode = normalizeTextInput(failures[0]?.code, { maxLength: 80 }) || 'collection_failed'
@@ -10065,6 +14072,24 @@ const runInstagramRefreshJob = async (jobId, userId) => {
       generatedAt: finishedAt,
       refreshJobId: jobId,
     })
+
+    const ownerPartsByUserId = new Map()
+    for (const entry of collectedParts) {
+      const ownerUserId = normalizeTextInput(entry.ownerUserId, { maxLength: 80 })
+      if (!isUuid(ownerUserId)) continue
+      const existingParts = ownerPartsByUserId.get(ownerUserId) ?? []
+      existingParts.push(entry.part)
+      ownerPartsByUserId.set(ownerUserId, existingParts)
+    }
+    for (const [ownerUserId, ownerParts] of ownerPartsByUserId.entries()) {
+      const ownerSummary = mergeInstagramSummaryParts(ownerParts)
+      await upsertCachedInstagramSummary({
+        userId: ownerUserId,
+        summary: ownerSummary,
+        generatedAt: finishedAt,
+        refreshJobId: jobId,
+      })
+    }
     await updateInstagramRefreshJob(userId, jobId, {
       status: 'succeeded',
       finished_at: finishedAt,
@@ -10365,6 +14390,14 @@ const runYouTubeRefreshJob = async (jobId, userId) => {
 }
 
 app.post('/api/instagram/session', async (req, res) => {
+  if (!instagramCollectionEnabled) {
+    res.status(410).json({
+      ok: false,
+      error: 'instagram_collection_disabled',
+      message: 'Instagram collection is disabled.',
+    })
+    return
+  }
   const viewerResult = await resolveYouTubeViewer(req, res)
   if (!viewerResult.ok) {
     const viewer = viewerResult.viewer
@@ -10484,6 +14517,14 @@ app.post('/api/instagram/session', async (req, res) => {
 })
 
 app.get('/api/instagram/connections', async (req, res) => {
+  if (!instagramCollectionEnabled) {
+    res.json({
+      count: 0,
+      connections: [],
+      disabled: true,
+    })
+    return
+  }
   const viewerResult = await resolveYouTubeViewer(req, res)
   if (!viewerResult.ok) {
     const viewer = viewerResult.viewer
@@ -10523,6 +14564,13 @@ app.get('/api/instagram/connections', async (req, res) => {
 })
 
 app.post('/api/instagram/refresh', async (req, res) => {
+  if (!instagramCollectionEnabled) {
+    res.status(410).json({
+      error: 'instagram_collection_disabled',
+      message: 'Instagram collection is disabled.',
+    })
+    return
+  }
   const viewerResult = await resolveYouTubeViewer(req, res)
   if (!viewerResult.ok) {
     const viewer = viewerResult.viewer
@@ -10570,6 +14618,13 @@ app.post('/api/instagram/refresh', async (req, res) => {
 })
 
 app.get('/api/instagram/refresh/:jobId', async (req, res) => {
+  if (!instagramCollectionEnabled) {
+    res.status(410).json({
+      error: 'instagram_collection_disabled',
+      message: 'Instagram collection is disabled.',
+    })
+    return
+  }
   const viewerResult = await resolveYouTubeViewer(req, res)
   if (!viewerResult.ok) {
     const viewer = viewerResult.viewer
@@ -10620,6 +14675,15 @@ app.get('/api/instagram/refresh/:jobId', async (req, res) => {
 })
 
 app.get('/api/instagram/summary', async (req, res) => {
+  if (!instagramCollectionEnabled) {
+    res.json({
+      ...buildEmptyInstagramSummary(),
+      cacheStatus: 'disabled',
+      generatedAt: null,
+      autoRefresh: { queued: false },
+    })
+    return
+  }
   const viewerResult = await resolveYouTubeViewer(req, res)
   if (!viewerResult.ok) {
     const viewer = viewerResult.viewer
@@ -10726,7 +14790,207 @@ app.get('/api/instagram/summary', async (req, res) => {
   })
 })
 
+app.post('/api/x/refresh', async (req, res) => {
+  if (!xCollectionEnabled) {
+    res.status(410).json({
+      error: 'x_collection_disabled',
+      message: 'X collection is disabled.',
+    })
+    return
+  }
+  if (!isSupabaseConfigured) {
+    res.status(503).json({
+      error: 'x_storage_not_configured',
+      message: 'X storage is not configured.',
+    })
+    return
+  }
+  const viewerResult = await resolveYouTubeViewer(req, res)
+  if (!viewerResult.ok) {
+    const viewer = viewerResult.viewer
+    res.status(viewer.status || 401).json({
+      error: viewer.error || 'not_authenticated',
+      message: viewer.message || 'Unable to authorize X refresh.',
+    })
+    return
+  }
+  if (!canRoleConnectAccounts(viewerResult.viewer.appRole)) {
+    res.status(403).json({
+      error: 'forbidden',
+      message: 'Only admins can refresh X data.',
+    })
+    return
+  }
+
+  const userId = viewerResult.viewer.userId
+  const connectionsResult = await listAccessibleXConnectionsByUserId(userId)
+  if (!connectionsResult.ok) {
+    res.status(connectionsResult.status || 500).json({
+      error: 'x_connections_read_failed',
+      message: 'Unable to load connected X accounts.',
+    })
+    return
+  }
+  const dedupedConnections = new Map()
+  for (const connection of connectionsResult.connections) {
+    const xUserId = normalizeXUserId(connection.userId)
+    if (!xUserId || dedupedConnections.has(xUserId)) continue
+    dedupedConnections.set(xUserId, connection)
+  }
+  if (!dedupedConnections.size) {
+    res.json({
+      ok: true,
+      refreshedAccounts: 0,
+      postsCollected: 0,
+      failedAccounts: [],
+      partialSuccess: false,
+    })
+    return
+  }
+
+  let refreshedAccounts = 0
+  let postsCollected = 0
+  const failedAccounts = []
+
+  for (const connection of dedupedConnections.values()) {
+    const xUserId = normalizeXUserId(connection.userId)
+    const username = normalizeXUsername(connection.accountName)
+    const ownerUserId = normalizeTextInput(connection.ownerUserId, { maxLength: 80 })
+    const syncResult = await refreshAndPersistXAccount({
+      userId: xUserId,
+      username,
+      ownerUserId,
+    })
+    if (!syncResult.ok) {
+      failedAccounts.push({
+        userId: xUserId,
+        username,
+        error: normalizeTextInput(syncResult.error, { maxLength: 120 }) || 'x_refresh_failed',
+        message: normalizeTextInput(syncResult.message, { maxLength: 240 }) || '',
+        status: Math.max(0, toNumber(syncResult.status)),
+      })
+      continue
+    }
+    refreshedAccounts += 1
+    postsCollected += Math.max(0, toNumber(syncResult.postCount))
+  }
+
+  const partialSuccess = refreshedAccounts > 0 && failedAccounts.length > 0
+  res.json({
+    ok: failedAccounts.length === 0,
+    partialSuccess,
+    refreshedAccounts,
+    postsCollected,
+    failedAccounts,
+  })
+})
+
+app.get('/api/x/summary', async (req, res) => {
+  if (!isSupabaseConfigured) {
+    res.json({
+      ...buildEmptyInstagramSummary(),
+      cacheStatus: 'disabled',
+      generatedAt: null,
+      autoRefresh: { queued: false },
+    })
+    return
+  }
+  const viewerResult = await resolveYouTubeViewer(req, res)
+  if (!viewerResult.ok) {
+    const viewer = viewerResult.viewer
+    res.status(viewer.status || 401).json({
+      ...buildEmptyInstagramSummary(),
+      error: viewer.error || 'not_authenticated',
+      cacheStatus: 'error',
+    })
+    return
+  }
+
+  const userId = viewerResult.viewer.userId
+  const connectionsResult = await listAccessibleXConnectionsByUserId(userId)
+  if (!connectionsResult.ok) {
+    res.status(connectionsResult.status || 500).json({
+      ...buildEmptyInstagramSummary(),
+      error: 'x_scope_lookup_failed',
+      cacheStatus: 'error',
+    })
+    return
+  }
+
+  const accountNameByUserId = new Map()
+  for (const connection of connectionsResult.connections) {
+    const xUserId = normalizeXUserId(connection.userId)
+    if (!xUserId) continue
+    if (!accountNameByUserId.has(xUserId)) {
+      accountNameByUserId.set(
+        xUserId,
+        normalizeTextInput(connection.accountName, { maxLength: 180 }) || `X Account ${xUserId}`,
+      )
+    }
+  }
+  const userIds = [...accountNameByUserId.keys()]
+  if (!userIds.length) {
+    res.json({
+      ...buildEmptyInstagramSummary(),
+      cacheStatus: 'empty',
+      generatedAt: null,
+      autoRefresh: { queued: false },
+    })
+    return
+  }
+
+  const xRowsResult = await listXRowsByUserIds(userIds)
+  if (!xRowsResult.ok) {
+    res.status(xRowsResult.status || 500).json({
+      ...buildEmptyInstagramSummary(),
+      error: 'x_rows_read_failed',
+      cacheStatus: 'error',
+    })
+    return
+  }
+
+  const summaryParts = xRowsResult.rows
+    .map((row) => mapXRowToSummaryPart(row, { accountNameByUserId }))
+    .filter((part) =>
+      part.channels.length
+      || part.topPosts.length
+      || part.timeSeries.length
+      || part.timeSeriesByChannel.length)
+
+  const generatedAt = xRowsResult.rows
+    .map((row) => normalizeTextInput(row?.created_at, { maxLength: 64 }))
+    .filter((value) => Boolean(value))
+    .sort((left, right) => parseIsoTime(right) - parseIsoTime(left))[0] || null
+
+  if (!summaryParts.length) {
+    res.json({
+      ...buildEmptyInstagramSummary(),
+      cacheStatus: 'empty',
+      generatedAt,
+      autoRefresh: { queued: false },
+    })
+    return
+  }
+
+  const summary = mergeInstagramSummaryParts(summaryParts)
+  res.json({
+    ...summary,
+    cacheStatus: 'ready',
+    generatedAt,
+    autoRefresh: { queued: false },
+  })
+})
+
 app.get('/api/instagram/ops', async (req, res) => {
+  if (!instagramCollectionEnabled) {
+    res.json({
+      ok: true,
+      disabled: true,
+      collectorMode: instagramCollectorMode,
+      selectorVersion: INSTAGRAM_SELECTOR_VERSION,
+    })
+    return
+  }
   const viewerResult = await resolveYouTubeViewer(req, res)
   if (!viewerResult.ok) {
     const viewer = viewerResult.viewer
@@ -10832,6 +15096,7 @@ app.get('/api/instagram/ops', async (req, res) => {
     alerts: {
       failureStreakThreshold: instagramAlertFailureStreakThreshold,
       failureRateThresholdPct: instagramAlertFailureRateThresholdPct,
+      failureRateMinRuns: instagramAlertFailureRateMinRuns,
     },
     persistence: {
       source: 'Organizations.connected_accounts[].instagramOps',
@@ -11357,8 +15622,14 @@ app.post('/auth/logout', async (req, res) => {
     }
   }
   res.clearCookie('google_oauth_state')
+  res.clearCookie(GOOGLE_OAUTH_CONTEXT_COOKIE)
   res.clearCookie('youtube_oauth_state')
   res.clearCookie(YOUTUBE_OAUTH_CONTEXT_COOKIE)
+  res.clearCookie(INSTAGRAM_OAUTH_STATE_COOKIE)
+  res.clearCookie(INSTAGRAM_OAUTH_CONTEXT_COOKIE)
+  res.clearCookie(X_OAUTH_STATE_COOKIE)
+  res.clearCookie(X_OAUTH_CONTEXT_COOKIE)
+  res.clearCookie(APP_REDIRECT_COOKIE)
   res.clearCookie(YOUTUBE_SESSION_COOKIE)
   res.clearCookie(YOUTUBE_CONNECTIONS_COOKIE)
   clearSupabaseSessionCookies(res)
@@ -11391,6 +15662,7 @@ const runScheduledYouTubeAutoRefresh = async () => {
 }
 
 const runScheduledInstagramAutoRefresh = async () => {
+  if (!instagramCollectionEnabled) return
   const organizationsResult = await listOrganizationRows()
   if (!organizationsResult.ok) return
   const ownerUserIds = new Set()
@@ -11423,12 +15695,24 @@ const runScheduledInstagramAutoRefresh = async () => {
   }
 }
 
+const runScheduledTaskSafely = async (taskName, task) => {
+  try {
+    await task()
+  } catch (error) {
+    console.error(`${taskName} failed:`, error)
+  }
+}
+
 if (!isServerlessRuntime) {
-  void runScheduledYouTubeAutoRefresh()
-  void runScheduledInstagramAutoRefresh()
+  void runScheduledTaskSafely('runScheduledYouTubeAutoRefresh', runScheduledYouTubeAutoRefresh)
+  if (instagramCollectionEnabled) {
+    void runScheduledTaskSafely('runScheduledInstagramAutoRefresh', runScheduledInstagramAutoRefresh)
+  }
   setInterval(() => {
-    void runScheduledYouTubeAutoRefresh()
-    void runScheduledInstagramAutoRefresh()
+    void runScheduledTaskSafely('runScheduledYouTubeAutoRefresh', runScheduledYouTubeAutoRefresh)
+    if (instagramCollectionEnabled) {
+      void runScheduledTaskSafely('runScheduledInstagramAutoRefresh', runScheduledInstagramAutoRefresh)
+    }
   }, 60 * 60 * 1000)
   app.listen(port, () => {
     console.log(`Auth server listening on ${serverBaseUrl}`)

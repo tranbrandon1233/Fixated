@@ -74,11 +74,11 @@ const App = () => {
 
       const status = await fetchSessionStatus()
       if (cancelled) return
-      if (!status.authenticated) {
+      if (!status.authenticated && !status.transientError) {
         localStorage.removeItem('auth_provider')
         setIsAuthed(false)
         setRole('admin')
-      } else {
+      } else if (status.authenticated) {
         setRole(status.role ?? 'admin')
       }
       setIsSessionChecking(false)
@@ -98,14 +98,16 @@ const App = () => {
     const checkForSessionTimeout = async () => {
       const status = await fetchSessionStatus()
       if (cancelled) return
-      if (!status.authenticated) {
+      if (!status.authenticated && !status.transientError) {
         localStorage.removeItem('auth_provider')
         setIsAuthed(false)
         setRole('admin')
         setIsSessionChecking(false)
         return
       }
-      setRole(status.role ?? 'admin')
+      if (status.authenticated) {
+        setRole(status.role ?? 'admin')
+      }
     }
 
     const intervalId = window.setInterval(() => {

@@ -7,16 +7,10 @@ const uuidRegex =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
 export type OrganizationMemberRole = 'admin' | 'internal' | 'brand viewer'
-export type OrganizationConnectionPlatform = 'YouTube' | 'Instagram' | 'X'
 
 export interface MemberAccessInput {
   email: string
   role?: OrganizationMemberRole
-}
-
-export interface OrganizationMemberRoleUpdateInput {
-  userId: string
-  role: OrganizationMemberRole
 }
 
 export interface MemberResolutionItem {
@@ -39,6 +33,8 @@ export interface OrganizationMember {
   role: OrganizationMemberRole
 }
 
+export type OrganizationConnectionPlatform = 'YouTube' | 'Instagram' | 'X'
+
 export interface OrganizationConnectedAccount {
   id: string
   platform: OrganizationConnectionPlatform
@@ -48,7 +44,7 @@ export interface OrganizationConnectedAccount {
   connectedAt?: string
 }
 
-export interface OrganizationCampaignSummary {
+export interface OrganizationCampaignDirectoryItem {
   id: string
   name: string
 }
@@ -58,12 +54,12 @@ export interface OrganizationApiItem {
   createdAt: string
   name: string
   campaigns: string[]
-  campaignDirectory: OrganizationCampaignSummary[]
+  campaignDirectory: OrganizationCampaignDirectoryItem[]
   members: Record<string, OrganizationMemberRole>
   memberDirectory: OrganizationMember[]
   connectedAccounts: OrganizationConnectedAccount[]
   creator: string
-  creatorEmail?: string
+  creatorEmail: string
 }
 
 export interface OrganizationListPayload {
@@ -98,9 +94,14 @@ export interface UpdateOrganizationMembersResult {
   updateResult: MemberResolutionSummary
 }
 
+export interface OrganizationMemberRoleUpdateInput {
+  userId: string
+  role?: OrganizationMemberRole
+}
+
 export interface UpdateOrganizationDetailsInput {
-  name: string
-  campaigns: string[]
+  name?: string
+  campaigns?: string[]
 }
 
 export interface UpdateOrganizationDetailsResult {
@@ -111,30 +112,24 @@ export interface DeleteOrganizationResult {
   organizationId: string
 }
 
+export interface RemoveOrganizationConnectionResult {
+  organization: OrganizationApiItem
+}
+
 export interface AddOrganizationConnectionInput {
   platform: OrganizationConnectionPlatform
-  accountName: string
+  accountName?: string
+  username?: string
 }
 
 export interface AddOrganizationConnectionResult {
   organization: OrganizationApiItem
-}
-
-export interface RemoveOrganizationConnectionResult {
-  organization: OrganizationApiItem
+  warning?: string
 }
 
 const asString = (value: unknown) => (typeof value === 'string' ? value : '')
 
 const isUuid = (value: string) => uuidRegex.test(value)
-
-const normalizeConnectionPlatform = (value: unknown): OrganizationConnectionPlatform => {
-  if (typeof value !== 'string') return 'YouTube'
-  const normalized = value.trim().toLowerCase()
-  if (normalized === 'x') return 'X'
-  if (normalized === 'instagram') return 'Instagram'
-  return 'YouTube'
-}
 
 const normalizeRole = (value: unknown): OrganizationMemberRole => {
   if (typeof value !== 'string') return 'internal'
@@ -142,15 +137,25 @@ const normalizeRole = (value: unknown): OrganizationMemberRole => {
   if (!normalized) return 'internal'
   if (normalized === 'admin' || normalized.includes('admin')) return 'admin'
   if (
-    normalized === 'brand viewer' ||
-    normalized === 'brand-viewer' ||
-    normalized === 'brand_viewer' ||
-    normalized === 'brand' ||
     normalized.includes('brand')
   ) {
     return 'brand viewer'
   }
   return 'internal'
+}
+
+const normalizeConnectionPlatform = (value: unknown): OrganizationConnectionPlatform => {
+  const normalized = sanitizeTextInput(value, { maxLength: 24 }).toLowerCase()
+  if (normalized === 'instagram') return 'Instagram'
+  if (
+    normalized === 'x'
+    || normalized === 'twitter'
+    || normalized === 'x/twitter'
+    || normalized === 'xtwitter'
+  ) {
+    return 'X'
+  }
+  return 'YouTube'
 }
 
 const rolePriority: Record<OrganizationMemberRole, number> = {
@@ -196,42 +201,33 @@ const normalizeMember = (value: unknown): OrganizationMember | null => {
 }
 
 const normalizeConnectedAccount = (value: unknown): OrganizationConnectedAccount | null => {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  if (!value || typeof value !== 'object') return null
   const row = value as Partial<OrganizationConnectedAccount>
-  const platform = normalizeConnectionPlatform(row.platform)
+  const id = sanitizeTokenInput(row.id, 180)
   const accountName = sanitizeTextInput(row.accountName, { maxLength: 180 })
-  if (!accountName) return null
-  const channelId = sanitizeTokenInput(row.channelId, 300) || undefined
-  const ownerUserId = sanitizeTokenInput((row as { ownerUserId?: unknown }).ownerUserId, 80) || undefined
-  const fallbackIdSource = channelId || accountName.toLowerCase().replace(/\s+/g, '-')
-  const id = sanitizeTokenInput(row.id, 180) || `${platform.toLowerCase()}:${fallbackIdSource}`
-  if (!id) return null
-  const connectedAt = sanitizeTokenInput(row.connectedAt, 64) || undefined
+  if (!id || !accountName) return null
+  const channelId = sanitizeTokenInput(row.channelId, 300)
+  const ownerUserId = sanitizeTokenInput(row.ownerUserId, 80)
+  const connectedAt = sanitizeTokenInput(row.connectedAt, 64)
   return {
     id,
-    platform,
+    platform: normalizeConnectionPlatform(row.platform),
     accountName,
-    channelId,
-    ownerUserId,
-    connectedAt,
+    channelId: channelId || undefined,
+    ownerUserId: isUuid(ownerUserId) ? ownerUserId : undefined,
+    connectedAt: connectedAt || undefined,
   }
 }
 
-const normalizeCampaignDirectory = (value: unknown): OrganizationCampaignSummary[] => {
-  if (!Array.isArray(value)) return []
-  const seen = new Set<string>()
-  const rows: OrganizationCampaignSummary[] = []
-  value.forEach((entry) => {
-    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return
-    const row = entry as Partial<OrganizationCampaignSummary>
-    const id = sanitizeTokenInput(row.id, 80)
-    if (!isUuid(id) || seen.has(id)) return
-    const name = sanitizeTextInput((row as { name?: unknown }).name, { maxLength: 140 })
-    if (!name) return
-    seen.add(id)
-    rows.push({ id, name })
-  })
-  return rows
+const normalizeCampaignDirectoryItem = (value: unknown): OrganizationCampaignDirectoryItem | null => {
+  if (!value || typeof value !== 'object') return null
+  const row = value as Partial<OrganizationCampaignDirectoryItem>
+  const id = sanitizeTokenInput(row.id, 80)
+  if (!isUuid(id)) return null
+  return {
+    id,
+    name: sanitizeTextInput(row.name, { maxLength: 140 }) || id,
+  }
 }
 
 const normalizeOrganization = (payload: unknown): OrganizationApiItem | null => {
@@ -242,8 +238,12 @@ const normalizeOrganization = (payload: unknown): OrganizationApiItem | null => 
   const memberDirectory = (Array.isArray(row.memberDirectory) ? row.memberDirectory : [])
     .map((entry) => normalizeMember(entry))
     .filter((entry: OrganizationMember | null): entry is OrganizationMember => Boolean(entry))
-  const connectedAccountsSource = (row as { connectedAccounts?: unknown }).connectedAccounts
-  const connectedAccounts = (Array.isArray(connectedAccountsSource) ? connectedAccountsSource : [])
+  const campaigns = toUniqueUuidArray(row.campaigns)
+  const campaignDirectory = (Array.isArray(row.campaignDirectory) ? row.campaignDirectory : [])
+    .map((entry) => normalizeCampaignDirectoryItem(entry))
+    .filter((entry: OrganizationCampaignDirectoryItem | null): entry is OrganizationCampaignDirectoryItem =>
+      Boolean(entry))
+  const connectedAccounts = (Array.isArray(row.connectedAccounts) ? row.connectedAccounts : [])
     .map((entry) => normalizeConnectedAccount(entry))
     .filter((entry: OrganizationConnectedAccount | null): entry is OrganizationConnectedAccount => Boolean(entry))
 
@@ -251,13 +251,13 @@ const normalizeOrganization = (payload: unknown): OrganizationApiItem | null => 
     id,
     createdAt: sanitizeTokenInput(row.createdAt, 64),
     name: sanitizeTextInput(row.name, { maxLength: 140 }),
-    campaigns: toUniqueUuidArray(row.campaigns),
-    campaignDirectory: normalizeCampaignDirectory((row as { campaignDirectory?: unknown }).campaignDirectory),
+    campaigns,
+    campaignDirectory,
     members: toMemberRoleMap(row.members),
     memberDirectory,
     connectedAccounts,
     creator: sanitizeTokenInput(row.creator, 80),
-    creatorEmail: sanitizeEmailInput((row as { creatorEmail?: unknown }).creatorEmail) || undefined,
+    creatorEmail: sanitizeEmailInput(row.creatorEmail),
   }
 }
 
@@ -312,26 +312,21 @@ const sanitizeMemberAccess = (value: unknown): MemberAccessInput[] => {
   return [...roleByEmail.entries()].map(([email, role]) => ({ email, role }))
 }
 
-const sanitizeEmailArray = (value: unknown): string[] => {
-  if (!Array.isArray(value)) return []
-  return [...new Set(value.map((entry) => sanitizeEmailInput(entry)).filter((entry) => Boolean(entry)))]
-}
-
 const sanitizeRoleUpdates = (value: unknown): OrganizationMemberRoleUpdateInput[] => {
   if (!Array.isArray(value)) return []
   const roleByUserId = new Map<string, OrganizationMemberRole>()
   value.forEach((entry) => {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return
-    const row = entry as Partial<OrganizationMemberRoleUpdateInput>
-    const userId = sanitizeTokenInput(row.userId, 80)
+    const userId = sanitizeTokenInput((entry as { userId?: unknown }).userId, 80)
     if (!isUuid(userId)) return
-    const role = normalizeRole(row.role)
-    const existing = roleByUserId.get(userId)
-    if (!existing || rolePriority[role] > rolePriority[existing]) {
-      roleByUserId.set(userId, role)
-    }
+    roleByUserId.set(userId, normalizeRole((entry as { role?: unknown }).role))
   })
   return [...roleByUserId.entries()].map(([userId, role]) => ({ userId, role }))
+}
+
+const sanitizeEmailArray = (value: unknown): string[] => {
+  if (!Array.isArray(value)) return []
+  return [...new Set(value.map((entry) => sanitizeEmailInput(entry)).filter((entry) => Boolean(entry)))]
 }
 
 const readErrorMessage = (payload: unknown, fallback: string) => {
@@ -438,12 +433,17 @@ export const updateOrganizationDetails = async (
   organizationId: string,
   input: UpdateOrganizationDetailsInput,
 ): Promise<UpdateOrganizationDetailsResult> => {
-  const sanitizedInput: UpdateOrganizationDetailsInput = {
-    name: sanitizeTextInput(input.name, { maxLength: 140 }),
-    campaigns: toUniqueUuidArray(input.campaigns),
+  const sanitizedOrganizationId = sanitizeTokenInput(organizationId, 80)
+  const sanitizedInput: UpdateOrganizationDetailsInput = {}
+
+  if (Object.prototype.hasOwnProperty.call(input, 'name')) {
+    sanitizedInput.name = sanitizeTextInput(input.name, { maxLength: 140 })
+  }
+  if (Object.prototype.hasOwnProperty.call(input, 'campaigns')) {
+    sanitizedInput.campaigns = toUniqueUuidArray(input.campaigns)
   }
 
-  const response = await fetch(`${apiBaseUrl}/api/organizations/${organizationId}/details`, {
+  const response = await fetch(`${apiBaseUrl}/api/organizations/${encodeURIComponent(sanitizedOrganizationId)}/details`, {
     method: 'POST',
     credentials: 'include',
     headers: { 'Content-Type': 'application/json' },
@@ -451,19 +451,19 @@ export const updateOrganizationDetails = async (
   })
   const payload = await response.json().catch(() => null)
   if (!response.ok) {
-    throw new Error(readErrorMessage(payload, 'Unable to update organization details.'))
+    throw new Error(readErrorMessage(payload, 'Unable to update organization.'))
   }
 
   const organization = normalizeOrganization(payload?.organization)
   if (!organization) {
     throw new Error('Organization was updated but the response payload was invalid.')
   }
-
   return { organization }
 }
 
 export const deleteOrganization = async (organizationId: string): Promise<DeleteOrganizationResult> => {
-  const response = await fetch(`${apiBaseUrl}/api/organizations/${organizationId}`, {
+  const sanitizedOrganizationId = sanitizeTokenInput(organizationId, 80)
+  const response = await fetch(`${apiBaseUrl}/api/organizations/${encodeURIComponent(sanitizedOrganizationId)}`, {
     method: 'DELETE',
     credentials: 'include',
   })
@@ -471,50 +471,19 @@ export const deleteOrganization = async (organizationId: string): Promise<Delete
   if (!response.ok) {
     throw new Error(readErrorMessage(payload, 'Unable to delete organization.'))
   }
-
   return {
     organizationId: sanitizeTokenInput(payload?.organizationId, 80),
   }
-}
-
-export const addOrganizationConnection = async (
-  organizationId: string,
-  input: AddOrganizationConnectionInput,
-): Promise<AddOrganizationConnectionResult> => {
-  const sanitizedInput: AddOrganizationConnectionInput = {
-    platform: normalizeConnectionPlatform(input.platform),
-    accountName: sanitizeTextInput(input.accountName, { maxLength: 180 }),
-  }
-
-  const response = await fetch(`${apiBaseUrl}/api/organizations/${organizationId}/connections`, {
-    method: 'POST',
-    credentials: 'include',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(sanitizedInput),
-  })
-  const payload = await response.json().catch(() => null)
-  if (!response.ok) {
-    throw new Error(readErrorMessage(payload, 'Unable to add organization connection.'))
-  }
-
-  const organization = normalizeOrganization(payload?.organization)
-  if (!organization) {
-    throw new Error('Connection was added but the response payload was invalid.')
-  }
-
-  return { organization }
 }
 
 export const removeOrganizationConnection = async (
   organizationId: string,
   connectionId: string,
 ): Promise<RemoveOrganizationConnectionResult> => {
+  const sanitizedOrganizationId = sanitizeTokenInput(organizationId, 80)
   const sanitizedConnectionId = sanitizeTokenInput(connectionId, 180)
-  if (!sanitizedConnectionId) {
-    throw new Error('Connection id is required.')
-  }
   const response = await fetch(
-    `${apiBaseUrl}/api/organizations/${organizationId}/connections/${encodeURIComponent(sanitizedConnectionId)}`,
+    `${apiBaseUrl}/api/organizations/${encodeURIComponent(sanitizedOrganizationId)}/connections/${encodeURIComponent(sanitizedConnectionId)}`,
     {
       method: 'DELETE',
       credentials: 'include',
@@ -522,13 +491,42 @@ export const removeOrganizationConnection = async (
   )
   const payload = await response.json().catch(() => null)
   if (!response.ok) {
-    throw new Error(readErrorMessage(payload, 'Unable to remove organization connection.'))
+    throw new Error(readErrorMessage(payload, 'Unable to remove connected account.'))
   }
 
   const organization = normalizeOrganization(payload?.organization)
   if (!organization) {
-    throw new Error('Connection was removed but the response payload was invalid.')
+    throw new Error('Connected account was removed but the response payload was invalid.')
   }
-
   return { organization }
+}
+
+export const addOrganizationConnection = async (
+  organizationId: string,
+  input: AddOrganizationConnectionInput,
+): Promise<AddOrganizationConnectionResult> => {
+  const sanitizedOrganizationId = sanitizeTokenInput(organizationId, 80)
+  const sanitizedInput = {
+    platform: normalizeConnectionPlatform(input.platform),
+    accountName: sanitizeTextInput(input.accountName, { maxLength: 180 }),
+    username: sanitizeTokenInput(input.username, 120),
+  }
+  const response = await fetch(`${apiBaseUrl}/api/organizations/${encodeURIComponent(sanitizedOrganizationId)}/connections`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(sanitizedInput),
+  })
+  const payload = await response.json().catch(() => null)
+  if (!response.ok) {
+    throw new Error(readErrorMessage(payload, 'Unable to add connected account.'))
+  }
+  const organization = normalizeOrganization(payload?.organization)
+  if (!organization) {
+    throw new Error('Connected account was added but the response payload was invalid.')
+  }
+  return {
+    organization,
+    warning: sanitizeTextInput(payload?.warning, { maxLength: 280 }) || undefined,
+  }
 }

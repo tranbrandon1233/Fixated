@@ -10,7 +10,7 @@ import {
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { SectionHeader } from '../components/ui/SectionHeader'
 import type { CampaignApiItem } from '../utils/campaigns'
-import { getYouTubeConnectUrl } from '../utils/auth'
+import { getInstagramConnectUrl, getXConnectUrl, getYouTubeConnectUrl } from '../utils/auth'
 import { fetchCampaigns } from '../utils/campaigns'
 import { sanitizeEmailInput, sanitizeTextInput, sanitizeTokenInput } from '../utils/sanitize'
 import type { Role } from '../types/dashboard'
@@ -24,9 +24,8 @@ import {
   type MemberAccessInput,
   type MemberResolutionItem,
   type MemberResolutionSummary,
-  type OrganizationConnectedAccount,
-  // type OrganizationConnectionPlatform,
   type OrganizationApiItem,
+  type OrganizationConnectedAccount,
   type OrganizationMember,
   type OrganizationMemberRole,
   type OrganizationMemberRoleUpdateInput,
@@ -186,8 +185,6 @@ const canEditOrganizationNameByRole = (viewerRole: OrganizationViewerRole) => vi
 const canManageOrganizationConnectionsByRole = (viewerRole: OrganizationViewerRole) =>
   viewerRole === 'admin'
 
-// const connectionPlatformOptions: OrganizationConnectionPlatform[] = ['Instagram', 'X']
-
 const formatConnectedAccountLabel = (account: OrganizationConnectedAccount) =>
   `${sanitizeTextInput(account.accountName, { maxLength: 180 }) || 'Unknown account'} [${account.platform}]`
 
@@ -291,8 +288,6 @@ export const Organizations = ({ role }: OrganizationsProps) => {
   const [deleteError, setDeleteError] = useState<string | null>(null)
   const [deleteSubmitting, setDeleteSubmitting] = useState(false)
   const [connectionsOrg, setConnectionsOrg] = useState<OrganizationApiItem | null>(null)
-  // const [connectionPlatform, setConnectionPlatform] = useState<OrganizationConnectionPlatform>('Instagram')
-  // const [connectionAccountName, setConnectionAccountName] = useState('')
   const [connectionsError, setConnectionsError] = useState<string | null>(null)
   const [connectionsSuccess, setConnectionsSuccess] = useState<string | null>(null)
   const [connectionsSubmitting, setConnectionsSubmitting] = useState(false)
@@ -346,15 +341,18 @@ export const Organizations = ({ role }: OrganizationsProps) => {
 
   useEffect(() => {
     const provider = sanitizeTextInput(searchParams.get('provider'), { maxLength: 32 }).toLowerCase()
-    if (provider !== 'youtube') return
+    if (provider !== 'youtube' && provider !== 'instagram' && provider !== 'x') return
     const status = sanitizeTextInput(searchParams.get('status'), { maxLength: 16 }).toLowerCase()
     const message = sanitizeTextInput(searchParams.get('message'), { maxLength: 240 })
     const organizationId = sanitizeTokenInput(searchParams.get('organizationId'), 80)
+    const providerLabel = provider === 'instagram' ? 'Instagram' : provider === 'x' ? 'X' : 'YouTube'
     if (status === 'success') {
-      const prefix = organizationId ? 'YouTube account connected to organization.' : 'YouTube account connected.'
+      const prefix = organizationId
+        ? `${providerLabel} account connected to organization.`
+        : `${providerLabel} account connected.`
       setActionSuccess(message || prefix)
     } else {
-      setLoadError(message || 'YouTube connection failed.')
+      setLoadError(message || `${providerLabel} connection failed.`)
     }
     navigate('/organizations', { replace: true })
   }, [navigate, searchParams])
@@ -580,8 +578,6 @@ export const Organizations = ({ role }: OrganizationsProps) => {
     const viewerOrganizationRole = resolveViewerOrganizationRole(organization, viewerUserId)
     if (!viewerOrganizationRole) return
     setConnectionsOrg(organization)
-    // setConnectionPlatform('Instagram')
-    // setConnectionAccountName('')
     setConnectionsError(null)
     setConnectionsSuccess(null)
     setConnectionsSubmitting(false)
@@ -591,8 +587,6 @@ export const Organizations = ({ role }: OrganizationsProps) => {
   const closeConnectionsModal = () => {
     if (connectionsSubmitting || removeConnectionIdSubmitting) return
     setConnectionsOrg(null)
-    // setConnectionPlatform('Instagram')
-    // setConnectionAccountName('')
     setConnectionsError(null)
     setConnectionsSuccess(null)
     setConnectionsSubmitting(false)
@@ -604,6 +598,17 @@ export const Organizations = ({ role }: OrganizationsProps) => {
     window.location.assign(getYouTubeConnectUrl({ organizationId: connectionsOrg.id, path: '/organizations' }))
   }
 
+  const handleConnectInstagram = () => {
+    if (!connectionsOrg || !canManageConnectionsForConnectionsOrg) return
+    window.location.assign(getInstagramConnectUrl({ organizationId: connectionsOrg.id, path: '/organizations' }))
+  }
+
+  const handleConnectX = () => {
+    if (!connectionsOrg || !canManageConnectionsForConnectionsOrg) return
+    setConnectionsError(null)
+    setConnectionsSuccess(null)
+    window.location.assign(getXConnectUrl({ organizationId: connectionsOrg.id, path: '/organizations' }))
+  }
 
 
   const handleRemoveConnection = async (connectionId: string) => {
@@ -1463,47 +1468,38 @@ export const Organizations = ({ role }: OrganizationsProps) => {
                     </button>
                   </div>
                 </div>
-
-                {/* <div style={{ marginTop: '16px' }}>
-                  <div className="section-subtitle">Connect Instagram or X</div>
-                  <div className="grid" style={{ marginTop: '8px', gap: '8px' }}>
-                    <div className="split">
-                      <select
-                        className="select"
-                        value={connectionPlatform}
-                        onChange={(event) => setConnectionPlatform(event.target.value as OrganizationConnectionPlatform)}
-                        disabled={connectionsSubmitting || Boolean(removeConnectionIdSubmitting)}
-                        style={{ minWidth: '150px' }}
-                      >
-                        {connectionPlatformOptions.map((option) => (
-                          <option key={option} value={option}>
-                            {option}
-                          </option>
-                        ))}
-                      </select>
-                      <input
-                        className="input"
-                        type="text"
-                        value={connectionAccountName}
-                        onChange={(event) => setConnectionAccountName(sanitizeTextInput(event.target.value, { maxLength: 180, trim: false }))}
-                        placeholder={connectionPlatform === 'Instagram' ? '@handle or account name' : 'Account handle'}
-                        maxLength={180}
-                        autoComplete="off"
-                        disabled={connectionsSubmitting || Boolean(removeConnectionIdSubmitting)}
-                      />
-                    </div>
-                    <div className="filter-bar">
-                      <button
-                        type="button"
-                        className="ghost-button"
-                        onClick={() => void handleAddConnection()}
-                        disabled={connectionsSubmitting || Boolean(removeConnectionIdSubmitting)}
-                      >
-                        {connectionsSubmitting ? 'Connecting...' : `Connect ${connectionPlatform}`}
-                      </button>
-                    </div>
+                <div style={{ marginTop: '16px' }}>
+                  <div className="section-subtitle">Connect Instagram</div>
+                  <div className="section-subtitle" style={{ marginTop: '4px' }}>
+                    Connect through Instagram OAuth to link an account to this organization.
                   </div>
-                </div> */}
+                  <div className="filter-bar" style={{ marginTop: '8px' }}>
+                    <button
+                      type="button"
+                      className="primary-button"
+                      onClick={handleConnectInstagram}
+                      disabled={connectionsSubmitting || Boolean(removeConnectionIdSubmitting)}
+                    >
+                      Connect Instagram Account
+                    </button>
+                  </div>
+                </div>
+                <div style={{ marginTop: '16px' }}>
+                  <div className="section-subtitle">Connect X/Twitter</div>
+                  <div className="section-subtitle" style={{ marginTop: '4px' }}>
+                    Connect through X OAuth to link the signed-in X account to this organization.
+                  </div>
+                  <div className="filter-bar" style={{ marginTop: '8px' }}>
+                    <button
+                      type="button"
+                      className="primary-button"
+                      onClick={handleConnectX}
+                      disabled={connectionsSubmitting || Boolean(removeConnectionIdSubmitting)}
+                    >
+                      Connect X Account
+                    </button>
+                  </div>
+                </div>
 
               </>
             ) : null}

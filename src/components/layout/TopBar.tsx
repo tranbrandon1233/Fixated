@@ -39,6 +39,11 @@ export const TopBar = ({
     () => formatRelativeRefreshTime(lastDataRefreshAt, refreshClock),
     [lastDataRefreshAt, refreshClock],
   )
+  const baseRefreshLabel = useMemo(() => `Data refreshed ${refreshLabel}`, [refreshLabel])
+  const mergedRefreshLabel = useMemo(
+    () => (refreshMessage ? `${baseRefreshLabel} | ${refreshMessage}` : baseRefreshLabel),
+    [baseRefreshLabel, refreshMessage],
+  )
 
   const formatNextWindowLabel = (isoTimestamp: string | null) => {
     if (!isoTimestamp) return 'in 24 hours'
@@ -75,14 +80,20 @@ export const TopBar = ({
         onDataRefreshed(result.refreshedAt)
         const remainingLabel =
           result.refreshesRemaining !== null ? ` ${result.refreshesRemaining} remaining today.` : ''
-        setRefreshMessage(`Data refreshed successfully.${remainingLabel}`)
+        const warningLabel = result.warnings.length
+          ? ` Warnings: ${result.warnings.join(' ')}`
+          : ''
+        setRefreshMessage(`Refresh complete.${remainingLabel}${warningLabel}`)
       } catch (error) {
         if (error instanceof RefreshCounterLimitError) {
           const nextWindowLabel = formatNextWindowLabel(error.payload.nextWindowStartsAt)
           window.alert(`Daily refresh limit reached. You can refresh again ${nextWindowLabel}.`)
           setRefreshMessage(`Daily refresh limit reached. Next window: ${nextWindowLabel}.`)
         } else {
-          setRefreshMessage('Unable to refresh data.')
+          const message = error instanceof Error && error.message
+            ? error.message
+            : 'Unknown refresh error.'
+          setRefreshMessage(`Unable to refresh data: ${message}`)
         }
       } finally {
         setIsRefreshingData(false)
@@ -94,7 +105,7 @@ export const TopBar = ({
     <header className="topbar">
       <div className="topbar-title">{title}</div>
       <div className="filter-bar">
-        <span className="filter-chip static">Data refreshed {refreshLabel}</span>
+        <span className="filter-chip static">{mergedRefreshLabel}</span>
         {canRefreshData ? (
           <button
             className="ghost-button"
@@ -105,7 +116,6 @@ export const TopBar = ({
             {isRefreshingData ? 'Refreshing...' : 'Refresh data'}
           </button>
         ) : null}
-        {refreshMessage ? <span className="filter-chip static">{refreshMessage}</span> : null}
         <button className="ghost-button" onClick={onToggleTheme}>
           Theme: {themeMode === 'dark' ? 'Dark' : 'Light'}
         </button>
