@@ -13424,6 +13424,7 @@ const upsertXRow = async ({ userId, username, followerCount, posts }) => {
   if (!normalizedUserId || !normalizedUsername) {
     return { ok: false, status: 400, payload: null, row: null }
   }
+  const refreshedAt = new Date().toISOString()
   const normalizedPosts = buildXStoredPostsObject(posts, {
     userId: normalizedUserId,
     username: normalizedUsername,
@@ -13437,6 +13438,7 @@ const upsertXRow = async ({ userId, username, followerCount, posts }) => {
         username: normalizedUsername,
         follower_count: Math.max(0, toNumber(followerCount)),
         posts: normalizedPosts,
+        updated_at: refreshedAt,
       },
     ],
     prefer: 'resolution=merge-duplicates,return=representation',

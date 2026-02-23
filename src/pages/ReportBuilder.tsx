@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { jsPDF } from 'jspdf'
+import embeddedLogoDataUrl from '../assets/logo.png?inline'
 import { SectionHeader } from '../components/ui/SectionHeader'
 import { useYouTubeSummary } from '../hooks/useYouTubeSummary'
 import type { Role } from '../types/dashboard'
@@ -952,7 +953,16 @@ export const ReportBuilder = ({ role }: ReportBuilderProps) => {
       reader.readAsDataURL(blob)
     })
 
+  const isSupportedPdfImageDataUrl = (value: string) =>
+    /^data:image\/(?:png|jpeg|jpg);base64,/i.test(value)
+
+  const resolvePdfImageFormat = (dataUrl: string): 'PNG' | 'JPEG' =>
+    /^data:image\/(?:jpeg|jpg);base64,/i.test(dataUrl) ? 'JPEG' : 'PNG'
+
   const loadLogoDataUrl = async () => {
+    if (isSupportedPdfImageDataUrl(embeddedLogoDataUrl)) {
+      return embeddedLogoDataUrl
+    }
     try {
       const baseUrl =
         typeof import.meta !== 'undefined' && import.meta.env?.BASE_URL
@@ -961,8 +971,18 @@ export const ReportBuilder = ({ role }: ReportBuilderProps) => {
       const resolvedBase = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`
       const response = await fetch(`${resolvedBase}logo.png`, { cache: 'no-store' })
       if (!response.ok) return ''
+      const contentType = (response.headers.get('content-type') || '').toLowerCase()
+      if (
+        !contentType.includes('image/png')
+        && !contentType.includes('image/jpeg')
+        && !contentType.includes('image/jpg')
+      ) {
+        return ''
+      }
       const blob = await response.blob()
-      return await readBlobAsDataUrl(blob)
+      if (!blob.size) return ''
+      const dataUrl = await readBlobAsDataUrl(blob)
+      return isSupportedPdfImageDataUrl(dataUrl) ? dataUrl : ''
     } catch {
       return ''
     }
@@ -1078,6 +1098,7 @@ export const ReportBuilder = ({ role }: ReportBuilderProps) => {
     const margin = 48
     const availableWidth = pageWidth - margin * 2
     const logoDataUrl = await loadLogoDataUrl()
+    const logoImageFormat = resolvePdfImageFormat(logoDataUrl)
     const generatedAt = new Intl.DateTimeFormat('en-US', {
       month: 'short',
       day: 'numeric',
@@ -1224,7 +1245,7 @@ export const ReportBuilder = ({ role }: ReportBuilderProps) => {
     doc.text(`Channels: ${selectedChannelsLabel}`, margin + 20, 295)
     doc.text(`Platforms: ${platforms.join(', ')}`, margin + 20, 320)
     if (logoDataUrl) {
-      doc.addImage(logoDataUrl, 'PNG', margin + 20, 334, 120, 42)
+      doc.addImage(logoDataUrl, logoImageFormat, margin + 20, 334, 120, 42)
     }
     addFooter(1)
 
@@ -1516,6 +1537,7 @@ export const ReportBuilder = ({ role }: ReportBuilderProps) => {
     const contentWidth = pageWidth - margin * 2
     const contentHeight = pageHeight - 96
     const logoDataUrl = await loadLogoDataUrl()
+    const logoImageFormat = resolvePdfImageFormat(logoDataUrl)
     const generatedAt = new Intl.DateTimeFormat('en-US', {
       month: 'short',
       day: 'numeric',
@@ -1642,7 +1664,7 @@ export const ReportBuilder = ({ role }: ReportBuilderProps) => {
     doc.setTextColor(...brandPalette.primary)
     doc.text('Layout: Deck-style PDF', margin + 28, 292)
     if (logoDataUrl) {
-      doc.addImage(logoDataUrl, 'PNG', pageWidth - margin - 180, 120, 150, 54)
+      doc.addImage(logoDataUrl, logoImageFormat, pageWidth - margin - 180, 120, 150, 54)
     }
 
     // Slide 2 - Executive summary
