@@ -368,6 +368,7 @@ const buildSupabaseConfigDiagnostic = () => ({
   hasUrl: hasSupabaseUrl,
   hasPublishableKey: hasSupabasePublishableKey,
   hasSecretKey: hasSupabaseSecretKey,
+  publishableKeyFormat: isJwtTokenLike(supabasePublishableKey) ? 'jwt' : 'opaque',
   secretKeyFormat: isJwtTokenLike(supabaseSecretKey) ? 'jwt' : 'opaque',
   hasServiceAuthorizationKey: Boolean(supabaseServiceAuthorizationKey),
   urlHost: (() => {
@@ -379,6 +380,103 @@ const buildSupabaseConfigDiagnostic = () => ({
   })(),
   missingKeys: getMissingSupabaseConfigKeys(),
 })
+const parseSupabaseProbeError = (payload) => ({
+  code: normalizeTextInput(payload?.code, { maxLength: 120 }),
+  message:
+    normalizeTextInput(payload?.message, { maxLength: 240 })
+    || normalizeTextInput(payload?.error_description, { maxLength: 240 })
+    || normalizeTextInput(payload?.error, { maxLength: 240 }),
+})
+const isTruthyProbeValue = (value) => {
+  const normalized = normalizeTextInput(value, { maxLength: 12 }).toLowerCase()
+  return normalized === '1' || normalized === 'true' || normalized === 'yes'
+}
+const probeSupabaseConnectivity = async () => {
+  if (!isSupabaseConfigured) {
+    return { ok: false, error: 'supabase_not_configured' }
+  }
+  const probes = {
+    authSettings: { ok: false, status: 0, code: '', message: '' },
+    authTokenExchange: { ok: false, status: 0, code: '', message: '' },
+    restOpenApi: { ok: false, status: 0, code: '', message: '' },
+  }
+  try {
+    const response = await fetch(`${supabaseUrl}/auth/v1/settings`, {
+      headers: { apikey: supabasePublishableKey },
+    })
+    const payload = await response.json().catch(() => null)
+    const err = parseSupabaseProbeError(payload)
+    probes.authSettings = {
+      ok: response.ok,
+      status: response.status,
+      code: err.code,
+      message: err.message,
+    }
+  } catch (error) {
+    probes.authSettings = {
+      ok: false,
+      status: 0,
+      code: 'fetch_failed',
+      message: error instanceof Error ? normalizeTextInput(error.message, { maxLength: 240 }) : 'request_failed',
+    }
+  }
+  try {
+    const response = await fetch(`${supabaseUrl}/auth/v1/token?grant_type=id_token`, {
+      method: 'POST',
+      headers: {
+        apikey: supabasePublishableKey,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        provider: 'google',
+        id_token: 'health-probe-invalid-token',
+      }),
+    })
+    const payload = await response.json().catch(() => null)
+    const err = parseSupabaseProbeError(payload)
+    probes.authTokenExchange = {
+      ok: response.ok || response.status === 400,
+      status: response.status,
+      code: err.code,
+      message: err.message,
+    }
+  } catch (error) {
+    probes.authTokenExchange = {
+      ok: false,
+      status: 0,
+      code: 'fetch_failed',
+      message: error instanceof Error ? normalizeTextInput(error.message, { maxLength: 240 }) : 'request_failed',
+    }
+  }
+  try {
+    const response = await fetch(`${supabaseUrl}/rest/v1/`, {
+      headers: {
+        apikey: supabaseSecretKey,
+        Accept: 'application/openapi+json',
+        ...buildSupabaseServiceAuthorizationHeader(),
+      },
+    })
+    const payload = await response.json().catch(() => null)
+    const err = parseSupabaseProbeError(payload)
+    probes.restOpenApi = {
+      ok: response.ok,
+      status: response.status,
+      code: err.code,
+      message: err.message,
+    }
+  } catch (error) {
+    probes.restOpenApi = {
+      ok: false,
+      status: 0,
+      code: 'fetch_failed',
+      message: error instanceof Error ? normalizeTextInput(error.message, { maxLength: 240 }) : 'request_failed',
+    }
+  }
+  return {
+    ok: probes.authSettings.ok && probes.authTokenExchange.ok && probes.restOpenApi.ok,
+    probes,
+  }
+}
 const INTERNAL_REFRESH_RUNNER_HEADER = 'x-fixated-refresh-runner-token'
 const INTERNAL_REFRESH_RUNNER_FUNCTION_PATH = getEnv(
   'INTERNAL_REFRESH_RUNNER_FUNCTION_PATH',
@@ -1663,7 +1761,6 @@ const exchangeGoogleIdTokenForSupabaseSession = async ({
       method: 'POST',
       headers: {
         apikey: supabasePublishableKey,
-        Authorization: `Bearer ${supabasePublishableKey}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
@@ -2158,14 +2255,19 @@ app.use('/api', (req, res, next) => {
   })
 })
 
-app.get('/health', (_req, res) => {
+app.get('/health', async (req, res) => {
   trimInstagramOpsState()
   const instagramFailureRatePct = Number(getInstagramFailureRatePct().toFixed(2))
   const highestFailureStreak = [...instagramOpsState.failureStreakByUser.values()]
     .reduce((max, streak) => Math.max(max, Math.max(0, toNumber(streak?.count))), 0)
+  const probeSupabase = isTruthyProbeValue(req.query?.probe_supabase ?? req.query?.probe ?? '')
+  const supabaseProbe = probeSupabase ? await probeSupabaseConnectivity() : null
   res.json({
     ok: true,
-    supabase: buildSupabaseConfigDiagnostic(),
+    supabase: {
+      ...buildSupabaseConfigDiagnostic(),
+      ...(supabaseProbe ? { probe: supabaseProbe } : {}),
+    },
     instagram: {
       collectorMode: instagramCollectorMode,
       selectorVersion: INSTAGRAM_SELECTOR_VERSION,

@@ -23,6 +23,10 @@ export const resolveAuthBaseUrl = () => {
       // Prevent localhost/127.0.0.1 host mismatches that break cookie-based auth in dev.
       return fallback
     }
+    if (import.meta.env.DEV && parsed.protocol !== window.location.protocol) {
+      // Prevent http/https mismatches in dev that surface as browser "Failed to fetch" errors.
+      return fallback
+    }
     return normalizeBaseUrl(parsed.toString())
   } catch {
     return fallback
