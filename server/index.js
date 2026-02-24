@@ -2261,24 +2261,8 @@ app.use('/api', (req, res, next) => {
 
 app.get('/health', async (req, res) => {
   trimInstagramOpsState()
-  const instagramFailureRatePct = Number(getInstagramFailureRatePct().toFixed(2))
-  const highestFailureStreak = [...instagramOpsState.failureStreakByUser.values()]
-    .reduce((max, streak) => Math.max(max, Math.max(0, toNumber(streak?.count))), 0)
-  const probeSupabase = isTruthyProbeValue(req.query?.probe_supabase ?? req.query?.probe ?? '')
-  const supabaseProbe = probeSupabase ? await probeSupabaseConnectivity() : null
   res.json({
     ok: true,
-    supabase: {
-      ...buildSupabaseConfigDiagnostic(),
-      ...(supabaseProbe ? { probe: supabaseProbe } : {}),
-    },
-    instagram: {
-      collectorMode: instagramCollectorMode,
-      selectorVersion: INSTAGRAM_SELECTOR_VERSION,
-      failureRatePct: instagramFailureRatePct,
-      highestFailureStreak,
-      runningUsers: instagramRefreshRunningUsers.size,
-    },
   })
 })
 
