@@ -4,6 +4,7 @@ import { AppLayout } from './components/layout/AppLayout'
 import { Campaigns } from './pages/Campaigns'
 import { Channel } from './pages/Channel'
 import { ExportPreview } from './pages/ExportPreview'
+import { Home } from './pages/Home'
 import { Login } from './pages/Login'
 import { Portfolio } from './pages/Portfolio'
 import { Organizations } from './pages/Organizations'
@@ -187,6 +188,10 @@ const App = () => {
   return (
     <Routes>
       <Route
+        path="/"
+        element={isAuthed ? <Navigate to={defaultAuthedPath} replace /> : <Home />}
+      />
+      <Route
         path="/login"
         element={
           isAuthed ? <Navigate to={defaultAuthedPath} replace /> : <Login onLogin={handleLogin} />
@@ -212,7 +217,6 @@ const App = () => {
           )
         }
       >
-        <Route index element={<Navigate to="/portfolio" replace />} />
         <Route path="/portfolio" element={<Portfolio />} />
         <Route path="/channels" element={<Channel />} />
         <Route path="/campaigns" element={<Campaigns role={role} />} />
@@ -241,7 +245,7 @@ const App = () => {
         path="/exports/preview"
         element={isAuthed ? <ExportPreview /> : <Navigate to="/login" replace />}
       />
-      <Route path="*" element={<Navigate to={isAuthed ? defaultAuthedPath : '/login'} replace />} />
+      <Route path="*" element={<Navigate to={isAuthed ? defaultAuthedPath : '/'} replace />} />
     </Routes>
   )
 }

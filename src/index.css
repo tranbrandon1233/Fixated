@@ -540,6 +540,68 @@ a:focus-visible {
   background: linear-gradient(180deg, rgba(15, 95, 68, 0.08), rgba(15, 95, 68, 0));
 }
 
+.home-shell {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px;
+}
+
+.home-card {
+  width: min(720px, 100%);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 36px;
+  box-shadow: var(--shadow);
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  text-align: left;
+}
+
+.home-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: fit-content;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: var(--surface-alt);
+  color: var(--primary);
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.home-card h1 {
+  margin: 0;
+  font-size: 32px;
+  line-height: 1.2;
+}
+
+.home-card p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 16px;
+  max-width: 58ch;
+}
+
+.home-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 8px;
+}
+
+.home-actions .primary-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
 .login-shell {
   min-height: 100vh;
   display: flex;
@@ -671,6 +733,14 @@ html[data-theme="dark"] .google-button {
 }
 
 @media (max-width: 800px) {
+  .home-card {
+    padding: 28px;
+  }
+
+  .home-card h1 {
+    font-size: 26px;
+  }
+
   .grid-4 {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }

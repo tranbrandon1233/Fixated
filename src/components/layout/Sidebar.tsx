@@ -27,7 +27,7 @@ export const Sidebar = ({ role }: SidebarProps) => {
   return (
     <aside className="sidebar">
       <div className="brand">
-        <div className="brand-title">ONO / LNO</div>
+        <div className="brand-title">Fixated Dashboard</div>
         <div className="brand-sub">Performance Dashboard</div>
       </div>
       <nav className="nav-group">

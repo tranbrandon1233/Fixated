@@ -32,7 +32,7 @@ export const Login = ({ onLogin }: LoginProps) => {
     <div className="login-shell">
       <div className="login-card">
         <div className="login-brand">
-          <span className="login-badge">Fixated</span>
+          <span className="login-badge">Fixated Dashboard</span>
           <h1>Sign in to your workspace</h1>
           <p>Use your Google account to continue to the portfolio dashboard.</p>
         </div>
@@ -45,7 +45,7 @@ export const Login = ({ onLogin }: LoginProps) => {
           <a href="https://fixated.com/policy/privacy" target="_blank" rel="noreferrer">
             Privacy Policy
           </a>
-          <span aria-hidden="true"> · </span>
+          <span aria-hidden="true"> | </span>
           <a href="https://fixated.com/policy/terms" target="_blank" rel="noreferrer">
             Terms of Service
           </a>
@@ -54,3 +54,4 @@ export const Login = ({ onLogin }: LoginProps) => {
     </div>
   )
 }
+
