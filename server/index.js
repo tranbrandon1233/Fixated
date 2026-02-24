@@ -1204,6 +1204,25 @@ const readHeaderValue = (headers, headerName) => {
   return ''
 }
 
+const resolveRequestBaseUrl = (req) => {
+  const headers = req?.headers ?? {}
+  const forwardedProtoRaw = normalizeTextInput(readHeaderValue(headers, 'x-forwarded-proto'), { maxLength: 80 })
+  const forwardedProto = forwardedProtoRaw
+    .split(',')[0]
+    .trim()
+    .toLowerCase()
+  const protocol =
+    forwardedProto === 'https' || forwardedProto === 'http'
+      ? forwardedProto
+      : normalizeTextInput(req?.protocol, { maxLength: 10 }).toLowerCase()
+  if (protocol !== 'https' && protocol !== 'http') return ''
+  const forwardedHost = normalizeTextInput(readHeaderValue(headers, 'x-forwarded-host'), { maxLength: 255 })
+  const hostHeader = normalizeTextInput(readHeaderValue(headers, 'host'), { maxLength: 255 })
+  const host = (forwardedHost || hostHeader).split(',')[0].trim()
+  if (!host) return ''
+  return resolveOriginBase(`${protocol}://${host}`)
+}
+
 const parseBearerToken = (authorizationHeaderValue = '') => {
   const normalized = normalizeEnvValue(authorizationHeaderValue)
   if (!normalized) return ''
@@ -1236,20 +1255,28 @@ const isValidInternalRefreshRunnerToken = (headers = {}, fallbackToken = '') => 
   return false
 }
 
-const resolveInternalRefreshRunnerBaseUrl = () => {
+const resolveInternalRefreshRunnerBaseUrls = (preferredBaseUrl = '') => {
+  const normalizedPreferredBaseUrl = normalizeBaseUrl(preferredBaseUrl)
   const explicitBaseUrl = normalizeBaseUrl(getEnv('INTERNAL_REFRESH_RUNNER_BASE_URL'))
   const vercelUrl = normalizeEnvValue(process.env.VERCEL_URL)
   const vercelBaseUrl = vercelUrl
     ? normalizeBaseUrl(/^https?:\/\//i.test(vercelUrl) ? vercelUrl : `https://${vercelUrl}`)
     : ''
-  const defaultBaseUrl = normalizeBaseUrl(getEnv('URL', vercelBaseUrl || serverBaseUrl))
-  const baseUrl = explicitBaseUrl || defaultBaseUrl
-  return baseUrl || ''
+  const urlEnvBaseUrl = normalizeBaseUrl(getEnv('URL'))
+  const candidates = [
+    normalizedPreferredBaseUrl,
+    explicitBaseUrl,
+    normalizeBaseUrl(serverBaseUrl),
+    normalizeBaseUrl(appBaseUrl),
+    urlEnvBaseUrl,
+    vercelBaseUrl,
+  ].filter((value) => Boolean(value))
+  return [...new Set(candidates)]
 }
 
-const resolveInternalRefreshRunnerUrls = () => {
-  const baseUrl = resolveInternalRefreshRunnerBaseUrl()
-  if (!baseUrl) return []
+const resolveInternalRefreshRunnerUrls = (preferredBaseUrl = '') => {
+  const baseUrls = resolveInternalRefreshRunnerBaseUrls(preferredBaseUrl)
+  if (!baseUrls.length) return []
   const paths = [INTERNAL_REFRESH_RUNNER_FUNCTION_PATH]
   const normalizedPrimaryPath = normalizeTextInput(INTERNAL_REFRESH_RUNNER_FUNCTION_PATH, { maxLength: 200 })
   if (normalizedPrimaryPath === '/api/refresh-job-runner-background') {
@@ -1257,16 +1284,23 @@ const resolveInternalRefreshRunnerUrls = () => {
   } else if (normalizedPrimaryPath === INTERNAL_REFRESH_RUNNER_FALLBACK_PATH) {
     paths.push('/api/refresh-job-runner-background')
   }
-  return [...new Set(paths)].map((pathValue) => `${baseUrl}${pathValue}`)
+  const normalizedPaths = [...new Set(paths)]
+  const urls = []
+  for (const baseUrl of baseUrls) {
+    for (const pathValue of normalizedPaths) {
+      urls.push(`${baseUrl}${pathValue}`)
+    }
+  }
+  return [...new Set(urls)]
 }
 
-const dispatchInternalRefreshRunner = async ({ platform, userId, jobId }) => {
+const dispatchInternalRefreshRunner = async ({ platform, userId, jobId, preferredBaseUrl = '' }) => {
   if (!isServerlessRuntime) return { ok: false, error: 'not_serverless_runtime' }
   if (!isUuid(userId) || !isUuid(jobId)) return { ok: false, error: 'invalid_dispatch_payload' }
   if (platform !== 'youtube' && platform !== 'instagram') return { ok: false, error: 'invalid_platform' }
   if (!internalRefreshRunnerToken) return { ok: false, error: 'missing_internal_refresh_runner_token' }
 
-  const runnerUrls = resolveInternalRefreshRunnerUrls()
+  const runnerUrls = resolveInternalRefreshRunnerUrls(preferredBaseUrl)
   if (!runnerUrls.length) return { ok: false, error: 'missing_internal_refresh_runner_url' }
 
   const abortController = new AbortController()
@@ -15148,6 +15182,9 @@ const createAndStartInstagramRefreshJob = async (
   const trigger = typeof options.trigger === 'string' ? options.trigger : 'manual'
   const reuseRunning = options.reuseRunning !== false
   const minIntervalMs = Number.isFinite(options.minIntervalMs) ? Number(options.minIntervalMs) : 0
+  const requestBaseUrl = normalizeBaseUrl(
+    normalizeTextInput(options.requestBaseUrl, { maxLength: 500 }),
+  )
 
   const latestResult = await getLatestInstagramRefreshJobByUserId(userId)
   if (latestResult.ok && latestResult.row) {
@@ -15211,6 +15248,7 @@ const createAndStartInstagramRefreshJob = async (
       platform: 'instagram',
       userId,
       jobId,
+      preferredBaseUrl: requestBaseUrl,
     })
     if (!dispatchResult.ok) {
       const dispatchError =
@@ -15515,6 +15553,9 @@ const createAndStartYouTubeRefreshJob = async (
   const trigger = typeof options.trigger === 'string' ? options.trigger : 'manual'
   const reuseRunning = options.reuseRunning !== false
   const minIntervalMs = Number.isFinite(options.minIntervalMs) ? Number(options.minIntervalMs) : 0
+  const requestBaseUrl = normalizeBaseUrl(
+    normalizeTextInput(options.requestBaseUrl, { maxLength: 500 }),
+  )
 
   const latestResult = await getLatestYouTubeRefreshJobByUserId(userId)
   if (latestResult.ok && latestResult.row) {
@@ -15578,6 +15619,7 @@ const createAndStartYouTubeRefreshJob = async (
       platform: 'youtube',
       userId,
       jobId,
+      preferredBaseUrl: requestBaseUrl,
     })
     if (!dispatchResult.ok) {
       const dispatchError =
@@ -16038,10 +16080,12 @@ app.post('/api/instagram/refresh', async (req, res) => {
   }
 
   const userId = viewerResult.viewer.userId
+  const requestBaseUrl = resolveRequestBaseUrl(req)
   const queued = await createAndStartInstagramRefreshJob(userId, {
     trigger: 'manual',
     reuseRunning: true,
     minIntervalMs: 0,
+    requestBaseUrl,
   })
   if (!queued.ok) {
     res.status(queued.status || 500).json({
@@ -16785,10 +16829,12 @@ app.post('/api/youtube/refresh', async (req, res) => {
   }
 
   const userId = viewerResult.viewer.userId
+  const requestBaseUrl = resolveRequestBaseUrl(req)
   const queued = await createAndStartYouTubeRefreshJob(userId, {
     trigger: 'manual',
     reuseRunning: true,
     minIntervalMs: 0,
+    requestBaseUrl,
   })
   if (!queued.ok) {
     res.status(queued.status || 500).json({
