@@ -10130,6 +10130,14 @@ app.get('/oauth/youtube/callback', async (req, res) => {
       trigger: 'connect',
       reuseRunning: true,
       minIntervalMs: 0,
+    }).then((queuedResult) => {
+      if (!queuedResult?.ok) {
+        console.error('Unable to queue YouTube refresh after connect:', {
+          error: queuedResult?.error || 'youtube_refresh_enqueue_failed',
+          status: queuedResult?.status || 500,
+          payload: queuedResult?.payload ?? null,
+        })
+      }
     }).catch((err) => {
       console.error('Unable to queue YouTube refresh after connect:', err)
     })
@@ -15490,11 +15498,17 @@ const createAndStartYouTubeRefreshJob = async (
         normalizeTextInput(dispatchResult.error, { maxLength: 240 })
         || 'youtube_refresh_runner_dispatch_failed'
       await updateYouTubeRefreshJob(userId, jobId, {
-        status: 'queued',
-        error_message: null,
-        meta: { trigger, dispatchError, dispatchFallback: 'in_process' },
+        status: 'failed',
+        finished_at: new Date().toISOString(),
+        error_message: 'Unable to dispatch YouTube refresh worker.',
+        meta: { trigger, dispatchError },
       })
-      void runYouTubeRefreshJob(jobId, userId)
+      return {
+        ok: false,
+        status: 503,
+        error: 'youtube_refresh_runner_dispatch_failed',
+        payload: { dispatchError },
+      }
     }
   } else {
     void runYouTubeRefreshJob(jobId, userId)

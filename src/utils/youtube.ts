@@ -348,6 +348,33 @@ export const disconnectYouTubeChannels = async (channelNames?: string[]) => {
   })
 }
 
+const extractApiErrorMessage = (payload: unknown, fallback: string) => {
+  if (!payload || typeof payload !== 'object') return fallback
+  const data = payload as {
+    message?: unknown
+    error?: unknown
+    details?: unknown
+    payload?: unknown
+  }
+  if (typeof data.message === 'string' && data.message.trim()) return data.message.trim()
+  if (typeof data.error === 'string' && data.error.trim()) return data.error.trim()
+  if (typeof data.details === 'string' && data.details.trim()) return data.details.trim()
+  if (data.details && typeof data.details === 'object') {
+    const detailObj = data.details as { message?: unknown; error?: unknown }
+    if (typeof detailObj.message === 'string' && detailObj.message.trim()) return detailObj.message.trim()
+    if (typeof detailObj.error === 'string' && detailObj.error.trim()) return detailObj.error.trim()
+  }
+  if (data.payload && typeof data.payload === 'object') {
+    const payloadObj = data.payload as { message?: unknown; error?: unknown; dispatchError?: unknown }
+    if (typeof payloadObj.message === 'string' && payloadObj.message.trim()) return payloadObj.message.trim()
+    if (typeof payloadObj.error === 'string' && payloadObj.error.trim()) return payloadObj.error.trim()
+    if (typeof payloadObj.dispatchError === 'string' && payloadObj.dispatchError.trim()) {
+      return `YouTube refresh worker dispatch failed: ${payloadObj.dispatchError.trim()}`
+    }
+  }
+  return fallback
+}
+
 export const startYouTubeRefresh = async (): Promise<YouTubeRefreshStartResponse> => {
   const response = await fetch(`${apiBaseUrl}/api/youtube/refresh`, {
     method: 'POST',
@@ -356,11 +383,16 @@ export const startYouTubeRefresh = async (): Promise<YouTubeRefreshStartResponse
   })
   const payload = await response.json().catch(() => null)
   if (!response.ok || !payload || typeof payload !== 'object') {
-    throw new Error('Unable to start YouTube refresh.')
+    throw new Error(
+      extractApiErrorMessage(
+        payload,
+        `Unable to start YouTube refresh (HTTP ${response.status || 0}).`,
+      ),
+    )
   }
   const data = payload as Partial<YouTubeRefreshStartResponse>
   if (!data.jobId || typeof data.jobId !== 'string') {
-    throw new Error('Unable to start YouTube refresh.')
+    throw new Error('Unable to start YouTube refresh (missing job id).')
   }
   return {
     ok: true,
@@ -378,7 +410,12 @@ export const getYouTubeRefreshStatus = async (jobId: string): Promise<YouTubeRef
   })
   const payload = await response.json().catch(() => null)
   if (!response.ok || !payload || typeof payload !== 'object') {
-    throw new Error('Unable to load YouTube refresh status.')
+    throw new Error(
+      extractApiErrorMessage(
+        payload,
+        `Unable to load YouTube refresh status (HTTP ${response.status || 0}).`,
+      ),
+    )
   }
   const data = payload as Partial<YouTubeRefreshStatusResponse>
   return {
@@ -405,10 +442,13 @@ export const waitForYouTubeRefresh = async (
   },
 ): Promise<YouTubeRefreshStatusResponse> => {
   const timeoutMs = Number.isFinite(options?.timeoutMs) ? Number(options?.timeoutMs) : 5 * 60 * 1000
-  const intervalMs = Number.isFinite(options?.intervalMs) ? Number(options?.intervalMs) : 2_000
+  const baseIntervalMs = Number.isFinite(options?.intervalMs) ? Number(options?.intervalMs) : 5_000
   const startedAt = Date.now()
+  let queuedSinceMs = 0
+  let attempt = 0
 
   while (Date.now() - startedAt <= timeoutMs) {
+    attempt += 1
     const status = await getYouTubeRefreshStatus(jobId)
     if (typeof options?.onProgress === 'function') {
       options.onProgress(status)
@@ -416,7 +456,26 @@ export const waitForYouTubeRefresh = async (
     if (status.status === 'succeeded' || status.status === 'failed') {
       return status
     }
-    await new Promise((resolve) => window.setTimeout(resolve, intervalMs))
+
+    const dispatchError =
+      status.meta && typeof status.meta === 'object' && typeof status.meta.dispatchError === 'string'
+        ? status.meta.dispatchError.trim()
+        : ''
+    if (dispatchError) {
+      throw new Error(`YouTube refresh worker dispatch failed: ${dispatchError}`)
+    }
+
+    if (status.status === 'queued') {
+      if (!queuedSinceMs) queuedSinceMs = Date.now()
+      if (Date.now() - queuedSinceMs >= 45_000) {
+        throw new Error('YouTube refresh is still queued after 45 seconds. Please retry.')
+      }
+    } else {
+      queuedSinceMs = 0
+    }
+
+    const nextIntervalMs = Math.min(15_000, baseIntervalMs + Math.floor(attempt / 2) * 2_000)
+    await new Promise((resolve) => window.setTimeout(resolve, nextIntervalMs))
   }
 
   throw new Error('Timed out waiting for YouTube refresh to complete.')
