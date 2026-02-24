@@ -338,6 +338,20 @@ const supabaseSecretKey = getEnv(
   'SUPABASE_SECRET_KEY',
   getEnv('SUPABASE_SERVICE_ROLE_KEY', getEnv('SUPABASE_SERVICE_ROLE')),
 )
+const supabaseServiceRoleKey = getEnv('SUPABASE_SERVICE_ROLE_KEY', getEnv('SUPABASE_SERVICE_ROLE'))
+const isJwtTokenLike = (value) => {
+  const normalized = normalizeEnvValue(value)
+  if (!normalized) return false
+  return /^[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+$/.test(normalized)
+}
+const resolveSupabaseServiceAuthorizationKey = () => {
+  if (isJwtTokenLike(supabaseSecretKey)) return supabaseSecretKey
+  if (isJwtTokenLike(supabaseServiceRoleKey)) return supabaseServiceRoleKey
+  return ''
+}
+const supabaseServiceAuthorizationKey = resolveSupabaseServiceAuthorizationKey()
+const buildSupabaseServiceAuthorizationHeader = () =>
+  supabaseServiceAuthorizationKey ? { Authorization: `Bearer ${supabaseServiceAuthorizationKey}` } : {}
 const hasSupabaseUrl = Boolean(supabaseUrl)
 const hasSupabasePublishableKey = Boolean(supabasePublishableKey)
 const hasSupabaseSecretKey = Boolean(supabaseSecretKey)
@@ -354,6 +368,8 @@ const buildSupabaseConfigDiagnostic = () => ({
   hasUrl: hasSupabaseUrl,
   hasPublishableKey: hasSupabasePublishableKey,
   hasSecretKey: hasSupabaseSecretKey,
+  secretKeyFormat: isJwtTokenLike(supabaseSecretKey) ? 'jwt' : 'opaque',
+  hasServiceAuthorizationKey: Boolean(supabaseServiceAuthorizationKey),
   urlHost: (() => {
     try {
       return supabaseUrl ? new URL(supabaseUrl).host : ''
@@ -1330,7 +1346,7 @@ const requestSupabaseTable = async (tableName, { method = 'GET', query = '', bod
   const url = buildSupabaseTableUrl(tableName, query)
   const headers = {
     apikey: supabaseSecretKey,
-    Authorization: `Bearer ${supabaseSecretKey}`,
+    ...buildSupabaseServiceAuthorizationHeader(),
   }
   if (body !== undefined) {
     headers['Content-Type'] = 'application/json'
@@ -1796,7 +1812,7 @@ const tryInsertUsersRow = async (userId, email) => {
       method: 'POST',
       headers: {
         apikey: supabaseSecretKey,
-        Authorization: `Bearer ${supabaseSecretKey}`,
+        ...buildSupabaseServiceAuthorizationHeader(),
         'Content-Type': 'application/json',
         Prefer: 'resolution=merge-duplicates,return=minimal',
       },
@@ -1864,7 +1880,7 @@ const updateUsersRowById = async (userId, payload) => {
       method: 'PATCH',
       headers: {
         apikey: supabaseSecretKey,
-        Authorization: `Bearer ${supabaseSecretKey}`,
+        ...buildSupabaseServiceAuthorizationHeader(),
         'Content-Type': 'application/json',
         Prefer: 'return=representation',
       },
@@ -2847,7 +2863,7 @@ const buildSupabaseStorageObjectUrl = (bucketName, objectPath) => {
 
 const createSupabaseServiceHeaders = (extraHeaders = {}) => ({
   apikey: supabaseSecretKey,
-  Authorization: `Bearer ${supabaseSecretKey}`,
+  ...buildSupabaseServiceAuthorizationHeader(),
   ...extraHeaders,
 })
 
@@ -3634,7 +3650,7 @@ const fetchUsersRowById = async (userId) => {
     const response = await fetch(endpoint, {
       headers: {
         apikey: supabaseSecretKey,
-        Authorization: `Bearer ${supabaseSecretKey}`,
+        ...buildSupabaseServiceAuthorizationHeader(),
       },
     })
     const payload = await response.json().catch(() => null)
@@ -3666,7 +3682,7 @@ const fetchUsersRowByEmail = async (email) => {
     const response = await fetch(endpoint, {
       headers: {
         apikey: supabaseSecretKey,
-        Authorization: `Bearer ${supabaseSecretKey}`,
+        ...buildSupabaseServiceAuthorizationHeader(),
       },
     })
     const payload = await response.json().catch(() => null)
@@ -3705,7 +3721,7 @@ const fetchUsersRowsByIds = async (userIds) => {
     const response = await fetch(endpoint, {
       headers: {
         apikey: supabaseSecretKey,
-        Authorization: `Bearer ${supabaseSecretKey}`,
+        ...buildSupabaseServiceAuthorizationHeader(),
       },
     })
     const payload = await response.json().catch(() => null)
@@ -4004,7 +4020,7 @@ const listCampaignRows = async () => {
     const response = await fetch(endpoint, {
       headers: {
         apikey: supabaseSecretKey,
-        Authorization: `Bearer ${supabaseSecretKey}`,
+        ...buildSupabaseServiceAuthorizationHeader(),
       },
     })
     const payload = await response.json().catch(() => null)
@@ -4070,7 +4086,7 @@ const listCampaignNameRowsByIds = async (campaignIds) => {
       const response = await fetch(endpoint, {
         headers: {
           apikey: supabaseSecretKey,
-          Authorization: `Bearer ${supabaseSecretKey}`,
+          ...buildSupabaseServiceAuthorizationHeader(),
         },
       })
       const payload = await response.json().catch(() => null)
@@ -4129,7 +4145,7 @@ const insertCampaignRow = async (row) => {
       method: 'POST',
       headers: {
         apikey: supabaseSecretKey,
-        Authorization: `Bearer ${supabaseSecretKey}`,
+        ...buildSupabaseServiceAuthorizationHeader(),
         'Content-Type': 'application/json',
         Prefer: 'return=representation',
       },
@@ -4166,7 +4182,7 @@ const fetchCampaignRowById = async (campaignId) => {
     const response = await fetch(endpoint, {
       headers: {
         apikey: supabaseSecretKey,
-        Authorization: `Bearer ${supabaseSecretKey}`,
+        ...buildSupabaseServiceAuthorizationHeader(),
       },
     })
     const payload = await response.json().catch(() => null)
@@ -4196,7 +4212,7 @@ const updateCampaignAllowedMembers = async (campaignId, allowedMemberRoles, crea
       method: 'PATCH',
       headers: {
         apikey: supabaseSecretKey,
-        Authorization: `Bearer ${supabaseSecretKey}`,
+        ...buildSupabaseServiceAuthorizationHeader(),
         'Content-Type': 'application/json',
         Prefer: 'return=representation',
       },
@@ -4230,7 +4246,7 @@ const updateCampaignPostsAndMetrics = async (campaignId, input) => {
       method: 'PATCH',
       headers: {
         apikey: supabaseSecretKey,
-        Authorization: `Bearer ${supabaseSecretKey}`,
+        ...buildSupabaseServiceAuthorizationHeader(),
         'Content-Type': 'application/json',
         Prefer: 'return=representation',
       },
@@ -4267,7 +4283,7 @@ const updateCampaignDetails = async (campaignId, input) => {
       method: 'PATCH',
       headers: {
         apikey: supabaseSecretKey,
-        Authorization: `Bearer ${supabaseSecretKey}`,
+        ...buildSupabaseServiceAuthorizationHeader(),
         'Content-Type': 'application/json',
         Prefer: 'return=representation',
       },
@@ -4307,7 +4323,7 @@ const updateCampaignAllowedOrgs = async (campaignId, allowedOrgs) => {
       method: 'PATCH',
       headers: {
         apikey: supabaseSecretKey,
-        Authorization: `Bearer ${supabaseSecretKey}`,
+        ...buildSupabaseServiceAuthorizationHeader(),
         'Content-Type': 'application/json',
         Prefer: 'return=representation',
       },
@@ -4341,7 +4357,7 @@ const deleteCampaignRowById = async (campaignId) => {
       method: 'DELETE',
       headers: {
         apikey: supabaseSecretKey,
-        Authorization: `Bearer ${supabaseSecretKey}`,
+        ...buildSupabaseServiceAuthorizationHeader(),
       },
     })
     const payload = await response.json().catch(() => null)
@@ -4497,7 +4513,7 @@ const listOrganizationRows = async () => {
       const response = await fetch(endpoint, {
         headers: {
           apikey: supabaseSecretKey,
-          Authorization: `Bearer ${supabaseSecretKey}`,
+          ...buildSupabaseServiceAuthorizationHeader(),
         },
       })
       const payload = await response.json().catch(() => null)
@@ -4528,7 +4544,7 @@ const insertOrganizationRow = async (row) => {
       method: 'POST',
       headers: {
         apikey: supabaseSecretKey,
-        Authorization: `Bearer ${supabaseSecretKey}`,
+        ...buildSupabaseServiceAuthorizationHeader(),
         'Content-Type': 'application/json',
         Prefer: 'return=representation',
       },
@@ -4563,7 +4579,7 @@ const fetchOrganizationRowById = async (organizationId) => {
     const response = await fetch(endpoint, {
       headers: {
         apikey: supabaseSecretKey,
-        Authorization: `Bearer ${supabaseSecretKey}`,
+        ...buildSupabaseServiceAuthorizationHeader(),
       },
     })
     const payload = await response.json().catch(() => null)
@@ -4593,7 +4609,7 @@ const updateOrganizationMembers = async (organizationId, memberRoles, creatorId 
       method: 'PATCH',
       headers: {
         apikey: supabaseSecretKey,
-        Authorization: `Bearer ${supabaseSecretKey}`,
+        ...buildSupabaseServiceAuthorizationHeader(),
         'Content-Type': 'application/json',
         Prefer: 'return=representation',
       },
@@ -4627,7 +4643,7 @@ const updateOrganizationDetails = async (organizationId, input) => {
       method: 'PATCH',
       headers: {
         apikey: supabaseSecretKey,
-        Authorization: `Bearer ${supabaseSecretKey}`,
+        ...buildSupabaseServiceAuthorizationHeader(),
         'Content-Type': 'application/json',
         Prefer: 'return=representation',
       },
@@ -4663,7 +4679,7 @@ const updateOrganizationConnectedAccounts = async (organizationId, connectedAcco
       method: 'PATCH',
       headers: {
         apikey: supabaseSecretKey,
-        Authorization: `Bearer ${supabaseSecretKey}`,
+        ...buildSupabaseServiceAuthorizationHeader(),
         'Content-Type': 'application/json',
         Prefer: 'return=representation',
       },
@@ -4697,7 +4713,7 @@ const deleteOrganizationRowById = async (organizationId) => {
       method: 'DELETE',
       headers: {
         apikey: supabaseSecretKey,
-        Authorization: `Bearer ${supabaseSecretKey}`,
+        ...buildSupabaseServiceAuthorizationHeader(),
       },
     })
     const payload = await response.json().catch(() => null)
