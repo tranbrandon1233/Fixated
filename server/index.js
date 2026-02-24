@@ -480,7 +480,11 @@ const probeSupabaseConnectivity = async () => {
 const INTERNAL_REFRESH_RUNNER_HEADER = 'x-fixated-refresh-runner-token'
 const INTERNAL_REFRESH_RUNNER_FUNCTION_PATH = getEnv(
   'INTERNAL_REFRESH_RUNNER_FUNCTION_PATH',
-  '/internal/refresh-job-runner-background',
+  '/api/refresh-job-runner-background',
+)
+const internalRefreshRunnerRequestTimeoutMs = Math.max(
+  2_000,
+  Math.min(30_000, Number(getEnv('INTERNAL_REFRESH_RUNNER_TIMEOUT_MS', '12000')) || 12_000),
 )
 const buildInternalRefreshRunnerToken = () => {
   const explicit = getEnv('INTERNAL_REFRESH_RUNNER_TOKEN')
@@ -1228,7 +1232,7 @@ const dispatchInternalRefreshRunner = async ({ platform, userId, jobId }) => {
   if (!runnerUrl) return { ok: false, error: 'missing_internal_refresh_runner_url' }
 
   const abortController = new AbortController()
-  const timeoutId = setTimeout(() => abortController.abort(), 4_000)
+  const timeoutId = setTimeout(() => abortController.abort(), internalRefreshRunnerRequestTimeoutMs)
   try {
     const response = await fetch(runnerUrl, {
       method: 'POST',

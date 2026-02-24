@@ -19,6 +19,10 @@
       "destination": "/api/auth-server?__pathname=/health"
     },
     {
+      "source": "/api/refresh-job-runner-background",
+      "destination": "/api/refresh-job-runner-background"
+    },
+    {
       "source": "/api",
       "destination": "/api/auth-server?__pathname=/api"
     },
