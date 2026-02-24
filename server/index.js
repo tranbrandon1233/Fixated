@@ -323,10 +323,46 @@ const xCollectionEnabled = getEnv(
   xBearerToken || xOauthClientId ? 'true' : 'false',
 ).toLowerCase() === 'true'
 const xCollectorMaxPosts = Math.max(5, Math.min(100, Number(getEnv('X_COLLECTOR_MAX_POSTS', '50')) || 50))
-const supabaseUrl = withFallbackUrl(getEnv('SUPABASE_URL'), '')
-const supabasePublishableKey = getEnv('SUPABASE_PUBLISHABLE_KEY', getEnv('SUPABASE_ANON_KEY'))
-const supabaseSecretKey = getEnv('SUPABASE_SECRET_KEY', getEnv('SUPABASE_SERVICE_ROLE_KEY'))
-const isSupabaseConfigured = Boolean(supabaseUrl && supabasePublishableKey && supabaseSecretKey)
+const supabaseUrl = withFallbackUrl(
+  getEnv(
+    'SUPABASE_URL',
+    getEnv('NEXT_PUBLIC_SUPABASE_URL', getEnv('VITE_SUPABASE_URL', getEnv('SUPABASE_PROJECT_URL'))),
+  ),
+  '',
+)
+const supabasePublishableKey = getEnv(
+  'SUPABASE_PUBLISHABLE_KEY',
+  getEnv('SUPABASE_ANON_KEY', getEnv('NEXT_PUBLIC_SUPABASE_ANON_KEY', getEnv('VITE_SUPABASE_ANON_KEY'))),
+)
+const supabaseSecretKey = getEnv(
+  'SUPABASE_SECRET_KEY',
+  getEnv('SUPABASE_SERVICE_ROLE_KEY', getEnv('SUPABASE_SERVICE_ROLE')),
+)
+const hasSupabaseUrl = Boolean(supabaseUrl)
+const hasSupabasePublishableKey = Boolean(supabasePublishableKey)
+const hasSupabaseSecretKey = Boolean(supabaseSecretKey)
+const isSupabaseConfigured = Boolean(hasSupabaseUrl && hasSupabasePublishableKey && hasSupabaseSecretKey)
+const getMissingSupabaseConfigKeys = () => {
+  const missing = []
+  if (!hasSupabaseUrl) missing.push('SUPABASE_URL')
+  if (!hasSupabasePublishableKey) missing.push('SUPABASE_PUBLISHABLE_KEY')
+  if (!hasSupabaseSecretKey) missing.push('SUPABASE_SECRET_KEY')
+  return missing
+}
+const buildSupabaseConfigDiagnostic = () => ({
+  configured: isSupabaseConfigured,
+  hasUrl: hasSupabaseUrl,
+  hasPublishableKey: hasSupabasePublishableKey,
+  hasSecretKey: hasSupabaseSecretKey,
+  urlHost: (() => {
+    try {
+      return supabaseUrl ? new URL(supabaseUrl).host : ''
+    } catch {
+      return ''
+    }
+  })(),
+  missingKeys: getMissingSupabaseConfigKeys(),
+})
 const INTERNAL_REFRESH_RUNNER_HEADER = 'x-fixated-refresh-runner-token'
 const INTERNAL_REFRESH_RUNNER_FUNCTION_PATH = getEnv(
   'INTERNAL_REFRESH_RUNNER_FUNCTION_PATH',
@@ -1311,8 +1347,13 @@ const requestSupabaseTable = async (tableName, { method = 'GET', query = '', bod
     })
     const payload = await response.json().catch(() => null)
     return { ok: response.ok, status: response.status, payload }
-  } catch (_err) {
-    return { ok: false, status: 500, payload: null }
+  } catch (error) {
+    console.error('Supabase table request failed', {
+      tableName,
+      method,
+      message: error instanceof Error ? error.message : 'unknown_error',
+    })
+    return { ok: false, status: 503, payload: null }
   }
 }
 
@@ -2108,6 +2149,7 @@ app.get('/health', (_req, res) => {
     .reduce((max, streak) => Math.max(max, Math.max(0, toNumber(streak?.count))), 0)
   res.json({
     ok: true,
+    supabase: buildSupabaseConfigDiagnostic(),
     instagram: {
       collectorMode: instagramCollectorMode,
       selectorVersion: INSTAGRAM_SELECTOR_VERSION,
@@ -2149,7 +2191,8 @@ const resolveRefreshCounterViewer = async (req, res) => {
       ok: false,
       status: 500,
       error: 'supabase_not_configured',
-      message: 'Supabase config is missing. Set SUPABASE_URL and API keys.',
+      message: `Supabase config is missing. Set: ${getMissingSupabaseConfigKeys().join(', ')}.`,
+      details: buildSupabaseConfigDiagnostic(),
     }
   }
   const viewer = await resolveAuthedUserContext(req, res)
@@ -3809,7 +3852,8 @@ const resolveAuthedUserContext = async (req, res) => {
       ok: false,
       status: 500,
       error: 'supabase_not_configured',
-      message: 'Supabase config is missing. Set SUPABASE_URL and API keys.',
+      message: `Supabase config is missing. Set: ${getMissingSupabaseConfigKeys().join(', ')}.`,
+      details: buildSupabaseConfigDiagnostic(),
     }
   }
 
