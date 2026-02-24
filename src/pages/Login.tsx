@@ -41,6 +41,15 @@ export const Login = ({ onLogin }: LoginProps) => {
         </button>
         {errorMessage ? <p className="login-error">{errorMessage}</p> : null}
         <p className="login-footnote">Google OAuth is required to access the dashboard.</p>
+        <p className="login-legal">
+          <a href="https://fixated.com/policy/privacy" target="_blank" rel="noreferrer">
+            Privacy Policy
+          </a>
+          <span aria-hidden="true"> · </span>
+          <a href="https://fixated.com/policy/terms" target="_blank" rel="noreferrer">
+            Terms of Service
+          </a>
+        </p>
       </div>
     </div>
   )

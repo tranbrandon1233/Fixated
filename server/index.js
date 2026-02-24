@@ -15139,17 +15139,11 @@ const createAndStartInstagramRefreshJob = async (
         normalizeTextInput(dispatchResult.error, { maxLength: 240 })
         || 'instagram_refresh_runner_dispatch_failed'
       await updateInstagramRefreshJob(userId, jobId, {
-        status: 'failed',
-        finished_at: new Date().toISOString(),
-        error_message: 'Unable to dispatch Instagram refresh worker.',
-        meta: { trigger, dispatchError },
+        status: 'queued',
+        error_message: null,
+        meta: { trigger, dispatchError, dispatchFallback: 'in_process' },
       })
-      return {
-        ok: false,
-        status: 503,
-        error: 'instagram_refresh_job_dispatch_failed',
-        payload: { dispatchError },
-      }
+      void runInstagramRefreshJob(jobId, userId)
     }
   } else {
     void runInstagramRefreshJob(jobId, userId)
@@ -15512,17 +15506,11 @@ const createAndStartYouTubeRefreshJob = async (
         normalizeTextInput(dispatchResult.error, { maxLength: 240 })
         || 'youtube_refresh_runner_dispatch_failed'
       await updateYouTubeRefreshJob(userId, jobId, {
-        status: 'failed',
-        finished_at: new Date().toISOString(),
-        error_message: 'Unable to dispatch YouTube refresh worker.',
-        meta: { trigger, dispatchError },
+        status: 'queued',
+        error_message: null,
+        meta: { trigger, dispatchError, dispatchFallback: 'in_process' },
       })
-      return {
-        ok: false,
-        status: 503,
-        error: 'youtube_refresh_job_dispatch_failed',
-        payload: { dispatchError },
-      }
+      void runYouTubeRefreshJob(jobId, userId)
     }
   } else {
     void runYouTubeRefreshJob(jobId, userId)
