@@ -84,6 +84,7 @@ export const Channel = () => {
       }))
       .filter((point) => point.isoDate)
   }, [summary.timeSeriesByChannel, today])
+  const hasPerChannelSeries = normalizedSeriesByChannel.length > 0
   const activeSeries = useMemo(() => {
     if (!channel) return normalizedPortfolioSeries
     const scopedSeries = normalizedSeriesByChannel
@@ -98,8 +99,11 @@ export const Channel = () => {
         isoDate: point.isoDate,
         label: point.label,
       }))
-    return scopedSeries.length ? scopedSeries : normalizedPortfolioSeries
-  }, [channel, normalizedPortfolioSeries, normalizedSeriesByChannel])
+    if (scopedSeries.length) return scopedSeries
+    // Only fall back to portfolio-level trend for legacy payloads that do not provide per-channel series at all.
+    if (!hasPerChannelSeries) return normalizedPortfolioSeries
+    return []
+  }, [channel, hasPerChannelSeries, normalizedPortfolioSeries, normalizedSeriesByChannel])
   const selectedChannelFirstVideoDate = useMemo(
     () => normalizeSummaryIsoDate(channel?.firstVideoUploadDate, today),
     [channel?.firstVideoUploadDate, today],
@@ -112,14 +116,14 @@ export const Channel = () => {
     const orderedDates = activeSeries.map((record) => record.isoDate).sort((a, b) => a.localeCompare(b))
     const nonFutureDates = orderedDates.filter((value) => value <= today)
     const earliestSeriesDate = nonFutureDates.length ? nonFutureDates[0] : ''
-    const firstUploadDate = selectedChannelFirstVideoDate || fallbackFirstVideoUploadDate
+    const firstUploadDate = channel ? selectedChannelFirstVideoDate : fallbackFirstVideoUploadDate
     const minDate = firstUploadDate || earliestSeriesDate
     if (!minDate) return { min: '', max: today }
     return {
       min: minDate,
       max: today,
     }
-  }, [activeSeries, fallbackFirstVideoUploadDate, selectedChannelFirstVideoDate, today])
+  }, [activeSeries, channel, fallbackFirstVideoUploadDate, selectedChannelFirstVideoDate, today])
   const hasDateBounds = Boolean(dateBounds.min && dateBounds.max)
   const boundedStartDate = useMemo(() => {
     if (!dateBounds.min) return startDate
@@ -161,7 +165,7 @@ export const Channel = () => {
 
     return series
   }, [effectiveEndDate, effectiveStartDate, filteredSeries, hasDateBounds])
-  const isLiveViews = activeSeries.length > 0
+  const isLiveViews = true
   const hasChannel = Boolean(channel)
   const hasPosts = resolvedPosts.length > 0
   const hasTimeSeries = viewsSeries.length > 0
