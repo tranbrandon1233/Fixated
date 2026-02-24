@@ -15559,7 +15559,39 @@ const runYouTubeRefreshJob = async (jobId, userId) => {
     if (!connectionResult.ok) {
       throw new Error('Unable to load connected YouTube channels.')
     }
-    const connections = connectionResult.connections
+    const ownerConnectionsByUserId = new Map()
+    const ownersByChannelId = new Map()
+    const uniqueConnectionByChannelId = new Map()
+
+    for (const connection of connectionResult.connections) {
+      const channelId = normalizeTextInput(connection?.channelId, { maxLength: 300 })
+      if (!channelId) continue
+      const ownerUserIdRaw = normalizeTextInput(connection?.ownerUserId, { maxLength: 80 })
+      const ownerUserId = isUuid(ownerUserIdRaw) ? ownerUserIdRaw : userId
+      if (!isUuid(ownerUserId)) continue
+      const normalizedConnection = {
+        ...connection,
+        channelId,
+        channelName: normalizeTextInput(connection?.channelName, { maxLength: 180 }) || 'YouTube Channel',
+        ownerUserId,
+      }
+
+      const ownerChannelMap = ownerConnectionsByUserId.get(ownerUserId) ?? new Map()
+      if (!ownerChannelMap.has(channelId)) {
+        ownerChannelMap.set(channelId, normalizedConnection)
+      }
+      ownerConnectionsByUserId.set(ownerUserId, ownerChannelMap)
+
+      const ownerSet = ownersByChannelId.get(channelId) ?? new Set()
+      ownerSet.add(ownerUserId)
+      ownersByChannelId.set(channelId, ownerSet)
+
+      if (!uniqueConnectionByChannelId.has(channelId)) {
+        uniqueConnectionByChannelId.set(channelId, normalizedConnection)
+      }
+    }
+
+    const connections = [...uniqueConnectionByChannelId.values()]
     const channelsTotal = connections.length
     await updateYouTubeRefreshJob(userId, jobId, {
       channels_total: channelsTotal,
@@ -15585,38 +15617,56 @@ const runYouTubeRefreshJob = async (jobId, userId) => {
 
     const sessionId = `sb-${userId}`
     const summaryParts = []
-    const connectionsByOwnerUserId = new Map()
     const failures = []
     let channelsProcessed = 0
+    const isYouTubeSummaryPart = (value) =>
+      value
+      && typeof value === 'object'
+      && (
+        Array.isArray(value.channels)
+        || Array.isArray(value.topPosts)
+        || Array.isArray(value.timeSeries)
+      )
 
     for (const connection of connections) {
-      try {
+      let summaryPart = null
+      let lastChannelError = null
+      const channelId = normalizeTextInput(connection.channelId, { maxLength: 300 })
+      const ownerCandidates = [...(ownersByChannelId.get(channelId) ?? [])]
+      if (!ownerCandidates.length) {
         const ownerUserId = normalizeTextInput(connection.ownerUserId, { maxLength: 80 })
-        const tokenOwnerUserId = isUuid(ownerUserId) ? ownerUserId : userId
-        if (isUuid(tokenOwnerUserId)) {
-          const existing = connectionsByOwnerUserId.get(tokenOwnerUserId) ?? []
-          existing.push(connection)
-          connectionsByOwnerUserId.set(tokenOwnerUserId, existing)
+        if (isUuid(ownerUserId)) {
+          ownerCandidates.push(ownerUserId)
         }
-        const summaryPart = await withTimeout(
-          buildLiveYouTubeSummary({
-            sessionId,
-            connections: [connection],
-            resolveAccessToken: (item) => ensureValidAccessTokenForUser(tokenOwnerUserId, item),
-          }),
-          YOUTUBE_CHANNEL_REFRESH_TIMEOUT_MS,
-          `YouTube refresh timed out for channel ${connection.channelName || connection.channelId}.`,
-        )
-        if (
-          summaryPart
-          && typeof summaryPart === 'object'
-          && (
-            Array.isArray(summaryPart.channels)
-            || Array.isArray(summaryPart.topPosts)
-            || Array.isArray(summaryPart.timeSeries)
-          )
-        ) {
-          summaryParts.push({ ownerUserId: tokenOwnerUserId, summaryPart })
+      }
+
+      try {
+        for (const tokenOwnerUserId of ownerCandidates) {
+          try {
+            const candidateSummaryPart = await withTimeout(
+              buildLiveYouTubeSummary({
+                sessionId,
+                connections: [connection],
+                resolveAccessToken: (item) => ensureValidAccessTokenForUser(tokenOwnerUserId, item),
+              }),
+              YOUTUBE_CHANNEL_REFRESH_TIMEOUT_MS,
+              `YouTube refresh timed out for channel ${connection.channelName || connection.channelId}.`,
+            )
+            if (isYouTubeSummaryPart(candidateSummaryPart)) {
+              summaryPart = candidateSummaryPart
+              break
+            }
+          } catch (channelError) {
+            lastChannelError = channelError
+          }
+        }
+
+        if (summaryPart && ownerCandidates.length) {
+          for (const ownerUserId of ownerCandidates) {
+            summaryParts.push({ ownerUserId, summaryPart })
+          }
+        } else if (lastChannelError) {
+          throw lastChannelError
         }
       } catch (error) {
         failures.push({
@@ -15633,7 +15683,8 @@ const runYouTubeRefreshJob = async (jobId, userId) => {
     }
 
     if (!summaryParts.length && !failures.length) {
-      for (const [ownerUserId, ownerConnections] of connectionsByOwnerUserId.entries()) {
+      for (const [ownerUserId, ownerConnectionMap] of ownerConnectionsByUserId.entries()) {
+        const ownerConnections = [...ownerConnectionMap.values()]
         summaryParts.push({
           ownerUserId,
           summaryPart: includeConnectedYouTubeChannelsInSummary(
