@@ -33,12 +33,14 @@ export default async function refreshJobRunnerBackground(req, res) {
     return
   }
 
-  if (!isValidInternalRefreshRunnerToken(req?.headers ?? {})) {
+  const payload = parseBody(req?.body)
+  const fallbackToken = normalizeText(payload.internalToken, 512)
+
+  if (!isValidInternalRefreshRunnerToken(req?.headers ?? {}, fallbackToken)) {
     res.status(401).json({ ok: false, error: 'unauthorized' })
     return
   }
 
-  const payload = parseBody(req?.body)
   const platform = normalizeText(payload.platform, 20).toLowerCase()
   const userId = normalizeText(payload.userId, 80)
   const jobId = normalizeText(payload.jobId, 80)

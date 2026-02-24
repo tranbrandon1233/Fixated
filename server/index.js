@@ -1186,28 +1186,53 @@ const readHeaderValue = (headers, headerName) => {
   if (!headers || typeof headers !== 'object') return ''
   const directValue = headers[headerName]
   if (typeof directValue === 'string') return directValue
+  if (Array.isArray(directValue)) {
+    const firstString = directValue.find((value) => typeof value === 'string')
+    if (typeof firstString === 'string') return firstString
+  }
   const normalizedHeaderName = headerName.toLowerCase()
   for (const [key, value] of Object.entries(headers)) {
     if (String(key).toLowerCase() !== normalizedHeaderName) continue
     if (typeof value === 'string') return value
+    if (Array.isArray(value)) {
+      const firstString = value.find((entry) => typeof entry === 'string')
+      if (typeof firstString === 'string') return firstString
+    }
     break
   }
   return ''
 }
 
-const isValidInternalRefreshRunnerToken = (headers = {}) => {
+const parseBearerToken = (authorizationHeaderValue = '') => {
+  const normalized = normalizeEnvValue(authorizationHeaderValue)
+  if (!normalized) return ''
+  const match = normalized.match(/^Bearer\s+(.+)$/i)
+  if (!match) return ''
+  return normalizeEnvValue(match[1])
+}
+
+const isValidInternalRefreshRunnerToken = (headers = {}, fallbackToken = '') => {
   if (!internalRefreshRunnerToken) return false
-  const providedRaw = readHeaderValue(headers, INTERNAL_REFRESH_RUNNER_HEADER)
-  const provided = normalizeEnvValue(providedRaw)
-  if (!provided) return false
-  try {
-    return crypto.timingSafeEqual(
-      Buffer.from(provided),
-      Buffer.from(internalRefreshRunnerToken),
-    )
-  } catch {
-    return false
+  const candidateTokens = [
+    normalizeEnvValue(readHeaderValue(headers, INTERNAL_REFRESH_RUNNER_HEADER)),
+    parseBearerToken(readHeaderValue(headers, 'authorization')),
+    normalizeEnvValue(fallbackToken),
+  ].filter((value) => Boolean(value))
+  for (const candidateToken of candidateTokens) {
+    try {
+      if (
+        crypto.timingSafeEqual(
+          Buffer.from(candidateToken),
+          Buffer.from(internalRefreshRunnerToken),
+        )
+      ) {
+        return true
+      }
+    } catch {
+      // Ignore malformed candidate token and continue trying.
+    }
   }
+  return false
 }
 
 const resolveInternalRefreshRunnerUrl = () => {
@@ -1239,8 +1264,9 @@ const dispatchInternalRefreshRunner = async ({ platform, userId, jobId }) => {
       headers: {
         'Content-Type': 'application/json',
         [INTERNAL_REFRESH_RUNNER_HEADER]: internalRefreshRunnerToken,
+        Authorization: `Bearer ${internalRefreshRunnerToken}`,
       },
-      body: JSON.stringify({ platform, userId, jobId }),
+      body: JSON.stringify({ platform, userId, jobId, internalToken: internalRefreshRunnerToken }),
       signal: abortController.signal,
     })
     if (!response.ok) {

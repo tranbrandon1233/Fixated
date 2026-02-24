@@ -83,8 +83,8 @@ export const refreshAllConnectedAccountData = async (
       youtubeStatus = youtubeStart.status === 'failed'
         ? await getYouTubeRefreshStatus(youtubeStart.jobId)
         : await waitForYouTubeRefresh(youtubeStart.jobId, {
-          timeoutMs: 90 * 1000, // 90 seconds
-          intervalMs: 30 * 1000, // 30 seconds
+          timeoutMs: 60 * 1000, // 60 seconds
+          intervalMs: 10 * 1000, // 10 seconds
           onProgress: (status) => {
             if (status.status === 'running' && status.channelsTotal > 0) {
               emitRefreshProgress(
