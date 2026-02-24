@@ -20,11 +20,11 @@
     },
     {
       "source": "/api",
-      "destination": "/api"
+      "destination": "/api/auth-server?__pathname=/api"
     },
     {
       "source": "/api/:path*",
-      "destination": "/api/:path*"
+      "destination": "/api/auth-server?__pathname=/api/:path*"
     },
     {
       "source": "/",
