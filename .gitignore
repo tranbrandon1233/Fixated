@@ -29,3 +29,4 @@ dist-ssr
 spec.txt
 package-lock.json
 server/reporting-store.json
+.vercel

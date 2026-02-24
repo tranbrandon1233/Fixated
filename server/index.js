@@ -43,7 +43,16 @@ const withFallbackUrl = (value, fallback) => {
   }
 }
 
-const defaultBaseUrl = 'https://fixated-dashboard.netlify.app'
+const resolveDefaultBaseUrl = () => {
+  const vercelUrl = normalizeEnvValue(process.env.VERCEL_URL)
+  if (vercelUrl) {
+    const withProtocol = /^https?:\/\//i.test(vercelUrl) ? vercelUrl : `https://${vercelUrl}`
+    return normalizeBaseUrl(withProtocol)
+  }
+  return 'http://localhost:5000'
+}
+
+const defaultBaseUrl = resolveDefaultBaseUrl()
 const serverBaseUrl = withFallbackUrl(getEnv('SERVER_BASE_URL', defaultBaseUrl), defaultBaseUrl)
 const appBaseUrl = withFallbackUrl(getEnv('APP_BASE_URL', defaultBaseUrl), defaultBaseUrl)
 const clientId = getEnv('GOOGLE_CLIENT_ID')
@@ -319,7 +328,10 @@ const supabasePublishableKey = getEnv('SUPABASE_PUBLISHABLE_KEY', getEnv('SUPABA
 const supabaseSecretKey = getEnv('SUPABASE_SECRET_KEY', getEnv('SUPABASE_SERVICE_ROLE_KEY'))
 const isSupabaseConfigured = Boolean(supabaseUrl && supabasePublishableKey && supabaseSecretKey)
 const INTERNAL_REFRESH_RUNNER_HEADER = 'x-fixated-refresh-runner-token'
-const INTERNAL_REFRESH_RUNNER_FUNCTION_PATH = '/.netlify/functions/refresh-job-runner-background'
+const INTERNAL_REFRESH_RUNNER_FUNCTION_PATH = getEnv(
+  'INTERNAL_REFRESH_RUNNER_FUNCTION_PATH',
+  '/internal/refresh-job-runner-background',
+)
 const buildInternalRefreshRunnerToken = () => {
   const explicit = getEnv('INTERNAL_REFRESH_RUNNER_TOKEN')
   if (explicit) return explicit
@@ -1010,7 +1022,11 @@ const resolveGoogleOauthRedirectUri = ({
   }
 }
 
-const isServerlessRuntime = Boolean(process.env.NETLIFY || process.env.AWS_LAMBDA_FUNCTION_NAME)
+const isServerlessRuntime = Boolean(
+  process.env.NETLIFY
+  || process.env.AWS_LAMBDA_FUNCTION_NAME
+  || process.env.VERCEL,
+)
 
 const readHeaderValue = (headers, headerName) => {
   if (!headers || typeof headers !== 'object') return ''
@@ -1042,7 +1058,11 @@ const isValidInternalRefreshRunnerToken = (headers = {}) => {
 
 const resolveInternalRefreshRunnerUrl = () => {
   const explicitBaseUrl = normalizeBaseUrl(getEnv('INTERNAL_REFRESH_RUNNER_BASE_URL'))
-  const defaultBaseUrl = normalizeBaseUrl(getEnv('URL', serverBaseUrl))
+  const vercelUrl = normalizeEnvValue(process.env.VERCEL_URL)
+  const vercelBaseUrl = vercelUrl
+    ? normalizeBaseUrl(/^https?:\/\//i.test(vercelUrl) ? vercelUrl : `https://${vercelUrl}`)
+    : ''
+  const defaultBaseUrl = normalizeBaseUrl(getEnv('URL', vercelBaseUrl || serverBaseUrl))
   const baseUrl = explicitBaseUrl || defaultBaseUrl
   if (!baseUrl) return ''
   return `${baseUrl}${INTERNAL_REFRESH_RUNNER_FUNCTION_PATH}`

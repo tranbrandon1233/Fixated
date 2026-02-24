@@ -1,0 +1,38 @@
+{
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
+  "rewrites": [
+    {
+      "source": "/internal/refresh-job-runner-background",
+      "destination": "/api/refresh-job-runner-background"
+    },
+    {
+      "source": "/oauth/:path*",
+      "destination": "/api/auth-server?__pathname=/oauth/:path*"
+    },
+    {
+      "source": "/auth/:path*",
+      "destination": "/api/auth-server?__pathname=/auth/:path*"
+    },
+    {
+      "source": "/health",
+      "destination": "/api/auth-server?__pathname=/health"
+    },
+    {
+      "source": "/api",
+      "destination": "/api"
+    },
+    {
+      "source": "/api/:path*",
+      "destination": "/api/:path*"
+    },
+    {
+      "source": "/",
+      "destination": "/index.html"
+    },
+    {
+      "source": "/:path*",
+      "destination": "/index.html"
+    }
+  ]
+}

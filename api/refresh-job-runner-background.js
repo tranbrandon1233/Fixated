@@ -2,7 +2,7 @@ import {
   isValidInternalRefreshRunnerToken,
   runInstagramRefreshJob,
   runYouTubeRefreshJob,
-} from '../../server/index.js'
+} from '../server/index.js'
 
 const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
@@ -26,44 +26,42 @@ const parseBody = (rawBody) => {
   }
 }
 
-const buildResponse = (statusCode, payload) => ({
-  statusCode,
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify(payload),
-})
-
-export const handler = async (event) => {
-  const method = normalizeText(event?.httpMethod || 'POST', 12).toUpperCase()
+export default async function refreshJobRunnerBackground(req, res) {
+  const method = normalizeText(req?.method || 'POST', 12).toUpperCase()
   if (method !== 'POST') {
-    return buildResponse(405, { ok: false, error: 'method_not_allowed' })
+    res.status(405).json({ ok: false, error: 'method_not_allowed' })
+    return
   }
 
-  if (!isValidInternalRefreshRunnerToken(event?.headers ?? {})) {
-    return buildResponse(401, { ok: false, error: 'unauthorized' })
+  if (!isValidInternalRefreshRunnerToken(req?.headers ?? {})) {
+    res.status(401).json({ ok: false, error: 'unauthorized' })
+    return
   }
 
-  const payload = parseBody(event?.body)
+  const payload = parseBody(req?.body)
   const platform = normalizeText(payload.platform, 20).toLowerCase()
   const userId = normalizeText(payload.userId, 80)
   const jobId = normalizeText(payload.jobId, 80)
 
   if (!uuidRegex.test(userId) || !uuidRegex.test(jobId)) {
-    return buildResponse(400, { ok: false, error: 'invalid_payload' })
+    res.status(400).json({ ok: false, error: 'invalid_payload' })
+    return
   }
+
+  // Return quickly so dispatch callers can treat the worker as accepted.
+  res.status(202).json({ ok: true, accepted: true })
 
   try {
     if (platform === 'youtube') {
       await runYouTubeRefreshJob(jobId, userId)
-    } else if (platform === 'instagram') {
-      await runInstagramRefreshJob(jobId, userId)
-    } else {
-      return buildResponse(400, { ok: false, error: 'invalid_platform' })
+      return
     }
-    return buildResponse(200, { ok: true })
+    if (platform === 'instagram') {
+      await runInstagramRefreshJob(jobId, userId)
+      return
+    }
+    console.error('refresh runner rejected invalid platform', { platform, userId, jobId })
   } catch (error) {
-    return buildResponse(500, {
-      ok: false,
-      error: error instanceof Error ? error.message : 'refresh_runner_failed',
-    })
+    console.error('refresh runner failed', error)
   }
 }
