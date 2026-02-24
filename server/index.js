@@ -482,6 +482,7 @@ const INTERNAL_REFRESH_RUNNER_FUNCTION_PATH = getEnv(
   'INTERNAL_REFRESH_RUNNER_FUNCTION_PATH',
   '/api/refresh-job-runner-background',
 )
+const INTERNAL_REFRESH_RUNNER_FALLBACK_PATH = '/internal/refresh-job-runner-background'
 const internalRefreshRunnerRequestTimeoutMs = Math.max(
   2_000,
   Math.min(30_000, Number(getEnv('INTERNAL_REFRESH_RUNNER_TIMEOUT_MS', '12000')) || 12_000),
@@ -1235,7 +1236,7 @@ const isValidInternalRefreshRunnerToken = (headers = {}, fallbackToken = '') => 
   return false
 }
 
-const resolveInternalRefreshRunnerUrl = () => {
+const resolveInternalRefreshRunnerBaseUrl = () => {
   const explicitBaseUrl = normalizeBaseUrl(getEnv('INTERNAL_REFRESH_RUNNER_BASE_URL'))
   const vercelUrl = normalizeEnvValue(process.env.VERCEL_URL)
   const vercelBaseUrl = vercelUrl
@@ -1243,8 +1244,20 @@ const resolveInternalRefreshRunnerUrl = () => {
     : ''
   const defaultBaseUrl = normalizeBaseUrl(getEnv('URL', vercelBaseUrl || serverBaseUrl))
   const baseUrl = explicitBaseUrl || defaultBaseUrl
-  if (!baseUrl) return ''
-  return `${baseUrl}${INTERNAL_REFRESH_RUNNER_FUNCTION_PATH}`
+  return baseUrl || ''
+}
+
+const resolveInternalRefreshRunnerUrls = () => {
+  const baseUrl = resolveInternalRefreshRunnerBaseUrl()
+  if (!baseUrl) return []
+  const paths = [INTERNAL_REFRESH_RUNNER_FUNCTION_PATH]
+  const normalizedPrimaryPath = normalizeTextInput(INTERNAL_REFRESH_RUNNER_FUNCTION_PATH, { maxLength: 200 })
+  if (normalizedPrimaryPath === '/api/refresh-job-runner-background') {
+    paths.push(INTERNAL_REFRESH_RUNNER_FALLBACK_PATH)
+  } else if (normalizedPrimaryPath === INTERNAL_REFRESH_RUNNER_FALLBACK_PATH) {
+    paths.push('/api/refresh-job-runner-background')
+  }
+  return [...new Set(paths)].map((pathValue) => `${baseUrl}${pathValue}`)
 }
 
 const dispatchInternalRefreshRunner = async ({ platform, userId, jobId }) => {
@@ -1253,26 +1266,37 @@ const dispatchInternalRefreshRunner = async ({ platform, userId, jobId }) => {
   if (platform !== 'youtube' && platform !== 'instagram') return { ok: false, error: 'invalid_platform' }
   if (!internalRefreshRunnerToken) return { ok: false, error: 'missing_internal_refresh_runner_token' }
 
-  const runnerUrl = resolveInternalRefreshRunnerUrl()
-  if (!runnerUrl) return { ok: false, error: 'missing_internal_refresh_runner_url' }
+  const runnerUrls = resolveInternalRefreshRunnerUrls()
+  if (!runnerUrls.length) return { ok: false, error: 'missing_internal_refresh_runner_url' }
 
   const abortController = new AbortController()
   const timeoutId = setTimeout(() => abortController.abort(), internalRefreshRunnerRequestTimeoutMs)
   try {
-    const response = await fetch(runnerUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        [INTERNAL_REFRESH_RUNNER_HEADER]: internalRefreshRunnerToken,
-        Authorization: `Bearer ${internalRefreshRunnerToken}`,
-      },
-      body: JSON.stringify({ platform, userId, jobId, internalToken: internalRefreshRunnerToken }),
-      signal: abortController.signal,
-    })
-    if (!response.ok) {
-      return { ok: false, error: `refresh_runner_http_${response.status}` }
+    let lastHttpError = 'refresh_runner_dispatch_failed'
+    for (const runnerUrl of runnerUrls) {
+      const response = await fetch(runnerUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          [INTERNAL_REFRESH_RUNNER_HEADER]: internalRefreshRunnerToken,
+          Authorization: `Bearer ${internalRefreshRunnerToken}`,
+        },
+        body: JSON.stringify({ platform, userId, jobId, internalToken: internalRefreshRunnerToken }),
+        signal: abortController.signal,
+      })
+      if (response.ok) {
+        return { ok: true }
+      }
+      const payload = await response.json().catch(() => null)
+      const payloadError =
+        normalizeTextInput(payload?.error, { maxLength: 80 })
+        || normalizeTextInput(payload?.code, { maxLength: 80 })
+        || ''
+      lastHttpError = payloadError
+        ? `refresh_runner_http_${response.status}_${payloadError}`
+        : `refresh_runner_http_${response.status}`
     }
-    return { ok: true }
+    return { ok: false, error: lastHttpError }
   } catch (error) {
     return {
       ok: false,
@@ -10525,31 +10549,72 @@ const hydratePostCountsByChannelDate = (series, ...postSources) => {
 
 const buildAnalyticsDateRange = (days) => {
   const end = new Date()
+  // Analytics can lag by up to a day for some metrics; avoid querying the current day.
+  end.setDate(end.getDate() - 1)
   const start = new Date(end)
   start.setDate(end.getDate() - Math.max(0, days - 1))
   const toIso = (value) => value.toISOString().slice(0, 10)
   return { startDate: toIso(start), endDate: toIso(end) }
 }
 
-const fetchAnalyticsReport = async (accessToken, params) => {
+const waitMs = (durationMs = 0) =>
+  new Promise((resolve) => setTimeout(resolve, Math.max(0, durationMs)))
+
+const readAnalyticsErrorReason = (payload) =>
+  normalizeTextInput(
+    payload?.error?.message
+    || payload?.error_description
+    || payload?.error
+    || 'unknown_error',
+    { maxLength: 240 },
+  ) || 'unknown_error'
+
+const fetchAnalyticsReport = async (accessToken, params, options = {}) => {
+  const maxRetries = Math.max(0, Math.min(4, toNumber(options.maxRetries || 2)))
+  const retryableStatuses = new Set([429, 500, 502, 503, 504])
   const query = new URLSearchParams(params).toString()
-  const response = await fetch(`https://youtubeanalytics.googleapis.com/v2/reports?${query}`, {
-    headers: { Authorization: `Bearer ${accessToken}` },
-  })
-  if (!response.ok) {
-    const payload = await response.json().catch(() => null)
-    console.error('YouTube Analytics request failed:', {
-      status: response.status,
-      params,
-      reason:
-        payload?.error?.message ||
-        payload?.error_description ||
-        payload?.error ||
-        'unknown_error',
-    })
-    return null
+  let attempt = 0
+  let lastFailure = null
+
+  while (attempt <= maxRetries) {
+    attempt += 1
+    try {
+      const response = await fetch(`https://youtubeanalytics.googleapis.com/v2/reports?${query}`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      })
+      if (response.ok) {
+        return response.json().catch(() => null)
+      }
+      const payload = await response.json().catch(() => null)
+      const reason = readAnalyticsErrorReason(payload)
+      const retryable = retryableStatuses.has(response.status)
+      lastFailure = {
+        status: response.status,
+        params,
+        reason,
+        attempt,
+        attempts: maxRetries + 1,
+      }
+      if (!retryable || attempt > maxRetries) break
+    } catch (error) {
+      lastFailure = {
+        status: 0,
+        params,
+        reason: error instanceof Error ? normalizeTextInput(error.message, { maxLength: 240 }) : 'request_failed',
+        attempt,
+        attempts: maxRetries + 1,
+      }
+      if (attempt > maxRetries) break
+    }
+
+    const backoffMs = Math.min(4000, 500 * (2 ** (attempt - 1)))
+    await waitMs(backoffMs)
   }
-  return response.json().catch(() => null)
+
+  if (lastFailure) {
+    console.warn('YouTube Analytics request failed:', lastFailure)
+  }
+  return null
 }
 
 const parseAnalyticsRows = (payload) => {
@@ -10582,6 +10647,7 @@ const buildAnalyticsSummary = async (sessionId, connections, options = {}) => {
   const geoMapByChannel = new Map()
   const { startDate, endDate } = buildAnalyticsDateRange(365)
   const audienceRanges = [365, 90, 28].map((days) => buildAnalyticsDateRange(days))
+  const dailyRanges = [365, 180, 90, 28].map((days) => buildAnalyticsDateRange(days))
 
   for (const connection of connections) {
     const { accessToken } = await resolveAccessToken(connection)
@@ -10639,12 +10705,10 @@ const buildAnalyticsSummary = async (sessionId, connections, options = {}) => {
     const totalRows = parseAnalyticsRows(totalPayload)
     const totalViews = totalRows.length ? toNumber(totalRows[0].views) : 0
 
-    const timePayload = await fetchForConnection({
-      metrics: 'views,likes,comments',
-      dimensions: 'day',
-      sort: 'day',
-    })
-    const timeRows = parseAnalyticsRows(timePayload)
+    const timeRows = await fetchRowsForConnection([
+      { metrics: 'views,likes,comments', dimensions: 'day', sort: 'day' },
+      { metrics: 'views,likes,comments', dimensions: 'day' },
+    ], dailyRanges)
     timeRows.forEach((row) => {
       if (!row.day) return
       const current = timeSeriesMap.get(row.day) ?? createTimeSeriesAccumulator(row.day)
@@ -10662,12 +10726,10 @@ const buildAnalyticsSummary = async (sessionId, connections, options = {}) => {
       }
     })
 
-    const watchTimePayload = await fetchForConnection({
-      metrics: 'estimatedMinutesWatched',
-      dimensions: 'day',
-      sort: 'day',
-    })
-    const watchTimeRows = parseAnalyticsRows(watchTimePayload)
+    const watchTimeRows = await fetchRowsForConnection([
+      { metrics: 'estimatedMinutesWatched', dimensions: 'day', sort: 'day' },
+      { metrics: 'estimatedMinutesWatched', dimensions: 'day' },
+    ], dailyRanges)
     watchTimeRows.forEach((row) => {
       if (!row.day) return
       const current = timeSeriesMap.get(row.day) ?? createTimeSeriesAccumulator(row.day)
@@ -10684,12 +10746,10 @@ const buildAnalyticsSummary = async (sessionId, connections, options = {}) => {
       }
     })
 
-    const followerDeltaPayload = await fetchForConnection({
-      metrics: 'subscribersGained,subscribersLost',
-      dimensions: 'day',
-      sort: 'day',
-    })
-    const followerDeltaRows = parseAnalyticsRows(followerDeltaPayload)
+    const followerDeltaRows = await fetchRowsForConnection([
+      { metrics: 'subscribersGained,subscribersLost', dimensions: 'day', sort: 'day' },
+      { metrics: 'subscribersGained,subscribersLost', dimensions: 'day' },
+    ], dailyRanges)
     followerDeltaRows.forEach((row) => {
       if (!row.day) return
       const current = timeSeriesMap.get(row.day) ?? createTimeSeriesAccumulator(row.day)
