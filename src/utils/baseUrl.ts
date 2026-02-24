@@ -15,16 +15,19 @@ export const resolveAuthBaseUrl = () => {
   if (typeof window === 'undefined') return envValue
 
   const fallback = import.meta.env.DEV ? resolveDevBaseUrl() : window.location.origin
+  const allowCrossOrigin = String(import.meta.env.VITE_ALLOW_CROSS_ORIGIN_AUTH_BASE || '')
+    .trim()
+    .toLowerCase() === 'true'
   if (!envValue) return fallback
 
   try {
     const parsed = new URL(envValue)
-    if (import.meta.env.DEV && parsed.hostname !== window.location.hostname) {
-      // Prevent localhost/127.0.0.1 host mismatches that break cookie-based auth in dev.
+    if (!allowCrossOrigin && parsed.hostname !== window.location.hostname) {
+      // Default to same-origin auth base to avoid CORS/cookie breakage from stale env values.
       return fallback
     }
-    if (import.meta.env.DEV && parsed.protocol !== window.location.protocol) {
-      // Prevent http/https mismatches in dev that surface as browser "Failed to fetch" errors.
+    if (!allowCrossOrigin && parsed.protocol !== window.location.protocol) {
+      // Prevent protocol mismatches that surface as browser "Failed to fetch" errors.
       return fallback
     }
     return normalizeBaseUrl(parsed.toString())
