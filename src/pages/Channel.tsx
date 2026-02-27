@@ -25,6 +25,33 @@ const formatDateLabel = (isoDate: string) =>
     year: '2-digit',
   })
 
+const normalizeScopedChannelId = (value: string) => {
+  const normalized = (value || '').trim()
+  if (!normalized) return ''
+  if (normalized.toLowerCase().startsWith('youtube:')) {
+    return normalized.slice('youtube:'.length).trim()
+  }
+  return normalized
+}
+
+const normalizeScopedChannelName = (value: string) => (value || '').trim().toLowerCase()
+const toMetricNumber = (value: unknown) => {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0
+}
+
+const resolvePostEngagements = (post: Record<string, unknown>) => {
+  const explicit = Number(post.engagements)
+  if (Number.isFinite(explicit) && explicit >= 0) return explicit
+  const likes = toMetricNumber(post.likes)
+  const dislikes = toMetricNumber(post.dislikes)
+  const comments = Math.max(toMetricNumber(post.comments), toMetricNumber(post.replies))
+  const shares = Math.max(toMetricNumber(post.shares), toMetricNumber(post.reposts), toMetricNumber(post.retweets))
+  const quotes = toMetricNumber(post.quotes)
+  const bookmarks = Math.max(toMetricNumber(post.bookmarks), toMetricNumber(post.saves))
+  return likes + dislikes + comments + shares + quotes + bookmarks
+}
+
 export const Channel = () => {
   const { summary } = useYouTubeSummary()
   const [startDate, setStartDate] = useState('')
@@ -45,15 +72,23 @@ export const Channel = () => {
   }, [channelOptions, selectedChannelId])
   const resolvedPosts = useMemo(() => {
     if (!channel) return summary.topPosts
+    const selectedChannelId = normalizeScopedChannelId(channel.id)
+    const selectedChannelName = normalizeScopedChannelName(channel.name)
     return summary.topPosts.filter((post) => {
-      if (post.channelId) return post.channelId === channel.id
-      if (post.channelName) return post.channelName === channel.name
-      return true
+      const postChannelId = normalizeScopedChannelId(post.channelId || '')
+      if (postChannelId && selectedChannelId && postChannelId === selectedChannelId) return true
+      const postChannelName = normalizeScopedChannelName(post.channelName || '')
+      if (postChannelName && selectedChannelName && postChannelName === selectedChannelName) return true
+      return false
     })
   }, [channel, summary.topPosts])
   const resolvedTopGeos = useMemo(() => {
     if (!channel) return summary.topGeos
-    const byChannel = summary.topGeosByChannel?.[channel.id]
+    const channelId = normalizeScopedChannelId(channel.id)
+    const byChannel =
+      summary.topGeosByChannel?.[channel.id]
+      || summary.topGeosByChannel?.[channelId]
+      || summary.topGeosByChannel?.[`youtube:${channelId}`]
     if (Array.isArray(byChannel) && byChannel.length) return byChannel
     return []
   }, [channel, summary.topGeos, summary.topGeosByChannel])
@@ -85,10 +120,43 @@ export const Channel = () => {
       .filter((point) => point.isoDate)
   }, [summary.timeSeriesByChannel, today])
   const hasPerChannelSeries = normalizedSeriesByChannel.length > 0
+  const seriesFromPosts = useMemo(() => {
+    const buckets = new Map<string, {
+      date: string
+      views: number
+      engagements: number
+      posts: number
+      watchTimeHours: number
+      followersNetChange: number
+      isoDate: string
+      label: string
+    }>()
+    resolvedPosts.forEach((post) => {
+      const isoDate = normalizeSummaryIsoDate(post.publishedAt || '', today)
+      if (!isoDate) return
+      const current = buckets.get(isoDate) ?? {
+        date: isoDate,
+        views: 0,
+        engagements: 0,
+        posts: 0,
+        watchTimeHours: 0,
+        followersNetChange: 0,
+        isoDate,
+        label: formatDateLabel(isoDate),
+      }
+      current.views += Number(post.views || 0)
+      current.engagements += resolvePostEngagements(post as unknown as Record<string, unknown>)
+      current.posts += 1
+      buckets.set(isoDate, current)
+    })
+    return [...buckets.values()].sort((left, right) => left.isoDate.localeCompare(right.isoDate))
+  }, [resolvedPosts, today])
   const activeSeries = useMemo(() => {
+    if (seriesFromPosts.length) return seriesFromPosts
     if (!channel) return normalizedPortfolioSeries
+    const selectedChannelId = normalizeScopedChannelId(channel.id)
     const scopedSeries = normalizedSeriesByChannel
-      .filter((point) => point.channelId === channel.id)
+      .filter((point) => normalizeScopedChannelId(point.channelId) === selectedChannelId)
       .map((point) => ({
         date: point.date,
         views: point.views,
@@ -103,7 +171,7 @@ export const Channel = () => {
     // Only fall back to portfolio-level trend for legacy payloads that do not provide per-channel series at all.
     if (!hasPerChannelSeries) return normalizedPortfolioSeries
     return []
-  }, [channel, hasPerChannelSeries, normalizedPortfolioSeries, normalizedSeriesByChannel])
+  }, [channel, hasPerChannelSeries, normalizedPortfolioSeries, normalizedSeriesByChannel, seriesFromPosts])
   const selectedChannelFirstVideoDate = useMemo(
     () => normalizeSummaryIsoDate(channel?.firstVideoUploadDate, today),
     [channel?.firstVideoUploadDate, today],
@@ -144,6 +212,14 @@ export const Channel = () => {
       (point) => point.isoDate >= effectiveStartDate && point.isoDate <= effectiveEndDate,
     )
   }, [activeSeries, effectiveEndDate, effectiveStartDate, hasDateBounds])
+  const filteredPosts = useMemo(() => {
+    if (!hasDateBounds) return resolvedPosts
+    return resolvedPosts.filter((post) => {
+      const isoDate = normalizeSummaryIsoDate(post.publishedAt || '', today)
+      if (!isoDate) return false
+      return isoDate >= effectiveStartDate && isoDate <= effectiveEndDate
+    })
+  }, [effectiveEndDate, effectiveStartDate, hasDateBounds, resolvedPosts, today])
   const viewsSeries = useMemo(() => {
     if (!hasDateBounds || !effectiveStartDate || !effectiveEndDate) {
       return filteredSeries.map((point) => ({ label: point.label, value: point.views }))
@@ -167,11 +243,16 @@ export const Channel = () => {
   }, [effectiveEndDate, effectiveStartDate, filteredSeries, hasDateBounds])
   const isLiveViews = true
   const hasChannel = Boolean(channel)
-  const hasPosts = resolvedPosts.length > 0
+  const hasPosts = filteredPosts.length > 0
   const hasTimeSeries = viewsSeries.length > 0
   const hasAgeDistribution = summary.ageDistribution.length > 0
   const hasGenderDistribution = summary.genderDistribution.length > 0
   const hasTopGeos = resolvedTopGeos.length > 0
+  const filteredViewsTotal = useMemo(
+    () => filteredSeries.reduce((sum, point) => sum + Number(point.views || 0), 0),
+    [filteredSeries],
+  )
+  const displayedViewsTotal = hasTimeSeries ? filteredViewsTotal : (channel?.views ?? 0)
   const pieColors = [
     'var(--primary)',
     '#FC46AA',
@@ -188,7 +269,7 @@ export const Channel = () => {
     `${value >= 0 ? '+' : '-'}${formatNumber(Math.abs(value))}`
   const viewsTrend =
     hasChannel && channelCount > 0 && portfolioViewsAverage > 0
-      ? `${formatSignedPercentChange((((channel?.views ?? 0) - portfolioViewsAverage) / portfolioViewsAverage) * 100)} vs portfolio average`
+      ? `${formatSignedPercentChange(((displayedViewsTotal - portfolioViewsAverage) / portfolioViewsAverage) * 100)} vs portfolio average`
       : ''
   const engagementDiff =
     hasChannel && channelCount > 0
@@ -246,7 +327,7 @@ export const Channel = () => {
       <div className="grid grid-3">
         <div className="card">
           <div className="kpi-label">Total Views</div>
-          <div className="kpi-value">{hasChannel ? formatNumber(channel?.views ?? 0) : ''}</div>
+          <div className="kpi-value">{hasChannel ? formatNumber(displayedViewsTotal) : ''}</div>
           <div className="kpi-trend">{viewsTrend}</div>
         </div>
         <div className="card">
@@ -353,7 +434,7 @@ export const Channel = () => {
             </thead>
             <tbody>
               {hasPosts ? (
-                resolvedPosts.map((post) => (
+                filteredPosts.map((post) => (
                   <tr key={post.id}>
                     <td>{post.title}</td>
                     <td>{post.platform}</td>

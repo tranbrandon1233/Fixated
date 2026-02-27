@@ -5223,7 +5223,7 @@ const aggregateScopedDemographicsByChannel = (sourceByChannel, allowedChannelIds
   }
 
   for (const [rawChannelId, rawRows] of Object.entries(sourceByChannel)) {
-    const channelId = normalizeTextInput(rawChannelId, { maxLength: 300 })
+    const channelId = normalizeScopedSummaryChannelId(rawChannelId)
     if (!channelId || !allowedChannelIds.has(channelId) || !Array.isArray(rawRows)) continue
     const channelValueByLabel = new Map()
     for (const row of rawRows) {
@@ -5285,30 +5285,79 @@ const resolveFirstVideoUploadDateFromChannels = (channels) => {
   return firstDates[0] || ''
 }
 
+const normalizeScopedSummaryChannelId = (value) => {
+  const normalized = normalizeTextInput(value, { maxLength: 300 })
+  if (!normalized) return ''
+  if (normalized.toLowerCase().startsWith('youtube:')) {
+    const canonical = normalizeTextInput(normalized.slice('youtube:'.length), { maxLength: 300 })
+    return canonical || normalized
+  }
+  return normalized
+}
+
 const scopeCachedSummaryToConnectedChannelIds = (summaryPayload, connectedChannelIds) => {
-  const allowedChannelIds = connectedChannelIds instanceof Set ? connectedChannelIds : new Set()
+  const allowedChannelIds = connectedChannelIds instanceof Set
+    ? new Set(
+      [...connectedChannelIds]
+        .map((value) => normalizeScopedSummaryChannelId(value))
+        .filter((value) => value),
+    )
+    : new Set()
   if (!allowedChannelIds.size) return buildEmptyYouTubeSummary()
 
-  const channels = (Array.isArray(summaryPayload?.channels) ? summaryPayload.channels : []).filter((channel) => {
-    const channelId = normalizeTextInput(channel?.id, { maxLength: 300 })
-    return Boolean(channelId && allowedChannelIds.has(channelId))
-  })
-  const topPosts = (Array.isArray(summaryPayload?.topPosts) ? summaryPayload.topPosts : [])
-    .filter((post) => {
-      const channelId = normalizeTextInput(post?.channelId, { maxLength: 300 })
-      return Boolean(channelId && allowedChannelIds.has(channelId))
+  const channels = (Array.isArray(summaryPayload?.channels) ? summaryPayload.channels : [])
+    .map((channel) => {
+      const channelId = normalizeScopedSummaryChannelId(channel?.id)
+      if (!channelId || !allowedChannelIds.has(channelId)) return null
+      return {
+        ...channel,
+        id: channelId,
+      }
     })
+    .filter((channel) => Boolean(channel))
+  const channelIdByNormalizedName = new Map(
+    channels
+      .map((channel) => {
+        const channelId = normalizeScopedSummaryChannelId(channel?.id)
+        const channelName = normalizeChannelName(channel?.name)
+        if (!channelId || !channelName) return null
+        return [channelName, channelId]
+      })
+      .filter((entry) => Array.isArray(entry) && entry[0] && entry[1]),
+  )
+  const topPosts = (Array.isArray(summaryPayload?.topPosts) ? summaryPayload.topPosts : [])
+    .map((post) => {
+      const postChannelId = normalizeScopedSummaryChannelId(post?.channelId)
+      const postChannelName = normalizeChannelName(post?.channelName)
+      const resolvedChannelId =
+        postChannelId && allowedChannelIds.has(postChannelId)
+          ? postChannelId
+          : postChannelName
+            ? channelIdByNormalizedName.get(postChannelName) || ''
+            : ''
+      if (!resolvedChannelId) return null
+      return {
+        ...post,
+        channelId: resolvedChannelId,
+      }
+    })
+    .filter((post) => Boolean(post))
     .sort((left, right) => toNumber(right?.views) - toNumber(left?.views))
   const timeSeriesByChannel = (Array.isArray(summaryPayload?.timeSeriesByChannel)
     ? summaryPayload.timeSeriesByChannel
     : [])
-    .filter((row) => {
-      const channelId = normalizeTextInput(row?.channelId, { maxLength: 300 })
-      return Boolean(channelId && allowedChannelIds.has(channelId))
+    .map((row) => {
+      const channelId = normalizeScopedSummaryChannelId(row?.channelId)
+      if (!channelId || !allowedChannelIds.has(channelId)) return null
+      return {
+        ...row,
+        channelId,
+      }
     })
+    .filter((row) => Boolean(row))
     .sort((left, right) => {
-      const leftChannel = normalizeTextInput(left?.channelId, { maxLength: 300 })
-      const rightChannel = normalizeTextInput(right?.channelId, { maxLength: 300 })
+      const leftChannel = normalizeScopedSummaryChannelId(left?.channelId)
+      const rightChannel = normalizeScopedSummaryChannelId(right?.channelId)
       const channelOrder = leftChannel.localeCompare(rightChannel)
       if (channelOrder !== 0) return channelOrder
       const leftDate = normalizeIsoDateOnly(left?.date)
@@ -5348,8 +5397,8 @@ const buildSeededYouTubeChannelMap = (seedChannels) => {
   const seededChannelById = new Map()
   for (const channel of Array.isArray(seedChannels) ? seedChannels : []) {
     const channelId =
-      normalizeTextInput(channel?.id, { maxLength: 300 })
-      || normalizeTextInput(channel?.channelId, { maxLength: 300 })
+      normalizeScopedSummaryChannelId(channel?.id)
+      || normalizeScopedSummaryChannelId(channel?.channelId)
     if (!channelId) continue
     seededChannelById.set(channelId, {
       id: channelId,
@@ -5378,7 +5427,7 @@ const includeConnectedYouTubeChannelsInSummary = (summaryPayload, connections, o
   const existingChannels = Array.isArray(baseSummary.channels) ? baseSummary.channels : []
 
   for (const channel of existingChannels) {
-    const channelId = normalizeTextInput(channel?.id, { maxLength: 300 })
+    const channelId = normalizeScopedSummaryChannelId(channel?.id)
     if (!channelId) continue
     const seeded = seededChannelById.get(channelId)
     const existingViews = Math.max(0, toNumber(channel?.views))
@@ -5411,7 +5460,7 @@ const includeConnectedYouTubeChannelsInSummary = (summaryPayload, connections, o
   }
 
   for (const connection of Array.isArray(connections) ? connections : []) {
-    const channelId = normalizeTextInput(connection?.channelId, { maxLength: 300 })
+    const channelId = normalizeScopedSummaryChannelId(connection?.channelId)
     if (!channelId) continue
     const seeded = seededChannelById.get(channelId)
     const existing = channelById.get(channelId)
@@ -5471,6 +5520,72 @@ const upsertCachedYouTubeSummaryWithConnections = async ({
     summary: summaryWithConnections,
     generatedAt,
     refreshJobId,
+  })
+}
+
+const syncCachedYouTubeSummaryToCurrentConnections = async (userId) => {
+  const normalizedUserId = normalizeTextInput(userId, { maxLength: 80 })
+  if (!isUuid(normalizedUserId)) {
+    return { ok: false, status: 400, error: 'invalid_user_id' }
+  }
+
+  const connectionsResult = await listYouTubeConnectionRowsByUserId(normalizedUserId)
+  if (!connectionsResult.ok) {
+    return {
+      ok: false,
+      status: connectionsResult.status || 500,
+      error: 'youtube_connections_read_failed',
+      payload: connectionsResult.payload ?? null,
+    }
+  }
+  const connections = connectionsResult.rows
+    .map(mapYouTubeConnectionRow)
+    .map((connection) => ({
+      ...connection,
+      channelId: normalizeScopedSummaryChannelId(connection.channelId),
+    }))
+    .filter((connection) => connection.channelId)
+
+  const cachedResult = await getCachedYouTubeSummaryByUserId(normalizedUserId)
+  if (!cachedResult.ok) {
+    return {
+      ok: false,
+      status: cachedResult.status || 500,
+      error: 'youtube_cached_summary_read_failed',
+      payload: cachedResult.payload ?? null,
+    }
+  }
+
+  const generatedAt = new Date().toISOString()
+  if (!cachedResult.row?.summary_json) {
+    if (!connections.length) {
+      return { ok: true, status: 200, row: null }
+    }
+    return upsertCachedYouTubeSummaryWithConnections({
+      userId: normalizedUserId,
+      connections,
+      generatedAt,
+    })
+  }
+
+  const baseSummary = normalizeCachedSummaryPayload(cachedResult.row.summary_json)
+  const connectedChannelIds = new Set(
+    connections
+      .map((connection) => normalizeScopedSummaryChannelId(connection.channelId))
+      .filter((channelId) => channelId),
+  )
+  const scopedSummary = connectedChannelIds.size
+    ? scopeCachedSummaryToConnectedChannelIds(baseSummary, connectedChannelIds)
+    : buildEmptyYouTubeSummary()
+  const summaryWithConnections = includeConnectedYouTubeChannelsInSummary(scopedSummary, connections, {
+    seedChannels: baseSummary.channels,
+  })
+  const refreshJobId = normalizeTextInput(cachedResult.row?.refresh_job_id, { maxLength: 80 })
+  return upsertCachedYouTubeSummary({
+    userId: normalizedUserId,
+    summary: summaryWithConnections,
+    generatedAt,
+    refreshJobId: isUuid(refreshJobId) ? refreshJobId : undefined,
   })
 }
 
@@ -5813,6 +5928,11 @@ const buildCampaignAvailableContent = async (campaignRow, options = {}) => {
       const account = youtubeAccountByChannelId.get(channelId)
       if (!account) continue
       if (postsById.has(postId)) continue
+      const likes = Math.max(0, toNumber(post.likes))
+      const dislikes = Math.max(0, toNumber(post.dislikes))
+      const comments = Math.max(0, toNumber(post.comments))
+      const shares = Math.max(0, toNumber(post.shares))
+      const engagements = Math.max(0, toNumber(post.engagements || likes + dislikes + comments + shares))
       postsById.set(postId, {
         id: postId,
         title: normalizeTextInput(post.title, { maxLength: 300 }) || 'Untitled video',
@@ -5820,6 +5940,11 @@ const buildCampaignAvailableContent = async (campaignRow, options = {}) => {
         channelId,
         channelName: formatOrganizationConnectedAccountLabel(account),
         views: Math.max(0, toNumber(post.views)),
+        likes,
+        dislikes,
+        comments,
+        shares,
+        engagements,
         engagementRate: Math.max(0, toNumber(post.engagementRate)),
       })
     }
@@ -5840,7 +5965,10 @@ const buildCampaignAvailableContent = async (campaignRow, options = {}) => {
           if (!postId) continue
           const views = Math.max(0, toNumber(video?.views))
           const likes = Math.max(0, toNumber(video?.likes))
+          const dislikes = Math.max(0, toNumber(video?.dislikes))
           const comments = Math.max(0, toNumber(video?.comments))
+          const shares = Math.max(0, toNumber(video?.shares))
+          const engagements = likes + dislikes + comments + shares
           postsById.set(postId, {
             id: postId,
             title: normalizeTextInput(video?.title, { maxLength: 300 }) || 'Untitled video',
@@ -5848,7 +5976,12 @@ const buildCampaignAvailableContent = async (campaignRow, options = {}) => {
             channelId,
             channelName: formatOrganizationConnectedAccountLabel(account),
             views,
-            engagementRate: views > 0 ? ((likes + comments) / views) * 100 : 0,
+            likes,
+            dislikes,
+            comments,
+            shares,
+            engagements,
+            engagementRate: views > 0 ? (engagements / views) * 100 : 0,
           })
         }
       } catch (error) {
@@ -8473,7 +8606,15 @@ app.delete('/api/organizations/:organizationId/connections/:connectionId', async
         })
         return
       }
-      await deleteCachedYouTubeSummaryByUserId(ownerUserId)
+      const syncSummaryResult = await syncCachedYouTubeSummaryToCurrentConnections(ownerUserId)
+      if (!syncSummaryResult.ok) {
+        res.status(syncSummaryResult.status || 500).json({
+          error: 'organization_connections_update_failed',
+          message: 'Unable to update cached YouTube summary after disconnect.',
+          details: syncSummaryResult.payload ?? null,
+        })
+        return
+      }
     }
   }
   const nextAccounts = currentAccounts.filter((account) => account.id !== connectionId)
@@ -10349,8 +10490,10 @@ const fetchYouTubeVideoIds = async (accessToken, channelId, order, maxResults) =
   }
 }
 
-const fetchYouTubeVideos = async (accessToken, videoIds) => {
+const fetchYouTubeVideos = async (accessToken, videoIds, options = {}) => {
   if (!videoIds.length) return []
+  const normalizedChannelId = normalizeTextInput(options?.channelId, { maxLength: 300 })
+  const includeAnalyticsMetrics = Boolean(options?.includeAnalyticsMetrics && normalizedChannelId)
   try {
     const params = new URLSearchParams({
       part: 'snippet,statistics',
@@ -10362,7 +10505,7 @@ const fetchYouTubeVideos = async (accessToken, videoIds) => {
     if (!response.ok) return []
     const payload = await response.json().catch(() => ({}))
     if (!Array.isArray(payload?.items)) return []
-    return payload.items.map((item) => ({
+    const videos = payload.items.map((item) => ({
       id: typeof item.id === 'string' ? item.id : '',
       title: typeof item?.snippet?.title === 'string' ? item.snippet.title.trim() : '',
       channelId: typeof item?.snippet?.channelId === 'string' ? item.snippet.channelId.trim() : '',
@@ -10370,11 +10513,85 @@ const fetchYouTubeVideos = async (accessToken, videoIds) => {
       publishedAt: typeof item?.snippet?.publishedAt === 'string' ? item.snippet.publishedAt : '',
       views: toNumber(item?.statistics?.viewCount),
       likes: toNumber(item?.statistics?.likeCount),
+      dislikes: toNumber(item?.statistics?.dislikeCount),
       comments: toNumber(item?.statistics?.commentCount),
+      shares: 0,
     }))
+    if (!includeAnalyticsMetrics) return videos
+
+    const metricsByVideoId = await fetchYouTubeAnalyticsVideoMetricsByVideoId(
+      accessToken,
+      normalizedChannelId,
+      videos.map((video) => video.id),
+    )
+    if (!metricsByVideoId.size) return videos
+    return videos.map((video) => {
+      const metrics = metricsByVideoId.get(video.id)
+      if (!metrics) return video
+      return {
+        ...video,
+        views: Math.max(0, Math.max(toNumber(video.views), toNumber(metrics.views))),
+        likes: Math.max(0, toNumber(metrics.likes)),
+        dislikes: Math.max(0, toNumber(metrics.dislikes)),
+        comments: Math.max(0, toNumber(metrics.comments)),
+        shares: Math.max(0, toNumber(metrics.shares)),
+      }
+    })
   } catch (_err) {
     return []
   }
+}
+
+const fetchYouTubeAnalyticsVideoMetricsByVideoId = async (accessToken, channelId, videoIds) => {
+  const normalizedChannelId = normalizeTextInput(channelId, { maxLength: 300 })
+  const normalizedVideoIds = [...new Set(
+    (Array.isArray(videoIds) ? videoIds : [])
+      .map((value) => normalizeTextInput(value, { maxLength: 300 }))
+      .filter((value) => value),
+  )]
+  if (!accessToken || !normalizedChannelId || !normalizedVideoIds.length) return new Map()
+
+  const end = new Date()
+  end.setDate(end.getDate() - 1)
+  const endDate = end.toISOString().slice(0, 10)
+  const metricCandidates = [
+    'views,likes,dislikes,comments,shares',
+    'views,likes,comments,shares',
+    'views,likes,comments',
+  ]
+  const metricsByVideoId = new Map()
+  for (let index = 0; index < normalizedVideoIds.length; index += 200) {
+    const idsChunk = normalizedVideoIds.slice(index, index + 200)
+    let rows = []
+    for (const metrics of metricCandidates) {
+      const payload = await fetchAnalyticsReport(accessToken, {
+        ids: `channel==${normalizedChannelId}`,
+        startDate: '2005-02-14',
+        endDate,
+        dimensions: 'video',
+        filters: `video==${idsChunk.join(',')}`,
+        metrics,
+        maxResults: String(Math.max(1, Math.min(idsChunk.length, 200))),
+      })
+      const parsedRows = parseAnalyticsRows(payload)
+      if (parsedRows.length) {
+        rows = parsedRows
+        break
+      }
+    }
+    rows.forEach((row) => {
+      const videoId = normalizeTextInput(row?.video, { maxLength: 300 })
+      if (!videoId) return
+      metricsByVideoId.set(videoId, {
+        views: Math.max(0, toNumber(row?.views)),
+        likes: Math.max(0, toNumber(row?.likes)),
+        dislikes: Math.max(0, toNumber(row?.dislikes)),
+        comments: Math.max(0, toNumber(row?.comments)),
+        shares: Math.max(0, toNumber(row?.shares)),
+      })
+    })
+  }
+  return metricsByVideoId
 }
 
 const isUsableYouTubePlaylistVideoItem = (item) => {
@@ -10455,7 +10672,10 @@ const fetchAllYouTubeVideosForChannel = async (accessToken, channelId) => {
   const chunkSize = 50
   for (let index = 0; index < allVideoIds.length; index += chunkSize) {
     const chunk = allVideoIds.slice(index, index + chunkSize)
-    const chunkVideos = await fetchYouTubeVideos(accessToken, chunk)
+    const chunkVideos = await fetchYouTubeVideos(accessToken, chunk, {
+      channelId: normalizedChannelId,
+      includeAnalyticsMetrics: true,
+    })
     videos.push(...chunkVideos)
   }
   return videos
@@ -10521,11 +10741,17 @@ const fetchOldestUploadedVideoDate = async (accessToken, uploadsPlaylistId) => {
   return oldestUploadDate
 }
 
+const resolveYouTubeVideoEngagements = (video) =>
+  Math.max(0, toNumber(video?.likes))
+  + Math.max(0, toNumber(video?.dislikes))
+  + Math.max(0, toNumber(video?.comments))
+  + Math.max(0, toNumber(video?.shares))
+
 const buildEngagementRate = (videos) => {
   const totals = videos.reduce(
     (acc, video) => {
       acc.views += video.views
-      acc.engagements += video.likes + video.comments
+      acc.engagements += resolveYouTubeVideoEngagements(video)
       return acc
     },
     { views: 0, engagements: 0 },
@@ -10559,7 +10785,7 @@ const buildTimeSeries = (videos) => {
     const isoDate = video.publishedAt.slice(0, 10)
     const current = buckets.get(isoDate) ?? createTimeSeriesAccumulator(isoDate)
     current.views += video.views
-    current.engagements += video.likes + video.comments
+    current.engagements += resolveYouTubeVideoEngagements(video)
     current.posts += 1
     buckets.set(isoDate, current)
   })
@@ -10584,7 +10810,7 @@ const buildTimeSeriesByChannel = (videos) => {
     const key = `${channelId}:${isoDate}`
     const current = buckets.get(key) ?? createTimeSeriesByChannelAccumulator(channelId, isoDate)
     current.views += toNumber(video?.views)
-    current.engagements += toNumber(video?.likes) + toNumber(video?.comments)
+    current.engagements += resolveYouTubeVideoEngagements(video)
     current.posts += 1
     buckets.set(key, current)
   })
@@ -10812,6 +11038,8 @@ const buildAnalyticsSummary = async (sessionId, connections, options = {}) => {
     const totalViews = totalRows.length ? toNumber(totalRows[0].views) : 0
 
     const timeRows = await fetchRowsForConnection([
+      { metrics: 'views,likes,dislikes,comments,shares', dimensions: 'day', sort: 'day' },
+      { metrics: 'views,likes,dislikes,comments,shares', dimensions: 'day' },
       { metrics: 'views,likes,comments', dimensions: 'day', sort: 'day' },
       { metrics: 'views,likes,comments', dimensions: 'day' },
     ], dailyRanges)
@@ -10819,7 +11047,7 @@ const buildAnalyticsSummary = async (sessionId, connections, options = {}) => {
       if (!row.day) return
       const current = timeSeriesMap.get(row.day) ?? createTimeSeriesAccumulator(row.day)
       current.views += toNumber(row.views)
-      current.engagements += toNumber(row.likes) + toNumber(row.comments)
+      current.engagements += resolveYouTubeVideoEngagements(row)
       timeSeriesMap.set(row.day, current)
       if (normalizedChannelId) {
         const key = `${normalizedChannelId}::${row.day}`
@@ -10827,7 +11055,7 @@ const buildAnalyticsSummary = async (sessionId, connections, options = {}) => {
           timeSeriesByChannelMap.get(key)
           ?? createTimeSeriesByChannelAccumulator(normalizedChannelId, row.day)
         currentByChannel.views += toNumber(row.views)
-        currentByChannel.engagements += toNumber(row.likes) + toNumber(row.comments)
+        currentByChannel.engagements += resolveYouTubeVideoEngagements(row)
         timeSeriesByChannelMap.set(key, currentByChannel)
       }
     })
@@ -11378,7 +11606,9 @@ const parseVideoReportRows = (headers, rows) => {
   const viewsIndex = findHeaderIndex(headers, ['views'])
   if (dayIndex < 0 || videoIndex < 0 || viewsIndex < 0) return []
   const likesIndex = findHeaderIndex(headers, ['likes'])
+  const dislikesIndex = findHeaderIndex(headers, ['dislikes', 'dislike'])
   const commentsIndex = findHeaderIndex(headers, ['comments'])
+  const sharesIndex = findHeaderIndex(headers, ['shares', 'share'])
 
   return rows
     .map((row) => ({
@@ -11386,7 +11616,9 @@ const parseVideoReportRows = (headers, rows) => {
       videoId: row[videoIndex]?.trim(),
       views: toNumber(row[viewsIndex]),
       likes: likesIndex >= 0 ? toNumber(row[likesIndex]) : 0,
+      dislikes: dislikesIndex >= 0 ? toNumber(row[dislikesIndex]) : 0,
       comments: commentsIndex >= 0 ? toNumber(row[commentsIndex]) : 0,
+      shares: sharesIndex >= 0 ? toNumber(row[sharesIndex]) : 0,
     }))
     .filter((row) => row.day && row.videoId)
 }
@@ -11396,7 +11628,9 @@ const parseChannelReportRows = (headers, rows) => {
   const viewsIndex = findHeaderIndex(headers, ['views'])
   if (dayIndex < 0 || viewsIndex < 0) return []
   const likesIndex = findHeaderIndex(headers, ['likes'])
+  const dislikesIndex = findHeaderIndex(headers, ['dislikes', 'dislike'])
   const commentsIndex = findHeaderIndex(headers, ['comments'])
+  const sharesIndex = findHeaderIndex(headers, ['shares', 'share'])
   const subscribersGainedIndex = findHeaderIndex(headers, [
     'subscribersGained',
     'subscribers_gained',
@@ -11417,7 +11651,9 @@ const parseChannelReportRows = (headers, rows) => {
       day: row[dayIndex]?.trim(),
       views: toNumber(row[viewsIndex]),
       likes: likesIndex >= 0 ? toNumber(row[likesIndex]) : 0,
+      dislikes: dislikesIndex >= 0 ? toNumber(row[dislikesIndex]) : 0,
       comments: commentsIndex >= 0 ? toNumber(row[commentsIndex]) : 0,
+      shares: sharesIndex >= 0 ? toNumber(row[sharesIndex]) : 0,
       subscribersGained: subscribersGainedIndex >= 0 ? toNumber(row[subscribersGainedIndex]) : null,
       subscribersLost: subscribersLostIndex >= 0 ? toNumber(row[subscribersLostIndex]) : null,
       estimatedMinutesWatched:
@@ -11572,7 +11808,7 @@ const buildReportingSummary = async (sessionId, connections, options = {}) => {
     channelRows.forEach((row) => {
       const current = timeSeriesMap.get(row.day) ?? createTimeSeriesAccumulator(row.day)
       current.views += row.views
-      current.engagements += row.likes + row.comments
+      current.engagements += resolveYouTubeVideoEngagements(row)
       current.watchTimeHours += toNumber(row.estimatedMinutesWatched) / 60
       const gained = typeof row.subscribersGained === 'number' ? row.subscribersGained : 0
       const lost = typeof row.subscribersLost === 'number' ? row.subscribersLost : 0
@@ -11584,7 +11820,7 @@ const buildReportingSummary = async (sessionId, connections, options = {}) => {
           timeSeriesByChannelMap.get(key)
           ?? createTimeSeriesByChannelAccumulator(row.channelId, row.day)
         currentByChannel.views += row.views
-        currentByChannel.engagements += row.likes + row.comments
+        currentByChannel.engagements += resolveYouTubeVideoEngagements(row)
         currentByChannel.watchTimeHours += toNumber(row.estimatedMinutesWatched) / 60
         currentByChannel.followersNetChange += gained - lost
         timeSeriesByChannelMap.set(key, currentByChannel)
@@ -11594,7 +11830,7 @@ const buildReportingSummary = async (sessionId, connections, options = {}) => {
     videoRows.forEach((row) => {
       const current = timeSeriesMap.get(row.day) ?? createTimeSeriesAccumulator(row.day)
       current.views += row.views
-      current.engagements += row.likes + row.comments
+      current.engagements += resolveYouTubeVideoEngagements(row)
       timeSeriesMap.set(row.day, current)
       if (row.channelId) {
         const key = `${row.channelId}::${row.day}`
@@ -11602,7 +11838,7 @@ const buildReportingSummary = async (sessionId, connections, options = {}) => {
           timeSeriesByChannelMap.get(key)
           ?? createTimeSeriesByChannelAccumulator(row.channelId, row.day)
         currentByChannel.views += row.views
-        currentByChannel.engagements += row.likes + row.comments
+        currentByChannel.engagements += resolveYouTubeVideoEngagements(row)
         timeSeriesByChannelMap.set(key, currentByChannel)
       }
     })
@@ -11721,19 +11957,30 @@ const buildReportingSummary = async (sessionId, connections, options = {}) => {
   const videoTotals = new Map()
   videoRows.forEach((row) => {
     const current =
-      videoTotals.get(row.videoId) ?? { views: 0, engagements: 0, channelId: row.channelId }
+      videoTotals.get(row.videoId) ?? {
+        views: 0,
+        engagements: 0,
+        likes: 0,
+        dislikes: 0,
+        comments: 0,
+        shares: 0,
+        channelId: row.channelId,
+      }
     current.views += row.views
-    current.engagements += row.likes + row.comments
+    current.engagements += resolveYouTubeVideoEngagements(row)
+    current.likes += Math.max(0, toNumber(row.likes))
+    current.dislikes += Math.max(0, toNumber(row.dislikes))
+    current.comments += Math.max(0, toNumber(row.comments))
+    current.shares += Math.max(0, toNumber(row.shares))
     videoTotals.set(row.videoId, current)
   })
 
   const topVideoIds = [...videoTotals.entries()]
     .sort((a, b) => b[1].views - a[1].views)
-    .slice(0, 10)
     .map(([videoId, info]) => ({ videoId, ...info }))
 
   const topVideoIdSet = new Set(topVideoIds.map((item) => item.videoId))
-  const videoTitleMap = new Map()
+  const videoDetailsById = new Map()
   for (const [channelId, idSet] of videoIdsByChannel.entries()) {
     const ids = [...idSet].filter((id) => topVideoIdSet.has(id))
     if (!ids.length) continue
@@ -11741,12 +11988,25 @@ const buildReportingSummary = async (sessionId, connections, options = {}) => {
     if (!connection) continue
     const { accessToken } = await resolveAccessToken(connection)
     if (!accessToken) continue
-    const details = await fetchYouTubeVideos(accessToken, ids.slice(0, 50))
-    details.forEach((video) => {
-      if (video.id) {
-        videoTitleMap.set(video.id, video.title || 'Untitled video')
-      }
-    })
+    for (let index = 0; index < ids.length; index += 50) {
+      const chunkIds = ids.slice(index, index + 50)
+      const details = await fetchYouTubeVideos(accessToken, chunkIds, {
+        channelId,
+        includeAnalyticsMetrics: true,
+      })
+      details.forEach((video) => {
+        if (video.id) {
+          videoDetailsById.set(video.id, {
+            title: video.title || 'Untitled video',
+            publishedAt: normalizeTextInput(video.publishedAt, { maxLength: 64 }),
+            likes: Math.max(0, toNumber(video.likes)),
+            dislikes: Math.max(0, toNumber(video.dislikes)),
+            comments: Math.max(0, toNumber(video.comments)),
+            shares: Math.max(0, toNumber(video.shares)),
+          })
+        }
+      })
+    }
   }
 
   const channelNameById = new Map(
@@ -11755,11 +12015,17 @@ const buildReportingSummary = async (sessionId, connections, options = {}) => {
 
   const topPosts = topVideoIds.map((item) => ({
     id: item.videoId,
-    title: videoTitleMap.get(item.videoId) || 'Untitled video',
+    title: videoDetailsById.get(item.videoId)?.title || 'Untitled video',
     platform: 'YouTube',
     channelId: item.channelId || '',
     channelName: channelNameById.get(item.channelId) || 'YouTube Channel',
     views: item.views,
+    publishedAt: videoDetailsById.get(item.videoId)?.publishedAt || '',
+    likes: Math.max(0, toNumber(videoDetailsById.get(item.videoId)?.likes ?? item.likes)),
+    dislikes: Math.max(0, toNumber(videoDetailsById.get(item.videoId)?.dislikes ?? item.dislikes)),
+    comments: Math.max(0, toNumber(videoDetailsById.get(item.videoId)?.comments ?? item.comments)),
+    shares: Math.max(0, toNumber(videoDetailsById.get(item.videoId)?.shares ?? item.shares)),
+    engagements: item.engagements,
     engagementRate: item.views ? (item.engagements / item.views) * 100 : 0,
   }))
 
@@ -11860,8 +12126,7 @@ const buildLiveYouTubeSummary = async ({
       ? resolveAccessToken
       : (connection) => ensureValidAccessToken(sessionId, connection)
   const channelSummaries = []
-  const topVideos = []
-  const recentVideos = []
+  const allVideos = []
   let firstVideoUploadDate = ''
 
   for (const connection of connections) {
@@ -11880,18 +12145,34 @@ const buildLiveYouTubeSummary = async ({
       firstVideoUploadDate = channelFirstUploadDate
     }
 
-    const topVideoIds = await fetchYouTubeVideoIds(accessToken, channelInfo.id, 'viewCount', 6)
-    const recentVideoIds = await fetchYouTubeVideoIds(accessToken, channelInfo.id, 'date', 8)
+    let channelVideos = await fetchAllYouTubeVideosForChannel(accessToken, channelInfo.id)
+    if (!channelVideos.length) {
+      const topVideoIds = await fetchYouTubeVideoIds(accessToken, channelInfo.id, 'viewCount', 6)
+      const recentVideoIds = await fetchYouTubeVideoIds(accessToken, channelInfo.id, 'date', 8)
+      const topVideoDetails = await fetchYouTubeVideos(accessToken, topVideoIds, {
+        channelId: channelInfo.id,
+        includeAnalyticsMetrics: true,
+      })
+      const recentVideoDetails = await fetchYouTubeVideos(accessToken, recentVideoIds, {
+        channelId: channelInfo.id,
+        includeAnalyticsMetrics: true,
+      })
+      const byId = new Map()
+      for (const video of [...topVideoDetails, ...recentVideoDetails]) {
+        const videoId = normalizeTextInput(video?.id, { maxLength: 300 })
+        if (!videoId) continue
+        byId.set(videoId, video)
+      }
+      channelVideos = [...byId.values()]
+    }
+    allVideos.push(...channelVideos)
 
-    const topVideoDetails = await fetchYouTubeVideos(accessToken, topVideoIds)
-    const recentVideoDetails = await fetchYouTubeVideos(accessToken, recentVideoIds)
-
-    topVideos.push(...topVideoDetails)
-    recentVideos.push(...recentVideoDetails)
-
+    const topVideoDetails = [...channelVideos]
+      .sort((left, right) => toNumber(right?.views) - toNumber(left?.views))
+      .slice(0, 6)
     const engagementRate = buildEngagementRate(topVideoDetails)
     const channelViews = toNumber(channelInfo?.statistics?.viewCount)
-    const derivedViews = [...topVideoDetails, ...recentVideoDetails].reduce(
+    const derivedViews = channelVideos.reduce(
       (max, video) => Math.max(max, toNumber(video?.views)),
       0,
     )
@@ -11913,22 +12194,36 @@ const buildLiveYouTubeSummary = async ({
     })
   }
 
-  const fallbackTopPosts = topVideos
-    .filter((video) => video.id)
-    .sort((a, b) => b.views - a.views)
-    .slice(0, 10)
+  const fallbackPostById = new Map()
+  allVideos.forEach((video) => {
+    const videoId = normalizeTextInput(video?.id, { maxLength: 300 })
+    if (!videoId) return
+    const existing = fallbackPostById.get(videoId)
+    if (existing && toNumber(existing.views) > toNumber(video?.views)) return
+    fallbackPostById.set(videoId, video)
+  })
+  const fallbackTopPosts = [...fallbackPostById.values()]
+    .sort((left, right) => toNumber(right?.views) - toNumber(left?.views))
     .map((video) => ({
-      id: video.id,
+      id: normalizeTextInput(video.id, { maxLength: 300 }),
       title: video.title || 'Untitled video',
       platform: 'YouTube',
       channelId: video.channelId || '',
       channelName: video.channelName || 'YouTube Channel',
       views: video.views,
-      engagementRate: video.views ? ((video.likes + video.comments) / video.views) * 100 : 0,
+      publishedAt: normalizeTextInput(video.publishedAt, { maxLength: 64 }),
+      uploadDate: normalizeTextInput(video.publishedAt, { maxLength: 64 }),
+      url: video.id ? `https://www.youtube.com/watch?v=${video.id}` : '',
+      likes: Math.max(0, toNumber(video.likes)),
+      dislikes: Math.max(0, toNumber(video.dislikes)),
+      comments: Math.max(0, toNumber(video.comments)),
+      shares: Math.max(0, toNumber(video.shares)),
+      engagements: resolveYouTubeVideoEngagements(video),
+      engagementRate: video.views ? (resolveYouTubeVideoEngagements(video) / video.views) * 100 : 0,
     }))
 
-  const fallbackTimeSeries = buildTimeSeries(recentVideos)
-  const fallbackTimeSeriesByChannel = buildTimeSeriesByChannel(recentVideos)
+  const fallbackTimeSeries = buildTimeSeries(allVideos)
+  const fallbackTimeSeriesByChannel = buildTimeSeriesByChannel(allVideos)
   let reportingSummary = {
     timeSeries: [],
     timeSeriesByChannel: [],
@@ -12045,11 +12340,69 @@ const buildLiveYouTubeSummary = async ({
     analyticsSummary.topGeosByChannel && Object.keys(analyticsSummary.topGeosByChannel).length
       ? analyticsSummary.topGeosByChannel
       : reportingSummary.topGeosByChannel
+  const resolvedTopPostsById = new Map(
+    fallbackTopPosts.map((post) => [
+      normalizeTextInput(post?.id, { maxLength: 300 }),
+      post,
+    ]),
+  )
+  ;(Array.isArray(reportingSummary.topPosts) ? reportingSummary.topPosts : []).forEach((post) => {
+    const postId = normalizeTextInput(post?.id, { maxLength: 300 })
+    if (!postId) return
+    const fallbackPost = resolvedTopPostsById.get(postId) || null
+    const likes = Math.max(0, toNumber(post?.likes ?? fallbackPost?.likes))
+    const dislikes = Math.max(0, toNumber(post?.dislikes ?? fallbackPost?.dislikes))
+    const comments = Math.max(0, toNumber(post?.comments ?? fallbackPost?.comments))
+    const shares = Math.max(0, toNumber(post?.shares ?? fallbackPost?.shares))
+    const engagements = Math.max(
+      0,
+      toNumber(post?.engagements ?? fallbackPost?.engagements ?? likes + dislikes + comments + shares),
+    )
+    const views = Math.max(0, toNumber(post?.views ?? fallbackPost?.views))
+    resolvedTopPostsById.set(postId, {
+      id: postId,
+      title:
+        normalizeTextInput(post?.title, { maxLength: 300 })
+        || normalizeTextInput(fallbackPost?.title, { maxLength: 300 })
+        || 'Untitled video',
+      platform: 'YouTube',
+      channelId:
+        normalizeTextInput(post?.channelId, { maxLength: 300 })
+        || normalizeTextInput(fallbackPost?.channelId, { maxLength: 300 })
+        || '',
+      channelName:
+        normalizeTextInput(post?.channelName, { maxLength: 180 })
+        || normalizeTextInput(fallbackPost?.channelName, { maxLength: 180 })
+        || 'YouTube Channel',
+      views,
+      publishedAt:
+        normalizeTextInput(post?.publishedAt, { maxLength: 64 })
+        || normalizeTextInput(fallbackPost?.publishedAt, { maxLength: 64 }),
+      uploadDate:
+        normalizeTextInput(post?.uploadDate, { maxLength: 64 })
+        || normalizeTextInput(post?.publishedAt, { maxLength: 64 })
+        || normalizeTextInput(fallbackPost?.uploadDate, { maxLength: 64 })
+        || normalizeTextInput(fallbackPost?.publishedAt, { maxLength: 64 }),
+      url:
+        normalizeTextInput(post?.url, { maxLength: 500 })
+        || normalizeTextInput(fallbackPost?.url, { maxLength: 500 })
+        || (postId ? `https://www.youtube.com/watch?v=${postId}` : ''),
+      likes,
+      dislikes,
+      comments,
+      shares,
+      engagements,
+      engagementRate: views > 0 ? (engagements / views) * 100 : 0,
+    })
+  })
+  const resolvedTopPosts = [...resolvedTopPostsById.values()]
+    .filter((post) => normalizeTextInput(post?.id, { maxLength: 300 }))
+    .sort((left, right) => toNumber(right?.views) - toNumber(left?.views))
 
   return {
     firstVideoUploadDate,
     channels: hydratedChannels,
-    topPosts: reportingSummary.topPosts.length ? reportingSummary.topPosts : fallbackTopPosts,
+    topPosts: resolvedTopPosts,
     timeSeries: resolvedTimeSeriesWithHydratedPosts,
     timeSeriesByChannel: resolvedTimeSeriesByChannelWithHydratedPosts,
     ageDistribution: analyticsSummary.ageDistribution.length
@@ -12078,6 +12431,38 @@ const buildEmptyYouTubeSummary = () => ({
   topGeos: [],
   topGeosByChannel: {},
 })
+
+const hasNonZeroYouTubeSummarySeriesRows = (rows) =>
+  Array.isArray(rows)
+  && rows.some(
+    (row) =>
+      Math.max(0, toNumber(row?.views)) > 0
+      || Math.max(0, toNumber(row?.engagements)) > 0
+      || Math.max(0, toNumber(row?.posts)) > 0,
+  )
+
+const summaryNeedsImmediateYouTubeHydration = (summary) => {
+  const channels = Array.isArray(summary?.channels) ? summary.channels : []
+  if (!channels.length) return false
+  const hasTopPosts = Array.isArray(summary?.topPosts)
+    && summary.topPosts.some(
+      (post) =>
+        Math.max(0, toNumber(post?.views)) > 0
+        || Math.max(0, toNumber(post?.engagements)) > 0
+        || Math.max(0, toNumber(post?.likes)) > 0
+        || Math.max(0, toNumber(post?.comments)) > 0
+        || Math.max(0, toNumber(post?.shares)) > 0,
+    )
+  const hasSeries = hasNonZeroYouTubeSummarySeriesRows(summary?.timeSeries)
+    || hasNonZeroYouTubeSummarySeriesRows(summary?.timeSeriesByChannel)
+  const hasChannelEngagement = channels.some((channel) => Math.max(0, toNumber(channel?.engagementRate)) > 0)
+  const hasChannelFollowers = channels.some((channel) => Math.max(0, toNumber(channel?.followers)) > 0)
+  const hasChannelWithVideos = channels.some((channel) => Math.max(0, toNumber(channel?.videoCount)) > 0)
+
+  if (hasChannelWithVideos && (!hasTopPosts || !hasSeries)) return true
+  if (!hasTopPosts && !hasSeries && !hasChannelEngagement && !hasChannelFollowers) return true
+  return false
+}
 
 const mergeYouTubeDemographicRows = (targetMap, rows) => {
   if (!Array.isArray(rows)) return
@@ -13645,6 +14030,7 @@ const normalizeXStoredPost = (value, options = {}) => {
     title,
     text,
     createdAt,
+    created_at: createdAt,
     url,
     views,
     likes,
@@ -14013,10 +14399,17 @@ const mapXRowToSummaryPart = (row, { accountNameByUserId = new Map() } = {}) => 
       views: Math.max(0, toNumber(post.views)),
       engagementRate: Math.max(0, toNumber(post.engagementRate)),
       publishedAt: normalizeTextInput(post.createdAt, { maxLength: 64 }),
+      createdAt: normalizeTextInput(post.createdAt, { maxLength: 64 }),
+      created_at: normalizeTextInput(post.createdAt, { maxLength: 64 }),
       url: normalizeTextInput(post.url, { maxLength: 500 }),
       likes: Math.max(0, toNumber(post.likes)),
       comments: Math.max(0, toNumber(post.replies)),
+      replies: Math.max(0, toNumber(post.replies)),
       shares: Math.max(0, toNumber(post.retweets)),
+      retweets: Math.max(0, toNumber(post.retweets)),
+      quotes: Math.max(0, toNumber(post.quotes)),
+      saves: Math.max(0, toNumber(post.bookmarks)),
+      bookmarks: Math.max(0, toNumber(post.bookmarks)),
       reposts: Math.max(0, toNumber(post.retweets)),
       engagements: Math.max(0, toNumber(post.engagements)),
     }))
@@ -15911,9 +16304,45 @@ const runYouTubeRefreshJob = async (jobId, userId) => {
     const generatedAt = new Date().toISOString()
     for (const [ownerUserId, ownerParts] of summaryPartsByOwner.entries()) {
       const summary = mergeYouTubeSummaryParts(ownerParts)
+      const cachedResult = await getCachedYouTubeSummaryByUserId(ownerUserId)
+      const cachedSummary =
+        cachedResult.ok && cachedResult.row?.summary_json
+          ? normalizeCachedSummaryPayload(cachedResult.row.summary_json)
+          : buildEmptyYouTubeSummary()
+      const ownerConnections = [...(ownerConnectionsByUserId.get(ownerUserId)?.values() ?? [])]
+      const hasRows = (rows) => Array.isArray(rows) && rows.length > 0
+      const hasMapRows = (value) =>
+        Boolean(value) && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length > 0
+      const resilientSummary = {
+        firstVideoUploadDate: summary.firstVideoUploadDate || cachedSummary.firstVideoUploadDate || '',
+        channels: hasRows(summary.channels) ? summary.channels : cachedSummary.channels,
+        topPosts: hasRows(summary.topPosts) ? summary.topPosts : cachedSummary.topPosts,
+        timeSeries: hasRows(summary.timeSeries) ? summary.timeSeries : cachedSummary.timeSeries,
+        timeSeriesByChannel:
+          hasRows(summary.timeSeriesByChannel) ? summary.timeSeriesByChannel : cachedSummary.timeSeriesByChannel,
+        ageDistribution: hasRows(summary.ageDistribution) ? summary.ageDistribution : cachedSummary.ageDistribution,
+        ageDistributionByChannel: hasMapRows(summary.ageDistributionByChannel)
+          ? summary.ageDistributionByChannel
+          : cachedSummary.ageDistributionByChannel,
+        genderDistribution: hasRows(summary.genderDistribution) ? summary.genderDistribution : cachedSummary.genderDistribution,
+        genderDistributionByChannel: hasMapRows(summary.genderDistributionByChannel)
+          ? summary.genderDistributionByChannel
+          : cachedSummary.genderDistributionByChannel,
+        topGeos: hasRows(summary.topGeos) ? summary.topGeos : cachedSummary.topGeos,
+        topGeosByChannel: hasMapRows(summary.topGeosByChannel)
+          ? summary.topGeosByChannel
+          : cachedSummary.topGeosByChannel,
+      }
+      const summaryWithConnections = includeConnectedYouTubeChannelsInSummary(
+        resilientSummary,
+        ownerConnections,
+        {
+          seedChannels: cachedSummary.channels,
+        },
+      )
       await upsertCachedYouTubeSummary({
         userId: ownerUserId,
-        summary,
+        summary: summaryWithConnections,
         generatedAt,
         refreshJobId: jobId,
       })
@@ -17037,7 +17466,7 @@ app.get('/api/youtube/summary', async (req, res) => {
   const channelIdsByOwnerUserId = new Map()
   for (const connection of connectionsResult.connections) {
     const ownerUserId = normalizeTextInput(connection.ownerUserId, { maxLength: 80 })
-    const channelId = normalizeTextInput(connection.channelId, { maxLength: 300 })
+    const channelId = normalizeScopedSummaryChannelId(connection.channelId)
     if (!isUuid(ownerUserId) || !channelId) continue
     const existing = channelIdsByOwnerUserId.get(ownerUserId) ?? new Set()
     existing.add(channelId)
@@ -17109,9 +17538,86 @@ app.get('/api/youtube/summary', async (req, res) => {
     mergeYouTubeSummaryParts(summaryParts),
     connectionsResult.connections,
   )
+  let resolvedSummary = summary
+  let cacheStatus = 'ready'
+  const summaryNeedsHydration = summaryNeedsImmediateYouTubeHydration(summary)
+  const hydrationCooldownMs = 2 * 60 * 1000
+  const shouldAttemptHydration =
+    summaryNeedsHydration
+    && (!latestGeneratedAtMs || (Date.now() - latestGeneratedAtMs) > hydrationCooldownMs)
+
+  if (shouldAttemptHydration) {
+    try {
+      const hydratedOwnerParts = []
+      const generatedAt = new Date().toISOString()
+      for (const [ownerUserId, allowedChannelIds] of channelIdsByOwnerUserId.entries()) {
+        const ownerConnections = connectionsResult.connections
+          .filter((connection) => normalizeTextInput(connection.ownerUserId, { maxLength: 80 }) === ownerUserId)
+          .filter((connection) => {
+            const channelId = normalizeScopedSummaryChannelId(connection.channelId)
+            return channelId && allowedChannelIds.has(channelId)
+          })
+        if (!ownerConnections.length) continue
+
+        const ownerLiveSummary = await withTimeout(
+          buildLiveYouTubeSummary({
+            sessionId: `sb-${ownerUserId}`,
+            connections: ownerConnections,
+            resolveAccessToken: (connection) => ensureValidAccessTokenForUser(ownerUserId, connection),
+          }),
+          YOUTUBE_CHANNEL_REFRESH_TIMEOUT_MS,
+          `YouTube summary hydration timed out for owner ${ownerUserId}.`,
+        )
+        const scopedOwnerSummary = scopeCachedSummaryToConnectedChannelIds(ownerLiveSummary, allowedChannelIds)
+        const ownerSummaryWithConnections = includeConnectedYouTubeChannelsInSummary(
+          scopedOwnerSummary,
+          ownerConnections,
+        )
+        if (
+          ownerSummaryWithConnections.channels.length
+          || ownerSummaryWithConnections.topPosts.length
+          || ownerSummaryWithConnections.timeSeries.length
+          || ownerSummaryWithConnections.timeSeriesByChannel.length
+        ) {
+          hydratedOwnerParts.push(ownerSummaryWithConnections)
+        }
+        await upsertCachedYouTubeSummary({
+          userId: ownerUserId,
+          summary: ownerSummaryWithConnections,
+          generatedAt,
+        })
+      }
+
+      if (hydratedOwnerParts.length) {
+        resolvedSummary = includeConnectedYouTubeChannelsInSummary(
+          mergeYouTubeSummaryParts(hydratedOwnerParts),
+          connectionsResult.connections,
+        )
+        cacheStatus = 'live'
+      }
+    } catch (hydrationError) {
+      console.error('Unable to live-hydrate YouTube summary response:', hydrationError)
+    }
+  }
+
+  if (summaryNeedsHydration) {
+    const requestBaseUrl = resolveRequestBaseUrl(req)
+    const queued = await createAndStartYouTubeRefreshJob(userId, {
+      trigger: 'summary_hydration',
+      reuseRunning: true,
+      minIntervalMs: 0,
+      requestBaseUrl,
+    })
+    if (queued?.ok) {
+      autoRefresh.queued = true
+      autoRefresh.jobId = queued.jobId
+      autoRefresh.status = queued.status
+    }
+  }
+
   res.json({
-    ...summary,
-    cacheStatus: 'ready',
+    ...resolvedSummary,
+    cacheStatus,
     generatedAt: latestGeneratedAt,
     autoRefresh: autoRefresh.queued
       ? {
@@ -17160,7 +17666,14 @@ app.post('/api/youtube/disconnect', async (req, res) => {
 
   if (!channelNames.length) {
     await deleteYouTubeConnectionsByUserId(userId)
-    await deleteCachedYouTubeSummaryByUserId(userId)
+    const syncSummaryResult = await syncCachedYouTubeSummaryToCurrentConnections(userId)
+    if (!syncSummaryResult.ok) {
+      res.status(syncSummaryResult.status || 500).json({
+        ok: false,
+        error: 'youtube_cached_summary_update_failed',
+      })
+      return
+    }
     res.json({ ok: true, remaining: 0 })
     return
   }
@@ -17175,7 +17688,14 @@ app.post('/api/youtube/disconnect', async (req, res) => {
   if (toDelete.length) {
     await deleteYouTubeConnectionsByIds(userId, toDelete.map((connection) => connection.channelId))
   }
-  await deleteCachedYouTubeSummaryByUserId(userId)
+  const syncSummaryResult = await syncCachedYouTubeSummaryToCurrentConnections(userId)
+  if (!syncSummaryResult.ok) {
+    res.status(syncSummaryResult.status || 500).json({
+      ok: false,
+      error: 'youtube_cached_summary_update_failed',
+    })
+    return
+  }
   res.json({ ok: true, remaining: remaining.length })
 })
 

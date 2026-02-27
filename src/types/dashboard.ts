@@ -45,6 +45,7 @@ export interface PostSummary {
   views: number
   engagementRate: number
   likes?: number
+  dislikes?: number
   comments?: number
   shares?: number
   saves?: number
