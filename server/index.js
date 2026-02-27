@@ -5344,32 +5344,76 @@ const scopeCachedSummaryToConnectedChannelIds = (summaryPayload, connectedChanne
   }
 }
 
-const includeConnectedYouTubeChannelsInSummary = (summaryPayload, connections) => {
+const buildSeededYouTubeChannelMap = (seedChannels) => {
+  const seededChannelById = new Map()
+  for (const channel of Array.isArray(seedChannels) ? seedChannels : []) {
+    const channelId =
+      normalizeTextInput(channel?.id, { maxLength: 300 })
+      || normalizeTextInput(channel?.channelId, { maxLength: 300 })
+    if (!channelId) continue
+    seededChannelById.set(channelId, {
+      id: channelId,
+      name:
+        normalizeTextInput(channel?.name, { maxLength: 180 })
+        || normalizeTextInput(channel?.channelName, { maxLength: 180 })
+        || '',
+      views: Math.max(0, toNumber(channel?.views)),
+      engagementRate: Math.max(0, toNumber(channel?.engagementRate)),
+      followers: Math.max(0, toNumber(channel?.followers)),
+      videoCount: Math.max(0, toNumber(channel?.videoCount)),
+      firstVideoUploadDate: normalizeIsoDateOnly(channel?.firstVideoUploadDate),
+      status: normalizeTextInput(channel?.status, { maxLength: 120 }) || '',
+    })
+  }
+  return seededChannelById
+}
+
+const includeConnectedYouTubeChannelsInSummary = (summaryPayload, connections, options = {}) => {
   const baseSummary =
     summaryPayload && typeof summaryPayload === 'object'
       ? summaryPayload
       : buildEmptyYouTubeSummary()
+  const seededChannelById = buildSeededYouTubeChannelMap(options?.seedChannels)
   const channelById = new Map()
   const existingChannels = Array.isArray(baseSummary.channels) ? baseSummary.channels : []
 
   for (const channel of existingChannels) {
     const channelId = normalizeTextInput(channel?.id, { maxLength: 300 })
     if (!channelId) continue
+    const seeded = seededChannelById.get(channelId)
+    const existingViews = Math.max(0, toNumber(channel?.views))
+    const existingEngagementRate = Math.max(0, toNumber(channel?.engagementRate))
+    const existingFollowers = Math.max(0, toNumber(channel?.followers))
+    const existingVideoCount = Math.max(0, toNumber(channel?.videoCount))
+    const seededFirstVideoDate = normalizeIsoDateOnly(seeded?.firstVideoUploadDate)
+    const channelFirstVideoDate = normalizeIsoDateOnly(channel?.firstVideoUploadDate)
     channelById.set(channelId, {
       ...channel,
       id: channelId,
-      name: normalizeTextInput(channel?.name, { maxLength: 180 }) || 'YouTube Channel',
+      name:
+        normalizeTextInput(channel?.name, { maxLength: 180 })
+        || normalizeTextInput(seeded?.name, { maxLength: 180 })
+        || 'YouTube Channel',
       platform: ORGANIZATION_CONNECTION_PLATFORM_YOUTUBE,
-      views: Math.max(0, toNumber(channel?.views)),
-      engagementRate: Math.max(0, toNumber(channel?.engagementRate)),
-      followers: Math.max(0, toNumber(channel?.followers)),
-      status: normalizeTextInput(channel?.status, { maxLength: 120 }) || 'Connected',
+      views: existingViews > 0 ? existingViews : Math.max(0, toNumber(seeded?.views)),
+      engagementRate:
+        existingEngagementRate > 0
+          ? existingEngagementRate
+          : Math.max(0, toNumber(seeded?.engagementRate)),
+      followers: existingFollowers > 0 ? existingFollowers : Math.max(0, toNumber(seeded?.followers)),
+      videoCount: Math.max(existingVideoCount, Math.max(0, toNumber(seeded?.videoCount))),
+      firstVideoUploadDate: channelFirstVideoDate || seededFirstVideoDate || '',
+      status:
+        normalizeTextInput(channel?.status, { maxLength: 120 })
+        || normalizeTextInput(seeded?.status, { maxLength: 120 })
+        || 'Connected',
     })
   }
 
   for (const connection of Array.isArray(connections) ? connections : []) {
     const channelId = normalizeTextInput(connection?.channelId, { maxLength: 300 })
     if (!channelId) continue
+    const seeded = seededChannelById.get(channelId)
     const existing = channelById.get(channelId)
     const channelName = normalizeTextInput(connection?.channelName, { maxLength: 180 })
     if (existing) {
@@ -5380,17 +5424,29 @@ const includeConnectedYouTubeChannelsInSummary = (summaryPayload, connections) =
     }
     channelById.set(channelId, {
       id: channelId,
-      name: channelName || 'YouTube Channel',
+      name: channelName || normalizeTextInput(seeded?.name, { maxLength: 180 }) || 'YouTube Channel',
       platform: ORGANIZATION_CONNECTION_PLATFORM_YOUTUBE,
-      views: 0,
-      engagementRate: 0,
-      followers: 0,
-      status: 'Connected',
+      views: Math.max(0, toNumber(seeded?.views)),
+      engagementRate: Math.max(0, toNumber(seeded?.engagementRate)),
+      followers: Math.max(0, toNumber(seeded?.followers)),
+      videoCount: Math.max(0, toNumber(seeded?.videoCount)),
+      firstVideoUploadDate: normalizeIsoDateOnly(seeded?.firstVideoUploadDate),
+      status: normalizeTextInput(seeded?.status, { maxLength: 120 }) || 'Connected',
     })
   }
 
+  const firstVideoDates = [normalizeIsoDateOnly(baseSummary.firstVideoUploadDate)]
+  for (const channel of channelById.values()) {
+    const channelDate = normalizeIsoDateOnly(channel?.firstVideoUploadDate)
+    if (channelDate) {
+      firstVideoDates.push(channelDate)
+    }
+  }
+  firstVideoDates.sort((left, right) => left.localeCompare(right))
+
   return {
     ...baseSummary,
+    firstVideoUploadDate: firstVideoDates[0] || '',
     channels: [...channelById.values()],
   }
 }
@@ -5400,13 +5456,16 @@ const upsertCachedYouTubeSummaryWithConnections = async ({
   connections,
   generatedAt,
   refreshJobId,
+  seedChannels,
 }) => {
   const cachedResult = await getCachedYouTubeSummaryByUserId(userId)
   const baseSummary =
     cachedResult.ok && cachedResult.row?.summary_json
       ? normalizeCachedSummaryPayload(cachedResult.row.summary_json)
       : buildEmptyYouTubeSummary()
-  const summaryWithConnections = includeConnectedYouTubeChannelsInSummary(baseSummary, connections)
+  const summaryWithConnections = includeConnectedYouTubeChannelsInSummary(baseSummary, connections, {
+    seedChannels,
+  })
   return upsertCachedYouTubeSummary({
     userId,
     summary: summaryWithConnections,
@@ -10205,10 +10264,23 @@ app.get('/oauth/youtube/callback', async (req, res) => {
     const cachedConnections = cachedConnectionsResult.ok
       ? cachedConnectionsResult.rows.map(mapYouTubeConnectionRow)
       : [nextConnection]
+    const hiddenSubscriberCount =
+      channelInfo?.statistics?.hiddenSubscriberCount === true
+      || channelInfo?.statistics?.hiddenSubscriberCount === 'true'
     await upsertCachedYouTubeSummaryWithConnections({
       userId: connectionOwnerUserId,
       connections: cachedConnections,
       generatedAt: new Date().toISOString(),
+      seedChannels: [{
+        id: channelInfo.id,
+        name: nextConnection.channelName,
+        platform: ORGANIZATION_CONNECTION_PLATFORM_YOUTUBE,
+        views: Math.max(0, toNumber(channelInfo?.statistics?.viewCount)),
+        engagementRate: 0,
+        followers: hiddenSubscriberCount ? 0 : Math.max(0, toNumber(channelInfo?.statistics?.subscriberCount)),
+        videoCount: Math.max(0, toNumber(channelInfo?.statistics?.videoCount)),
+        status: 'Connected',
+      }],
     })
     createAndStartYouTubeRefreshJob(connectionOwnerUserId, {
       trigger: 'connect',

@@ -10,7 +10,7 @@ import {
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { SectionHeader } from '../components/ui/SectionHeader'
 import type { CampaignApiItem } from '../utils/campaigns'
-import { getXConnectUrl, getYouTubeConnectUrl } from '../utils/auth'
+import { getInstagramConnectUrl, getXConnectUrl, getYouTubeConnectUrl } from '../utils/auth'
 import { fetchCampaigns } from '../utils/campaigns'
 import { sanitizeEmailInput, sanitizeTextInput, sanitizeTokenInput } from '../utils/sanitize'
 import type { Role } from '../types/dashboard'
@@ -661,6 +661,13 @@ export const Organizations = ({ role }: OrganizationsProps) => {
     setConnectionsError(null)
     setConnectionsSuccess(null)
     window.location.assign(getXConnectUrl({ organizationId: connectionsOrg.id, path: '/organizations' }))
+  }
+
+  const handleConnectInstagram = () => {
+    if (!connectionsOrg || !canManageConnectionsForConnectionsOrg) return
+    setConnectionsError(null)
+    setConnectionsSuccess(null)
+    window.location.assign(getInstagramConnectUrl({ organizationId: connectionsOrg.id, path: '/organizations' }))
   }
 
 
