@@ -1,27 +1,43 @@
 import { NavLink, useNavigate } from 'react-router-dom'
+import {
+  Briefcase,
+  Cast,
+  Eye,
+  FileText,
+  Building,
+  Target,
+  Settings2,
+} from 'lucide-react'
+import type { LucideIcon } from 'lucide-react'
 import type { Role } from '../../types/dashboard'
 
 interface SidebarProps {
   role: Role
 }
 
-const baseLinks = [
-  { to: '/portfolio', label: 'Portfolio' },
-  { to: '/channels', label: 'Channels' },
-  { to: '/campaigns', label: 'Campaigns' },
-  { to: '/organizations', label: 'Organizations' },
-  { to: '/reports', label: 'Reports' },
+type SidebarLink = {
+  to: string
+  label: string
+  Icon: LucideIcon
+}
+
+const baseLinks: SidebarLink[] = [
+  { to: '/portfolio', label: 'Portfolio', Icon: Briefcase },
+  { to: '/channels', label: 'Channels', Icon: Cast },
+  { to: '/campaigns', label: 'Campaigns', Icon: Target },
+  { to: '/organizations', label: 'Organizations', Icon: Building },
+  { to: '/reports', label: 'Reports', Icon: FileText },
 ]
+const settingsLink: SidebarLink = { to: '/settings', label: 'Settings', Icon: Settings2 }
+const brandLinks: SidebarLink[] = [{ to: '/report-view', label: 'Report Viewer', Icon: Eye }]
 
 export const Sidebar = ({ role }: SidebarProps) => {
   const navigate = useNavigate()
   const links =
     role === 'brand'
-      ? [
-          { to: '/report-view', label: 'Report Viewer' },
-        ]
+      ? brandLinks
       : role === 'admin'
-        ? [...baseLinks, { to: '/settings', label: 'Settings' }]
+        ? [...baseLinks, settingsLink]
         : baseLinks
 
   return (
@@ -37,7 +53,9 @@ export const Sidebar = ({ role }: SidebarProps) => {
             to={link.to}
             className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}
           >
-            <span className="dot" />
+            <span className="nav-link-icon">
+              <link.Icon size={18} strokeWidth={1.5} aria-hidden="true" />
+            </span>
             {link.label}
           </NavLink>
         ))}

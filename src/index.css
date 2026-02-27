@@ -130,7 +130,7 @@ a:focus-visible {
 .nav-link {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   padding: 10px 12px;
   border-radius: 10px;
   color: var(--muted);
@@ -149,11 +149,15 @@ a:focus-visible {
   color: var(--text);
 }
 
-.nav-link .dot {
-  height: 8px;
-  width: 8px;
-  border-radius: 999px;
-  background: var(--primary);
+.nav-link-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: inherit;
+}
+
+.nav-link-icon svg {
+  display: block;
 }
 
 .content-area {
